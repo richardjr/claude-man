@@ -1,0 +1,30 @@
+# Project definition  ->  ~/.config/claude-man/projects/<slug>.toml
+# A project EXISTS iff this file exists. Durable, secret-free, git-versionable.
+# Copy to ~/.config/claude-man/projects/landarna.toml and edit.
+
+[project]
+slug    = "landarna"
+profile = "work"            # optional; omit to inherit the default profile
+overlay = "node"            # image variant: base | python | rust | node
+extra_apt = ["jq"]          # optional: thin per-project apt layer baked at create time
+# env_file = "~/Work/landarna_environment_local"   # alternative to [project.env]
+
+[project.egress]
+mode      = "open"          # "open" (default) or "strict"
+allowlist = ["registry.yarnpkg.com", "objects.githubusercontent.com"]  # strict mode only
+
+[project.env]
+# Injected as -e KEY=VAL at run time (never baked into an image layer).
+# ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are forbidden here (they would outrank the token).
+NODE_ENV = "development"
+ENV      = "local"
+
+[[project.repos]]
+url    = "git@github.com:3ADAPT/landarna-backend.git"
+branch = "main"
+dir    = "landarna-backend"     # relative path under workspace/ -> /workspace/landarna-backend
+
+[[project.repos]]
+url    = "git@github.com:3ADAPT/landarna-client.git"
+branch = "main"
+dir    = "landarna-client"

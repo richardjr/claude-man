@@ -1,0 +1,26 @@
+"""Entry point.
+
+``claudeman`` (and ``python -m claudeman``) with no subcommand launches the TUI; with a
+subcommand it delegates to the ``claudemanctl`` CLI so both binaries share one package.
+"""
+
+from __future__ import annotations
+
+import sys
+
+_CTL_GROUPS = {"profile", "project", "sync", "image"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args and (args[0] in _CTL_GROUPS or args[0] in ("-h", "--help", "--version")):
+        from .cli import main as ctl_main
+        return ctl_main(args)
+    # Launch the TUI (textual imported lazily so the CLI/tests don't need it).
+    from .tui.app import run
+    run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

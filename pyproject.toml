@@ -1,0 +1,36 @@
+[project]
+name = "claude-man"
+version = "0.1.0"
+description = "A Textual TUI + CLI that provisions and manages hardened Docker containers, each running Claude Code under a chosen account profile, for a set of long-lived git-checkout projects."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "richard" }]
+dependencies = [
+    "textual>=0.80",
+    "tomlkit>=0.13",   # comment-preserving TOML writes; reads use stdlib tomllib
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+claudeman = "claudeman.__main__:main"        # launch the TUI
+claudemanctl = "claudeman.cli:main"          # the scriptable CLI surface
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claudeman"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

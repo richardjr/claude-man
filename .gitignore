@@ -1,0 +1,40 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.uv/
+.python-version
+
+# ---- Tooling caches ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Editor / OS ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- claude-man runtime state (must never be committed) ----
+# Profiles hold OAuth credentials; project state holds tokens / checkouts.
+# Real runtime state lives under $XDG_CONFIG_HOME/claude-man and
+# $XDG_STATE_HOME/claude-man, not in the repo. These ignores are a
+# belt-and-braces guard in case anything is generated in-tree.
+/state/
+/profiles/
+*.credentials.json
+.credentials.json
+secrets.toml
+*.local.toml
+
+# Container build scratch
+images/**/.build/

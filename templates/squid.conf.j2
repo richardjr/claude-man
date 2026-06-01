@@ -1,0 +1,26 @@
+# squid.conf for the strict-egress sidecar (Phase 4). Rendered per-project by
+# network/squid.py from network/allowlist.py + the project's egress.allowlist[].
+# CONNECT-tunnel only, no MITM/CA install, so HTTPS stays end-to-end.
+
+http_port 3128
+
+# Allowlisted destinations (base set + project extras).
+{% for host in allowlist %}
+acl allowed_dst dstdomain {{ host }}
+{% endfor %}
+
+# Only the standard TLS / HTTP ports.
+acl SSL_ports port 443
+acl Safe_ports port 80 443
+acl CONNECT method CONNECT
+
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+
+# Allow allowlisted hosts; deny (and log) everything else.
+http_access allow allowed_dst
+http_access deny all
+
+# Log denied requests so the operator can tune the allowlist from the TUI.
+access_log stdio:/dev/stdout squid
+cache deny all

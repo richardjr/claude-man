@@ -1,0 +1,19 @@
+# Account profile  ->  ~/.config/claude-man/profiles/<name>.toml
+# Secret-free. The token itself lives at ~/.local/state/claude-man/profiles/<name>/token
+# (mode 0600), minted by `claudemanctl profile add <name>` -> `claude setup-token`.
+
+[profile]
+name          = "work"
+display_name  = "Work (3ADAPT)"
+account_email = "richard@3adapt.example"   # used for the switch-time mismatch guard + TUI
+default       = false                       # set true on the profile new projects inherit
+
+[profile.seed]
+# Which host assets seed a new project's claude-config/ (pulled through the sync-back
+# denylist; .credentials.json / oauthAccount.userID are never copied).
+source  = "~/.claude"
+include = ["settings.json", "agents/", "skills/", "commands/", "plugins/"]
+
+[profile.scrub]
+# oauthAccount fields kept in the seeded .claude.json identity stub (display only).
+keep_identity_fields = ["emailAddress", "displayName", "organizationName"]

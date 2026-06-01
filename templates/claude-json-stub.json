@@ -1,0 +1,9 @@
+{
+  "hasCompletedOnboarding": true,
+  "installMethod": "native",
+  "oauthAccount": {
+    "emailAddress": "richard@3adapt.example",
+    "displayName": "Richard",
+    "organizationName": "3ADAPT"
+  }
+}
