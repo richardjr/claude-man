@@ -22,9 +22,11 @@ It exists to solve four things at once:
    diffed against a baseline and offered back to your host config behind an **accept/reject
    gate**. Credentials and identity are **never** synced.
 
-> Status: **early scaffold.** The foundations (XDG layout, container-label model, the hardened
-> `docker create` argv renderer, the sync-back denylist, the base image, config templates) are
-> implemented and tested; per-phase feature logic lands phase-by-phase per [`ROADMAP.md`](ROADMAP.md).
+> Status: **Phases 0–2 working** (2026-06-02). You can mint work/home account profiles, create
+> projects, and start / stop / shell / run Claude in hardened containers under a chosen account,
+> switch a project's account (mismatch-guarded), and watch per-account token usage. Phase 3 (full
+> lifecycle), Phase 4 (strict egress) and Phase 5 (sync-back) are next — see
+> [`ROADMAP.md`](ROADMAP.md). 48 dependency-free tests; the hardened image is `image smoke`-gated.
 
 ## How it fits together
 
@@ -58,6 +60,13 @@ uv run python -m unittest     # run the (dependency-free) unit tests
 # Build + smoke-test the hardened base image (needs docker + a claude install)
 uv run claudemanctl image build base
 uv run claudemanctl image smoke base
+
+# Mint an account profile, then create + run a project under it
+uv run claudemanctl profile add home --default     # completes `claude setup-token` (browser flow)
+uv run claudemanctl project create demo            # write registry + seed config + create container
+uv run claudemanctl project up demo                # start it
+uv run claudemanctl project shell demo             # open a shell inside (or `project claude demo`)
+uv run claudemanctl profile usage                  # per-account token usage
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the invariants any contributor (human or Claude) must keep,

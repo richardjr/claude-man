@@ -9,6 +9,13 @@ regressions).
 
 Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later ROADMAP phase).
 
+> **Resolution update (2026-06-02):** beyond the rows already marked DONE below, Phase 1-min + Phase
+> 2 resolved **WIRE-1/2/3/7** (lifecycle wiring + token loader + config seeding), **BUG-1** (env
+> coercion), **TUI-1/3/7** (start-on-DEFINED, `enter`→shell, cursor-by-slug), and **SYNC-2** (seed
+> field-patch). **IMG-1**'s fix was finalised as a **native `~/.local` install** (which also clears
+> the `claude doctor` warnings). Still open: **TUI-2** (async projects refresh), **TUI-4**, **SEC-3**
+> (one-claude guard), **SEC-6** (CLI slug validation), and the Phase 3/4/5 design notes.
+
 ## Critical
 
 | ID | Location | Finding | Fix | Status |

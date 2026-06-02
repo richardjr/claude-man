@@ -62,6 +62,31 @@ new profile's email, to stop work/home cross-contamination. The TUI surfaces tok
 warns before the ~1-year cliff (the token cannot self-refresh; a 401 in a work container means
 *re-mint*, not a code bug).
 
+**Implemented account verbs.** `profile add <name>` runs `claude auth login` (optionally `--sso`/
+`--console`/`--email`) then `claude setup-token`, stores the `0600` token, and records the account
+email from `claude auth status --json`; `profile renew` re-mints in place. **`profile verify`**
+re-checks a token against `auth status` in an isolated config dir (mirroring the container) — but an
+OAuth token only reports `authMethod: oauth_token`, *not* the account email, so verify confirms
+*validity* while the **identity is the mint-time record** (the email captured when the host was
+logged into that account). Token age is the token file's mtime (`profiles.token_age_days`).
+**Switching** a project's account is `project recreate <slug> --profile <X>`: it tears down the
+container (keeping the workspace + config binds), re-seeds the identity for the new account, and
+swaps the injected token — gated by the **email-mismatch guard** (`lifecycle.account_mismatch`),
+which refuses unless `--force` when the config dir already belongs to a different account.
+**`profile seed`** captures the host's allowlisted `~/.claude` assets into the profile's `seed/`
+(field-patching `settings.json` to strip host `hooks`/`statusLine`, excluding machine-local cruft)
+so new projects on that profile inherit them.
+
+## Token usage (per-account)
+
+`usage.py` parses each project's container transcripts (`claude-config/projects/**/*.jsonl`), summing
+only the per-message token-count fields (`input`/`output`/`cache_creation`/`cache_read`), never
+message content. Usage is attributed to each project's current profile and aggregated per account —
+the metric to watch against subscription limits. It is a **read of claude-man's own state** (host-side,
+separate from sync-back — nothing crosses the denylist boundary) and counts only usage produced
+*inside* claude-man containers, not the operator's host `~/.claude`. Surfaced via
+`claudemanctl profile usage` and a worker-refreshed TUI panel (`u` to refresh).
+
 ## Persistence + container lifecycle
 
 - **Definition:** `projects/<slug>.toml` — slug, profile, overlay (image variant), egress mode,
@@ -84,9 +109,13 @@ warns before the ~1-year cliff (the token cannot self-refresh; a 401 in a work c
 
 `debian:trixie-slim` (glibc — `claude` is a glibc native ELF; alpine/musl would need extra libs).
 Installs `ca-certificates git ripgrep curl` + node (for project tooling / MCP stdio servers), and
-bakes the **pinned native `claude` binary** to a read-only system path (NOT npm-installed at
-runtime). Creates user `agent` (uid/gid 1000) with a **real `/etc/passwd` entry** and a baked
-`/home/agent` (0755). Baked env: `HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CACHE_HOME`,
+installs the **pinned native `claude`** into the agent's own `~/.local` by running the official
+installer **as uid 1000** — the exact location `installMethod: native` and `claude doctor` expect,
+so the runtime is doctor-clean and the binary is reachable under `--read-only --user` (auto-update
+is disabled, so a read-only `~/.local` is fine; NOT npm-installed at runtime). Creates user `agent`
+(uid/gid 1000) with a **real `/etc/passwd` entry** and a baked `/home/agent` (0755). Baked env:
+`HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` (under the writable `.cache` tmpfs so
+claude's version-lock dir doesn't hit the read-only rootfs), `PATH` (prepends `~/.local/bin`),
 `USE_BUILTIN_RIPGREP=0` (use the apt ripgrep so claude never extracts a binary to a writable temp),
 `DISABLE_AUTOUPDATER=1` (auto-update can't write a read-only rootfs; claude-man owns version bumps).
 
@@ -113,7 +142,7 @@ docker create --name claude-man-<slug> \
   --tmpfs /tmp:rw,exec,nosuid,size=512m \
   --tmpfs /home/agent/.cache:rw,exec,nosuid,size=256m \
   -e HOME=/home/agent -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
-  -e XDG_CACHE_HOME=/home/agent/.cache \
+  -e XDG_CACHE_HOME=/home/agent/.cache -e XDG_STATE_HOME=/home/agent/.cache/state \
   -e USE_BUILTIN_RIPGREP=0 -e DISABLE_AUTOUPDATER=1 \
   -e CLAUDE_CODE_OAUTH_TOKEN=<profile token>  (ANTHROPIC_API_KEY/AUTH_TOKEN omitted) \
   -v <state>/projects/<slug>/claude-config:/home/agent/.claude \

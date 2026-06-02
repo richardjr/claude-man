@@ -16,7 +16,9 @@ These are security- and correctness-critical. Every change must preserve them.
    per profile on the host → a `0600` token file → injected at launch as `CLAUDE_CODE_OAUTH_TOKEN`.
    Copying `.credentials.json` triggers the known headless 401/no-refresh bug; `ANTHROPIC_*` keys
    silently outrank the OAuth token and can bill the wrong account, so they are scrubbed from the
-   rendered container env. Never pass `--bare` to the in-container `claude` (it ignores the token).
+   rendered container env — including `env_file`, which is parsed + scrubbed host-side and injected
+   as pass-through so values never reach argv. Never pass `--bare` to the in-container `claude`
+   (it ignores the token).
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, with writable
    surfaces limited to: the persistent `claude-config` bind (`/home/agent/.claude`), the persistent
@@ -42,8 +44,9 @@ These are security- and correctness-critical. Every change must preserve them.
    and every host target is **backed up before** merge. Deletions and conflicts **default to reject**.
    See `src/claudeman/syncback/denylist.py`.
 6. **One `claude` per container.** A second shell is fine; a second `claude` in the same container
-   races on `.claude.json`/session writes. The TUI's spawn paths enforce a single claude session per
-   project; don't add code paths that launch a second one.
+   races on `.claude.json`/session writes. The spawn paths *should* enforce a single claude session
+   per project, but that guard is **not yet implemented** (REVIEW SEC-3) — until it lands, don't add
+   code paths that launch a second `claude` in a live container, and avoid doing so manually.
 
 ## Project layout
 
@@ -51,17 +54,19 @@ These are security- and correctness-critical. Every change must preserve them.
 src/claudeman/
   config.py            XDG paths + all shared constants (label prefix, container/image names, baked container paths)
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
+  lifecycle.py         create / up / stop / recreate orchestration shared by the CLI + TUI (+ account-mismatch guard)
+  usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
-  registry/            projects.py, profiles.py, schema.py  — TOML definition store (tomllib read, tomlkit write)
-  docker/              labels.py (label model), runner.py (hardened `docker create` argv), status.py (live ps JOIN)
-  profiles/            setup_token.py (`claude setup-token` wrapper), identity.py (scrubbed .claude.json stub)
+  registry/            projects.py, profiles.py (load/save/default/load_token/token_age), schema.py  — TOML store
+  docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub), status.py (live ps JOIN), smoke.py (hardened-profile image gate)
+  profiles/            setup_token.py (mint/renew/verify via `claude setup-token`+`auth status`), identity.py (scrubbed stub), seed.py (claude-config seeding + host ~/.claude capture)
   checkout/            repos.py — host-side git clone/fetch into workspace/ (host PAT never enters the container)
-  network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator)
-  syncback/            denylist.py, artifacts.py, baseline.py, detect.py, diff.py, merge.py — the review-gated 3-way merge
-  tui/                 app.py, terminals.py (detached ghostty/alacritty spawn), screens/
-images/                base/Dockerfile + overlays/{python,rust,node}.Dockerfile
+  network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
+  syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
+  tui/                 app.py (projects JOIN + per-profile usage panel), terminals.py (detached ghostty/alacritty spawn), screens/
+images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
-tests/                 dependency-free unittest suite (argv renderer, denylist, registry)
+tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)
 ```
 
 Runtime state lives **outside the repo** under `~/.config/claude-man` (definitions) and
@@ -85,9 +90,20 @@ Runtime state lives **outside the repo** under `~/.config/claude-man` (definitio
 ```bash
 uv sync                       # install deps
 uv run claudemanctl --help    # CLI
-uv run claudeman              # TUI
+uv run claudeman              # TUI (projects table + per-profile token-usage panel)
 uv run python -m unittest     # tests (no deps required)
-uv run ruff check src tests   # lint
+uvx ruff@latest check src tests   # lint (ruff not in the synced env; run via uvx)
+```
+
+Key operator verbs (all under `claudemanctl`):
+
+```bash
+image build base; image smoke base                 # build + gate the hardened image
+profile add <name> [--default|--sso|--email ...]   # mint a token via `claude setup-token`
+profile list | verify <name> | usage | seed <name> # accounts: status, account check, token usage, host-config capture
+project create <slug> [--profile X] ; project up|stop|status <slug>
+project recreate <slug> [--profile X] [--force]    # rebuild / switch account (mismatch-guarded)
+project shell|claude <slug>                         # open a detached terminal into the container
 ```
 
 ## Commit & PR rules

@@ -41,7 +41,9 @@ What crosses each way, and what must never cross:
 - **No `.credentials.json` ever enters a container.** Auth is a long-lived token minted by
   `claude setup-token`, stored `0600` (dir `0700`) under `XDG_STATE`, injected per-launch as
   `CLAUDE_CODE_OAUTH_TOKEN`. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are scrubbed from the
-  rendered env so they can't silently outrank the OAuth token or bill the wrong account.
+  rendered env so they can't silently outrank the OAuth token or bill the wrong account — including
+  any `env_file`, which is parsed + scrubbed host-side (not handed to `docker --env-file`) and its
+  survivors injected as pass-through so secret values never appear in argv (`ps aux`).
 - Each profile's token dir is isolated; work and home tokens never share a file. A switch-time
   email-mismatch guard refuses to cross identities into an existing config dir.
 - The **`gh` PAT stays on the host** — repos are cloned host-side; the container only sees the

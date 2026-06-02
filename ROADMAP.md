@@ -8,6 +8,26 @@ subsystem. Each phase lists its goal and concrete deliverables. Checkboxes track
 > the hardened profile) plus the `--env-file` credential-scrub gap are addressed in the new
 > **Phase 0.5**. Lower-severity findings are folded into the phase that owns them (tagged inline).
 
+## Current status — 2026-06-02
+
+**Done & verified:** Phase 0, **Phase 0.5** (hardened image runs `claude` under `--read-only
+--user`; `image smoke` gate; native `~/.local` install so `claude doctor` is clean; `env_file`
+scrubbed), **Phase 1** (create / up / stop / shell / claude / status — a project goes from TOML to
+a running hardened container), and **Phase 2** (accounts: `profile add`/`renew`/`verify`/`seed`/
+`usage`, per-project profile, `project recreate --profile` with an email-mismatch guard, per-profile
+token-usage in the CLI + TUI). 48 dependency-free tests; ruff clean.
+
+**You can today:** mint work/home profiles, create projects on either account, start/stop/shell/run
+claude in hardened containers, switch a project's account, and watch per-account token usage.
+
+**Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the
+projects table to an async `docker ps` worker (TUI-2); the one-claude-per-container guard (SEC-3).
+**Then:** Phase 3 (delete / sync-repos / version-bump lifecycle), Phase 4 (strict egress), Phase 5
+(sync-back). Tracked lower-severity items live in [`docs/REVIEW.md`](docs/REVIEW.md).
+
+**Operator note:** containers built before the native-install image change show stale `claude
+doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
+
 ## Phase 0 — Repo scaffold + image
 **Goal:** a buildable repo and a smoke-tested hardened image, no app logic yet.
 
@@ -38,13 +58,13 @@ SEC-2, IMG-2/5, IMG-3.)
 ## Phase 1 — Runnable skeleton (one project, default profile)
 **Goal:** the TUI lists and creates a single hardened container under one default profile and opens a shell + claude in it.
 
-- [~] `registry/projects.py` read/write a single `projects/<slug>.toml`; minimal one-repo checkout (read/save done; **BUG-1**: coerce env values to `str` at parse time)
-- [~] `docker/runner.py` create/start/stop (renderer + wrappers done); `docker/status.py` the live `docker ps` JOIN — **wire `create`/`up`/`stop` into the CLI/TUI (WIRE-1, uses unused `runner.exists` WIRE-7)**; seed the `claude-config` dir first (**WIRE-3**)
-- [~] `tui/app.py`: `DataTable` JOINed with the registry — **TUI-1** branch on `Row.kind` (DEFINED→create+start) + surface returncode/stderr; **TUI-2** async ps worker; **TUI-3** fix `enter` binding shadow; **TUI-7** cursor restore by slug; **TUI-4** drop the redundant re-query
-- [x] `tui/terminals.py`: detached ghostty/alacritty spawn for `docker exec -it ... bash` and `... claude` (**SEC-6**: validate slug at the CLI boundary)
-- [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (split out of the terminals box, **TUI-5**)
-- [ ] Auth: `profiles.load_token(name)` reads a single token file injected as `CLAUDE_CODE_OAUTH_TOKEN` (manual `claude setup-token` for now, **WIRE-2**); `ANTHROPIC_*` scrubbed (incl. `env_file`, done in 0.5)
-- [ ] **SEC-3:** enforce "one claude per container" at the spawn paths (or soften the CLAUDE.md invariant-6 wording)
+- [x] `registry/projects.py` read/write/save a single `projects/<slug>.toml`; one-repo checkout (BUG-1 env coercion done)
+- [x] `docker/runner.py` create/start/stop + `docker/status.py` live JOIN, wired into the CLI/TUI via `lifecycle.py` (WIRE-1/WIRE-7); `claude-config` seeded first via `profiles/seed.py` (WIRE-3)
+- [~] `tui/app.py`: live JOIN + DEFINED→create+start with surfaced errors (TUI-1), `enter`→shell (TUI-3), cursor-by-slug (TUI-7); **still TODO:** async `docker ps` worker (TUI-2), drop the redundant re-query (TUI-4)
+- [x] `tui/terminals.py`: detached ghostty/alacritty spawn (**SEC-6** CLI-boundary slug validation still TODO)
+- [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (TUI-5)
+- [x] Auth: `profiles.load_token(name)` injects a `0600` token file as `CLAUDE_CODE_OAUTH_TOKEN`; minted by `profile add` (Phase 2); `ANTHROPIC_*` scrubbed incl. `env_file` (0.5)
+- [ ] **SEC-3:** enforce "one claude per container" at the spawn paths (guard not yet implemented; CLAUDE.md invariant 6 wording reflects this)
 
 ## Phase 2 — Profiles (work/home) + per-project default
 **Goal:** multiple account profiles with a per-project default and safe switching.
