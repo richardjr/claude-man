@@ -25,6 +25,9 @@ class DeniedPathTest(unittest.TestCase):
             "file-history/x",
             "backups/2026/x",
             "some-cache.json",
+            "settings.local.json",
+            "todos/abc.json",
+            "debug/latest",
         ):
             self.assertTrue(denylist.is_denied_path(p), f"{p} should be denied")
 

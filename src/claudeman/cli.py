@@ -25,6 +25,13 @@ def _todo(phase: int, what: str) -> int:
 # --------------------------------------------------------------------------
 # profile
 # --------------------------------------------------------------------------
+def _token_status(name: str) -> str:
+    age = profiles.token_age_days(name)
+    if age is None:
+        return "no token"
+    return f"token {int(age)}d{' EXPIRING' if age > 330 else ''}"
+
+
 def cmd_profile_list(_args) -> int:
     rows = profiles.list_profiles()
     if not rows:
@@ -33,16 +40,76 @@ def cmd_profile_list(_args) -> int:
     for p in rows:
         flag = " [default]" if p.default else ""
         email = f"  <{p.account_email}>" if p.account_email else ""
-        print(f"{p.name}{flag}{email}  {p.display_name}")
+        print(f"{p.name}{flag}{email}  [{_token_status(p.name)}]  {p.display_name}")
     return 0
 
 
 def cmd_profile_add(args) -> int:
-    return _todo(2, f"mint token for profile {args.name!r} via `claude setup-token`")
+    from .profiles import setup_token
+
+    try:
+        prof = setup_token.mint(
+            args.name, sso=args.sso, login=args.login, console=args.console,
+            email=args.email, default=args.default, display_name=args.display_name or "",
+        )
+    except Exception as exc:  # noqa: BLE001 - surface any mint/login failure to the operator
+        print(f"profile add failed: {exc}", file=sys.stderr)
+        return 1
+    suffix = " [default]" if prof.default else ""
+    print(f"profile {prof.name!r} added ({prof.account_email or 'unknown account'}){suffix}")
+    return 0
+
+
+def cmd_profile_verify(args) -> int:
+    from .profiles import setup_token
+
+    try:
+        info = setup_token.verify(args.name)
+    except Exception as exc:  # noqa: BLE001
+        print(f"verify failed: {exc}", file=sys.stderr)
+        return 1
+    try:
+        recorded = profiles.load(args.name).account_email
+    except FileNotFoundError:
+        recorded = ""
+    live_email = info.get("email", "")  # only present for interactive claude.ai logins, not OAuth tokens
+    valid = bool(info.get("loggedIn"))
+    print(f"profile {args.name!r}:")
+    print(f"  token        : {'VALID' if valid else 'INVALID/expired'} "
+          f"(auth method: {info.get('authMethod') or '?'})")
+    print(f"  account      : {recorded or '(not recorded — re-run `profile add` to capture it)'}"
+          + ("  [captured from your host login at mint time]" if recorded else ""))
+    if live_email:
+        print(f"  live account : {live_email}  sub={info.get('subscriptionType') or '?'}  "
+              f"org={info.get('orgName') or '-'}")
+        if recorded and recorded != live_email:
+            print(f"  ⚠ live {live_email!r} != recorded {recorded!r} — re-mint for the intended "
+                  f"account", file=sys.stderr)
+    else:
+        print("  note: OAuth tokens don't expose the account email via `auth status` — the live")
+        print("        check only proves the token is valid; identity is the mint-time record above.")
+    if args.raw:
+        import json as _json
+        print(_json.dumps(info, indent=2))
+    return 0
 
 
 def cmd_profile_renew(args) -> int:
-    return _todo(2, f"renew token for profile {args.name!r}")
+    from .profiles import setup_token
+
+    try:
+        setup_token.renew(args.name)
+    except FileNotFoundError:
+        print(
+            f"no profile {args.name!r}; create it with `claudemanctl profile add {args.name}`",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"profile renew failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"profile {args.name!r} token renewed")
+    return 0
 
 
 def cmd_profile_seed(args) -> int:
@@ -80,15 +147,36 @@ def cmd_project_claude(args) -> int:
 
 
 def cmd_project_create(args) -> int:
-    return _todo(1, f"create project {args.slug!r}")
+    from . import lifecycle
+
+    res = lifecycle.create_project(
+        args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress
+    )
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_up(args) -> int:
-    return _todo(1, f"bring up project {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(
+            f"no project {args.slug!r}; create it with "
+            f"`claudemanctl project create {args.slug}`",
+            file=sys.stderr,
+        )
+        return 1
+    res = lifecycle.up(projects.load(args.slug))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_stop(args) -> int:
-    return _todo(1, f"stop project {args.slug!r}")
+    from . import lifecycle
+
+    res = lifecycle.stop(args.slug)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_recreate(args) -> int:
@@ -142,7 +230,16 @@ def cmd_image_build(args) -> int:
 
 
 def cmd_image_smoke(args) -> int:
-    return _todo(0, f"smoke-test image for overlay {args.overlay!r} (`claude doctor` + one-shot)")
+    from .docker import smoke as smoke_mod
+
+    result = smoke_mod.smoke(args.overlay)
+    for line in result.lines:
+        print(line)
+    if result.ok:
+        print(f"\nimage {config.IMAGE_REPO}:{args.overlay} PASSED the hardened-profile smoke")
+        return 0
+    print(f"\nimage {config.IMAGE_REPO}:{args.overlay} FAILED the smoke", file=sys.stderr)
+    return 1
 
 
 # --------------------------------------------------------------------------
@@ -155,13 +252,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # profile
     prof = sub.add_parser("profile", help="account profiles").add_subparsers(dest="cmd", required=True)
-    pa = prof.add_parser("add", help="mint a profile token")
+    pa = prof.add_parser("add", help="mint a profile token via `claude setup-token`")
     pa.add_argument("name")
-    pa.add_argument("--default", action="store_true")
+    pa.add_argument("--default", action="store_true", help="make this the default profile")
+    pa.add_argument("--email", help="account email (else read from `claude auth status`)")
+    pa.add_argument("--display-name", dest="display_name", help="human-readable label")
+    pa.add_argument("--sso", action="store_true", help="force SSO `claude auth login` before minting")
+    pa.add_argument("--login", action="store_true", help="run `claude auth login` before minting")
+    pa.add_argument("--console", action="store_true",
+                    help="login via Anthropic Console (API billing) before minting")
     pa.set_defaults(func=cmd_profile_add)
     pr = prof.add_parser("renew", help="re-mint an expired token")
     pr.add_argument("name")
     pr.set_defaults(func=cmd_profile_renew)
+    pv = prof.add_parser("verify", help="show which account a profile's token authenticates as")
+    pv.add_argument("name")
+    pv.add_argument("--raw", action="store_true", help="also print the raw auth status JSON")
+    pv.set_defaults(func=cmd_profile_verify)
     ps = prof.add_parser("seed", help="rebuild the profile config seed")
     ps.add_argument("name")
     ps.set_defaults(func=cmd_profile_seed)

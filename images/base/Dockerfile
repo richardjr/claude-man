@@ -12,7 +12,7 @@
 
 FROM debian:trixie-slim
 
-ARG CLAUDE_VERSION=2.1.159
+ARG CLAUDE_VERSION=2.1.160
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
 RUN set -eux; \
@@ -26,22 +26,39 @@ RUN set -eux; \
     groupadd -g 1000 agent; \
     useradd  -u 1000 -g 1000 -m -d /home/agent -s /bin/bash agent
 
-# Bake the pinned native claude binary to a read-only system path, then relocate it
-# off the per-user install dir so the runtime rootfs can be read-only.
-# NOTE: the installer's layout is validated by `image smoke`; pin + re-verify per bump.
+# Bake the pinned native claude to a read-only system path reachable by uid 1000.
+#
+# The installer drops the real ELF at $HOME/.local/share/claude/versions/<v> and a SYMLINK at
+# $HOME/.local/bin/claude. We must relocate the *binary tree* (not the symlink) off /root — which
+# is mode 0700 and unreachable by the agent under --user 1000:1000 --read-only — then drop the
+# root-only install dir entirely. (Review IMG-1: the old `cp -a <symlink>` stranded the ELF under
+# /root and the build-time --version check passed only because it ran as root.)
+#
+# install.sh always bootstraps "latest", then forwards the positional arg to `claude install
+# <target>` to pin (review IMG-6) — so we assert the *resolved* version below, as the agent user.
 RUN set -eux; \
     curl -fsSL https://claude.ai/install.sh -o /tmp/install.sh; \
     HOME=/root bash /tmp/install.sh "${CLAUDE_VERSION}"; \
-    install -d /usr/local/share/claude; \
-    cp -a /root/.local/bin/claude /usr/local/bin/claude; \
-    chmod -R a+rX /usr/local/bin/claude /usr/local/share/claude; \
-    rm -f /tmp/install.sh; \
-    /usr/local/bin/claude --version
+    real="$(readlink -f /root/.local/bin/claude)"; \
+    rel="${real#/root/.local/share/claude/}"; \
+    cp -a /root/.local/share/claude /usr/local/share/claude; \
+    ln -sfn "/usr/local/share/claude/${rel}" /usr/local/bin/claude; \
+    chmod -R a+rX /usr/local/share/claude; \
+    chmod a+rx /usr/local/bin/claude; \
+    rm -rf /root/.local /root/.cache /root/.claude /tmp/install.sh; \
+    ver="$(runuser -u agent -- env HOME=/home/agent /usr/local/bin/claude --version)"; \
+    echo "claude (as agent uid 1000): ${ver}"; \
+    case "${ver}" in "${CLAUDE_VERSION}"*) : ;; \
+        *) echo "FATAL: resolved claude ${ver} != pinned ${CLAUDE_VERSION}" >&2; exit 1 ;; esac
 
 # Baked environment (also set explicitly at run time by docker/runner.py).
+# XDG_STATE_HOME points at the writable .cache tmpfs so claude's version-lock dir
+# (state/claude/locks) doesn't land on the read-only rootfs (review IMG-2). Non-persistent
+# is fine — the lock is per-session and self-recreates.
 ENV HOME=/home/agent \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     XDG_CACHE_HOME=/home/agent/.cache \
+    XDG_STATE_HOME=/home/agent/.cache/state \
     USE_BUILTIN_RIPGREP=0 \
     DISABLE_AUTOUPDATER=1
 

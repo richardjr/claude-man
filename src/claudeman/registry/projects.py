@@ -33,6 +33,17 @@ from .. import config
 from .schema import Project, Repo, ValidationError
 
 
+def _env_str(value) -> str:
+    """Coerce a TOML scalar to an env-var string (review BUG-1).
+
+    TOML allows int/float/bool in a table; docker env values must be strings. Bools become
+    lowercase ``true``/``false`` (not Python's ``True``/``False``) to match shell expectations.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _parse(data: dict, slug_hint: str | None = None) -> Project:
     proj = data.get("project")
     if not isinstance(proj, dict):
@@ -51,7 +62,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         profile=proj.get("profile"),
         overlay=proj.get("overlay", config.DEFAULT_OVERLAY),
         egress=egress_tbl.get("mode", config.DEFAULT_EGRESS),
-        env=dict(proj.get("env", {}) or {}),
+        env={k: _env_str(v) for k, v in (proj.get("env", {}) or {}).items()},
         env_file=proj.get("env_file"),
         extra_apt=tuple(proj.get("extra_apt", []) or ()),
         repos=repos,

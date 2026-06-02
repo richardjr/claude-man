@@ -28,7 +28,7 @@ EGRESS_MODES = ("open", "strict")
 
 # Pinned claude version baked into the image (override per build). Keep in sync
 # with images/base/Dockerfile's CLAUDE_VERSION ARG default.
-DEFAULT_CLAUDE_VERSION = "2.1.159"
+DEFAULT_CLAUDE_VERSION = "2.1.160"
 
 # ---------------------------------------------------------------------------
 # Baked container paths (must match images/base/Dockerfile)
@@ -38,6 +38,7 @@ CONTAINER_GID = 1000
 CONTAINER_HOME = "/home/agent"
 CONTAINER_CLAUDE_CONFIG = "/home/agent/.claude"   # = CLAUDE_CONFIG_DIR in the container
 CONTAINER_CACHE = "/home/agent/.cache"
+CONTAINER_STATE = "/home/agent/.cache/state"      # XDG_STATE_HOME (under the writable .cache tmpfs)
 CONTAINER_WORKSPACE = "/workspace"
 
 # Env keys that must NEVER be passed into a container (they would silently

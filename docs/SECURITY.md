@@ -23,7 +23,7 @@ What crosses each way, and what must never cross:
 | Direction | Allowed | Forbidden |
 |---|---|---|
 | host → container | the **one** profile's OAuth token (env), project env vars, the checked-out repos | `.credentials.json`, the `gh` PAT, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
-| container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`), refreshed token (in-place in the bind) | identity (`oauthAccount`/`userID`/`accountUuid`), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
+| container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (auth is env-injected — no token file exists in the bind to refresh back), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
 
 ## Controls
 

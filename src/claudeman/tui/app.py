@@ -14,8 +14,8 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Header, RichLog
 
-from .. import config
-from ..docker import runner, status
+from .. import lifecycle
+from ..docker import status
 from ..registry import projects
 from . import terminals
 
@@ -64,16 +64,21 @@ class ClaudeManApp(App):
 
     def refresh_projects(self) -> None:
         table = self.query_one("#projects", DataTable)
-        selected = table.cursor_row
+        # Restore the cursor by SLUG, not integer index — rows are slug-sorted and the set can
+        # change between polls, so an index restore could land on the wrong project (review TUI-7).
+        prev_slug = self._current_slug()
         table.clear()
-        for row in self._rows():
+        rows = self._rows()
+        for row in rows:
             table.add_row(
                 row.slug, row.kind, row.profile, row.egress,
                 row.repos, row.version or "-", row.status_text or "-",
                 key=row.slug,
             )
-        if selected is not None and selected < table.row_count:
-            table.move_cursor(row=selected)
+        if prev_slug is not None:
+            slugs = [r.slug for r in rows]
+            if prev_slug in slugs:
+                table.move_cursor(row=slugs.index(prev_slug))
 
     def _current_slug(self) -> str | None:
         table = self.query_one("#projects", DataTable)
@@ -104,13 +109,19 @@ class ClaudeManApp(App):
         slug = self._current_slug()
         if not slug:
             return
-        live = status.query_containers().get(slug)
-        if live and live.kind == status.UP:
-            runner.stop(slug)
-            self._log(f"[yellow]stopped[/] {slug}")
+        row = next((r for r in self._rows() if r.slug == slug), None)
+        if row is None:
+            return
+        # Branch on the joined state: UP -> stop; STOPPED -> start; DEFINED -> create-then-start.
+        # Surface the real returncode/stderr instead of always logging success (review TUI-1).
+        if row.kind == status.UP:
+            res = lifecycle.stop(slug)
+        elif projects.exists(slug):
+            res = lifecycle.up(projects.load(slug))
         else:
-            runner.start(slug)
-            self._log(f"[green]started[/] {slug}")
+            self._log(f"[red]{slug}: orphan container (no registry entry) — not managed[/]")
+            return
+        self._log(f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
         self.refresh_projects()
 
     def action_focus_logs(self) -> None:
@@ -119,8 +130,16 @@ class ClaudeManApp(App):
             self.query_one("#log", RichLog).focus()
             self._log(f"(phase 1) live log streaming for {slug} — see screens/logs.py")
 
+    def on_data_table_row_selected(self, event) -> None:
+        # Enter on a row opens a shell. The app-level `enter` binding is shadowed by DataTable's
+        # own Enter -> RowSelected handling, so we act on the message instead (review TUI-3).
+        self.action_open_shell()
+
     def action_new_project(self) -> None:
-        self._log("(phase 1) new-project form — see screens/create.py")
+        self._log(
+            "create a project with `claudemanctl project create <slug>` "
+            "(interactive form is a phase-1 follow-up) — it then appears here for start/stop/shell"
+        )
 
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")

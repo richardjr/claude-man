@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -83,6 +84,59 @@ class HardenedArgvTest(unittest.TestCase):
         self.assertIn("claude-man.slug=landarna", joined)
         self.assertIn("claude-man.profile=work", joined)
         self.assertIn("claude-man.repos=1", joined)
+
+
+class EnvFileScrubTest(unittest.TestCase):
+    """env_file values must be pass-through (not in argv) and ANTHROPIC_* must never appear."""
+
+    def test_file_env_injected_as_passthrough_not_value(self) -> None:
+        argv = runner.build_create_argv(
+            Project(slug="x"),
+            profile_name="home",
+            created_iso="t",
+            file_env={"DATABASE_URL": "postgres://secret@host/db", "NODE_ENV": "production"},
+        )
+        # Pass-through name present as an adjacent `-e KEY` pair...
+        self.assertEqual(argv[argv.index("DATABASE_URL") - 1], "-e")
+        # ...but the secret value never appears anywhere in argv.
+        self.assertFalse(any("postgres://secret@host/db" in a for a in argv))
+        self.assertNotIn("DATABASE_URL=postgres://secret@host/db", argv)
+        # --env-file is never handed to docker (that path bypassed the scrub).
+        self.assertNotIn("--env-file", argv)
+
+    def test_anthropic_keys_in_file_env_never_rendered(self) -> None:
+        argv = runner.build_create_argv(
+            Project(slug="x"),
+            profile_name="home",
+            created_iso="t",
+            file_env={"ANTHROPIC_API_KEY": "sk-leak", "ANTHROPIC_AUTH_TOKEN": "tok", "OK": "1"},
+        )
+        joined = " ".join(argv)
+        self.assertNotIn("ANTHROPIC_API_KEY", joined)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", joined)
+        self.assertNotIn("sk-leak", joined)
+        self.assertIn("OK", argv)  # the benign key still passes through
+
+    def test_read_env_file_parses_and_scrubs(self) -> None:
+        body = (
+            "# a comment\n"
+            "\n"
+            "export NODE_ENV=production\n"
+            'API_BASE="https://api.example/v1"\n'
+            "ANTHROPIC_API_KEY=sk-should-be-dropped\n"
+            "CLAUDE_CODE_OAUTH_TOKEN=should-also-drop\n"
+            "BARE_LINE_NO_EQUALS\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write(body)
+            path = fh.name
+        parsed = runner.read_env_file(path)
+        Path(path).unlink()
+        self.assertEqual(parsed["NODE_ENV"], "production")
+        self.assertEqual(parsed["API_BASE"], "https://api.example/v1")  # quotes stripped
+        self.assertNotIn("ANTHROPIC_API_KEY", parsed)
+        self.assertNotIn(OAUTH_TOKEN_ENV, parsed)
+        self.assertNotIn("BARE_LINE_NO_EQUALS", parsed)
 
 
 if __name__ == "__main__":

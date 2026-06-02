@@ -18,7 +18,9 @@ Canonical TOML shape (see templates/profile.toml.example)::
 
 from __future__ import annotations
 
+import time
 import tomllib
+from pathlib import Path
 
 from .. import config
 from .schema import Profile, ProfileSeed, ValidationError
@@ -81,6 +83,81 @@ def default_profile() -> Profile | None:
         if p.default:
             return p
     return profiles[0] if profiles else None
+
+
+def save(profile: Profile, *, make_default: bool = False) -> Path:
+    """Write a profile definition (comment-preserving via tomlkit).
+
+    When ``make_default`` is set, the ``default`` flag is cleared on every other profile first so
+    exactly one profile is ever the default.
+    """
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing profile TOML requires the 'tomlkit' dependency") from exc
+
+    if make_default:
+        _clear_other_defaults(profile.name)
+
+    doc = tomlkit.document()
+    p = tomlkit.table()
+    p["name"] = profile.name
+    if profile.display_name:
+        p["display_name"] = profile.display_name
+    if profile.account_email:
+        p["account_email"] = profile.account_email
+    p["default"] = bool(profile.default or make_default)
+    if profile.seed.include:
+        seed = tomlkit.table()
+        seed["source"] = profile.seed.source
+        seed["include"] = list(profile.seed.include)
+        p["seed"] = seed
+    doc["profile"] = p
+
+    path = config.profile_toml_path(profile.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomlkit.dumps(doc))
+    return path
+
+
+def _clear_other_defaults(except_name: str) -> None:
+    for other in list_profiles():
+        if other.name == except_name or not other.default:
+            continue
+        save(
+            Profile(
+                name=other.name,
+                display_name=other.display_name,
+                account_email=other.account_email,
+                default=False,
+                keep_identity_fields=other.keep_identity_fields,
+                seed=other.seed,
+            )
+        )
+
+
+def token_age_days(name: str) -> float | None:
+    """Days since the profile's token file was last written, or None if no token exists.
+
+    setup-token tokens last ~1 year and cannot self-refresh, so the TUI/CLI warn as this nears
+    the cliff — a 401 in a container then means *re-mint* (``profile renew``), not a code bug.
+    """
+    path = config.profile_token_path(name)
+    if not path.exists():
+        return None
+    return (time.time() - path.stat().st_mtime) / 86400.0
+
+
+def load_token(name: str) -> str | None:
+    """Read the 0600 long-lived OAuth token for a profile, or None if not minted yet.
+
+    Interim Phase-1 auth: the operator runs `claude setup-token` on the host and drops the
+    token at ``config.profile_token_path(name)``. Phase 2 mints it via ``profiles.setup_token``.
+    """
+    path = config.profile_token_path(name)
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8").strip() or None
 
 
 def resolve_for_project(project) -> Profile:

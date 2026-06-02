@@ -20,6 +20,7 @@ DENY_PATHS: tuple[str, ...] = (
     ".credentials.json",
     ".claude.json",          # identity + per-project state; never wholesale
     ".config.json",
+    "settings.local.json",   # machine-local permission grants; never synced
     "history.jsonl",
     "sessions",
     "sessions/*",
@@ -34,6 +35,10 @@ DENY_PATHS: tuple[str, ...] = (
     "file-history/*",
     "tasks",
     "tasks/*",
+    "todos",            # current dir name (legacy was tasks/); per-session todo state
+    "todos/*",
+    "debug",            # diagnostic logs + a host-absolute `latest` symlink
+    "debug/*",
     "plans",
     "plans/*",
     "session-env",

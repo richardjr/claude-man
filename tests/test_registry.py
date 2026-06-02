@@ -71,6 +71,13 @@ class RegistryTest(unittest.TestCase):
     def test_list_slugs(self) -> None:
         self.assertEqual(projects.list_slugs(), ["landarna"])
 
+    def test_env_values_coerced_to_str(self) -> None:
+        # TOML bool/int/float in [project.env] must become env strings (review BUG-1).
+        toml = '[project]\nslug = "typed"\n\n[project.env]\nDEBUG = true\nPORT = 3000\nRATIO = 1.5\n'
+        (Path(self.tmp.name) / "projects" / "typed.toml").write_text(toml)
+        p = projects.load("typed")
+        self.assertEqual(p.env, {"DEBUG": "true", "PORT": "3000", "RATIO": "1.5"})
+
     def test_load_profile_and_default(self) -> None:
         prof = profiles.load("home")
         self.assertTrue(prof.default)
