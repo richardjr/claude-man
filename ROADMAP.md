@@ -24,16 +24,15 @@ subsystem. Each phase lists its goal and concrete deliverables. Checkboxes track
 hole, before any project-create wiring is trusted. (See [`docs/REVIEW.md`](docs/REVIEW.md): IMG-1,
 SEC-2, IMG-2/5, IMG-3.)
 
-- [ ] **IMG-1 (critical):** fix the base Dockerfile so the real `claude` ELF (not the installer
-  symlink) is relocated to a read-only system path reachable by uid 1000; `rm -rf /root/.local`;
-  verify `claude --version` as the **agent** user at build time
-- [ ] **IMG-2:** bake `XDG_STATE_HOME` onto a writable surface so claude's lock dir doesn't hit the
-  read-only rootfs; **IMG-5:** bump the pin 2.1.159 → 2.1.160 (config + Dockerfile in lockstep)
-- [ ] **IMG-3:** implement `image smoke` reusing `build_create_argv`'s hardened argv — assert (as
-  uid 1000) `claude --version`, `whoami`/getpwuid, `rg` → `/usr/bin/rg`, `claude doctor`; scan for
-  `EROFS`/`getpwuid`/`Permission denied`; optional one-shot `claude -p` when a token exists
-- [ ] **SEC-2 (high):** scrub `env_file` host-side (drop `ANTHROPIC_*`/OAuth keys; inject survivors
-  as pass-through so values stay out of argv) + unit tests
+- [x] **IMG-1 (critical):** base Dockerfile installs claude **natively into the agent's `~/.local`**
+  (agent-owned, uid-1000-reachable under `--read-only --user`); `claude --version` verified as the
+  agent user at build time. The native path also keeps `claude doctor` clean — `installMethod:
+  native` is honest and there's no `/usr/local/bin/claude` "leftover npm" warning
+- [x] **IMG-2:** `XDG_STATE_HOME` baked onto the writable `.cache` tmpfs; **IMG-5:** pin → 2.1.160
+- [x] **IMG-3:** `image smoke` reuses `build_create_argv`'s hardened argv — asserts (as uid 1000)
+  `claude --version`, getpwuid, `rg`→`/usr/bin/rg`, writable `.claude` bind; one-shot `claude -p`
+  when a token exists (passes against the default profile)
+- [x] **SEC-2 (high):** `env_file` scrubbed host-side (pass-through, values out of argv) + tests
 - [ ] **IMG-4 (deferred to Phase 4 prep):** overlay toolchain caching (`COREPACK_HOME`, uv cache)
 
 ## Phase 1 — Runnable skeleton (one project, default profile)
@@ -58,7 +57,8 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
 - [x] `profiles/setup_token.py` wrapping `claude setup-token` (+ `--sso`/`--login`/`--console`/`--email`); `0600` token store; mint time = token file mtime (`profiles.token_age_days`). **Bonus:** `profile verify` (token validity + recorded account; OAuth tokens don't expose the email live, so identity is the mint-time record)
 - [x] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profiles.save` (single-default); `profile.toml` schema + default resolution
 - [x] `claude-config/` seeding from the profile `seed/` through the denylist; `profile seed` captures host `~/.claude` (settings.json field-patched per SYNC-2, cruft excluded); create/`recreate` use the effective profile
-- [~] profile column (done) + token age/expiry warning (in `profile list`/`verify`; TUI surfacing TBD); switch-time email-mismatch guard (done, `recreate --force`); docker-events-driven refresh (still polling — TUI-2)
+- [x] profile column + **per-profile token-usage panel + token age in the TUI** (`u` to refresh; worker-scanned off the UI thread) + `profile usage` CLI; switch-time email-mismatch guard (`recreate --force`)
+- [~] docker-events-driven refresh — the projects table still polls (TUI-2); the usage panel already uses a thread worker
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle
 **Goal:** projects own a set of repos, persist across restarts, and tear down cleanly.

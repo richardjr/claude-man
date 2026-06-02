@@ -9,24 +9,29 @@ form, log pane, and sync-review gate that later phases fill in.
 
 from __future__ import annotations
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import DataTable, Footer, Header, RichLog
+from textual.widgets import DataTable, Footer, Header, Label, RichLog
 
-from .. import lifecycle
+from .. import lifecycle, usage
 from ..docker import status
+from ..registry import profiles as profiles_registry
 from ..registry import projects
 from . import terminals
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
+_USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total")
 
 
 class ClaudeManApp(App):
     TITLE = "claude-man"
     CSS = """
-    DataTable { height: 1fr; }
-    RichLog { height: 10; border: round $panel; }
+    #projects { height: 1fr; }
+    #profiles { height: auto; max-height: 10; border: round $panel; }
+    .panel-title { color: $text-muted; padding: 0 1; }
+    RichLog { height: 8; border: round $panel; }
     """
     BINDINGS = [
         Binding("n", "new_project", "New"),
@@ -34,6 +39,7 @@ class ClaudeManApp(App):
         Binding("c", "open_claude", "Claude"),
         Binding("s", "toggle_running", "Start/Stop"),
         Binding("l", "focus_logs", "Logs"),
+        Binding("u", "refresh_usage", "Usage"),
         Binding("y", "sync_review", "Sync-back"),
         Binding("d", "delete_project", "Delete"),
         Binding("r", "recreate", "Recreate"),
@@ -44,15 +50,20 @@ class ClaudeManApp(App):
         yield Header()
         with Vertical():
             yield DataTable(id="projects", cursor_type="row")
+            yield Label("Token usage per profile (claude-man containers)", classes="panel-title")
+            yield DataTable(id="profiles")
             yield RichLog(id="log", highlight=True, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#projects", DataTable)
         table.add_columns(*_COLUMNS)
+        self.query_one("#profiles", DataTable).add_columns(*_USAGE_COLUMNS)
         self.refresh_projects()
+        self.refresh_usage()
         # Phase 1: poll. Phase 2 upgrades this to a `docker events` worker.
         self.set_interval(2.0, self.refresh_projects)
+        self.set_interval(15.0, self.refresh_usage)  # usage changes slowly; scan off the UI thread
 
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
@@ -79,6 +90,30 @@ class ClaudeManApp(App):
             slugs = [r.slug for r in rows]
             if prev_slug in slugs:
                 table.move_cursor(row=slugs.index(prev_slug))
+
+    @work(thread=True, exclusive=True, group="usage")
+    def refresh_usage(self) -> None:
+        """Scan transcripts + aggregate per-profile usage off the UI thread (review TUI-2 pattern)."""
+        data = usage.usage_by_profile()
+        h = usage.human
+        rows: list[tuple] = []
+        for name in sorted(data):
+            u = data[name]
+            try:
+                acct = profiles_registry.load(name).account_email or "-"
+            except FileNotFoundError:
+                acct = "-"
+            age = profiles_registry.token_age_days(name)
+            tok = "none" if age is None else (f"{int(age)}d" + ("!" if age > 330 else ""))
+            rows.append((name, acct, tok, h(u.input), h(u.output),
+                         h(u.cache_creation + u.cache_read), h(u.total)))
+        self.call_from_thread(self._render_usage, rows)
+
+    def _render_usage(self, rows: list[tuple]) -> None:
+        table = self.query_one("#profiles", DataTable)
+        table.clear()
+        for row in rows:
+            table.add_row(*row)
 
     def _current_slug(self) -> str | None:
         table = self.query_one("#projects", DataTable)
@@ -134,6 +169,10 @@ class ClaudeManApp(App):
         # Enter on a row opens a shell. The app-level `enter` binding is shadowed by DataTable's
         # own Enter -> RowSelected handling, so we act on the message instead (review TUI-3).
         self.action_open_shell()
+
+    def action_refresh_usage(self) -> None:
+        self.refresh_usage()
+        self._log("refreshing token usage …")
 
     def action_new_project(self) -> None:
         self._log(

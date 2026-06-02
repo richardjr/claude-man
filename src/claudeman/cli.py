@@ -112,6 +112,33 @@ def cmd_profile_renew(args) -> int:
     return 0
 
 
+def cmd_profile_usage(args) -> int:
+    from . import usage
+
+    by_profile = usage.usage_by_profile()
+    if not by_profile:
+        print("(no profiles defined)")
+        return 0
+    h = usage.human
+    print(f"{'PROFILE':<12} {'ACCOUNT':<24} {'IN':>8} {'OUT':>8} {'CACHE':>9} {'TOTAL':>9} {'SESS':>5}")
+    grand = usage.Usage()
+    for name in sorted(by_profile):
+        u = by_profile[name]
+        grand.add(u)
+        try:
+            acct = profiles.load(name).account_email
+        except FileNotFoundError:
+            acct = ""
+        cache = u.cache_creation + u.cache_read
+        print(f"{name:<12} {acct:<24} {h(u.input):>8} {h(u.output):>8} {h(cache):>9} "
+              f"{h(u.total):>9} {u.sessions:>5}")
+    cache = grand.cache_creation + grand.cache_read
+    print(f"{'TOTAL':<12} {'':<24} {h(grand.input):>8} {h(grand.output):>8} {h(cache):>9} "
+          f"{h(grand.total):>9} {grand.sessions:>5}")
+    print("\n(usage produced inside claude-man containers; cache = creation + read)")
+    return 0
+
+
 def cmd_profile_seed(args) -> int:
     from .profiles import seed
 
@@ -300,6 +327,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("name")
     ps.set_defaults(func=cmd_profile_seed)
     prof.add_parser("list", help="list profiles").set_defaults(func=cmd_profile_list)
+    prof.add_parser("usage", help="token usage per profile across claude-man projects").set_defaults(
+        func=cmd_profile_usage
+    )
 
     # project
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)
