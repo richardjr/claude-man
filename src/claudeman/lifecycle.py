@@ -10,6 +10,7 @@ Persistence is the default: ``stop`` never removes a container, and ``up`` is cr
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 from dataclasses import dataclass
 
@@ -88,6 +89,63 @@ def stop(slug: str) -> Result:
     if cp.returncode != 0:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
     return Result(True, f"stopped {config.container_name(slug)}")
+
+
+def account_mismatch(project: Project, profile: Profile | None) -> str | None:
+    """Return the existing seeded email if it conflicts with ``profile``'s account, else None.
+
+    The switch-time guard against work/home cross-contamination (review 2.2): a project's config
+    dir already belongs to whatever account first seeded it; pointing it at a profile for a
+    *different* account would mix identities + session state.
+    """
+    existing = seed_mod.read_seeded_email(project.slug)
+    target = profile.account_email if profile else ""
+    if existing and target and existing != target:
+        return existing
+    return None
+
+
+def recreate(slug: str, *, profile_name: str | None = None, force: bool = False) -> Result:
+    """Tear down + rebuild a project's container (keeping workspace + config binds).
+
+    With ``profile_name`` the project is switched to that profile (persisted). If the config dir
+    already belongs to a different account, the guard refuses unless ``force`` — which re-seeds the
+    identity for the new account (note: the old account's session history stays in the config dir).
+    """
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    switching = bool(profile_name and profile_name != (project.profile or ""))
+    if profile_name:
+        try:
+            profiles_registry.load(profile_name)
+        except FileNotFoundError:
+            return Result(False, f"no profile {profile_name!r}; `claudemanctl profile add {profile_name}`")
+        project = dataclasses.replace(project, profile=profile_name)
+
+    profile = effective_profile(project)
+    conflict = account_mismatch(project, profile)
+    if conflict and not force:
+        target = profile.account_email if profile else "?"
+        return Result(
+            False,
+            f"account mismatch: {slug}'s config belongs to {conflict!r} but profile "
+            f"{(profile.name if profile else '?')!r} is {target!r}. Re-run with --force to re-seed "
+            f"(the old account's session history stays in the config dir).",
+        )
+
+    if profile_name:
+        projects_registry.save(project)  # persist the switch only once past the guard
+
+    runner.remove(slug)  # rm -f; idempotent if the container is absent
+    seed_mod.seed_project_config(
+        project, profile, overwrite_identity=bool(switching or conflict or force)
+    )
+    result = up(project)
+    if not result.ok:
+        return result
+    return Result(True, f"recreated {project.container}"
+                  + (f" on profile {profile_name!r}" if profile_name else ""))
 
 
 def create_project(

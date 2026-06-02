@@ -18,6 +18,50 @@ from claudeman.registry import profiles  # noqa: E402
 from claudeman.registry.schema import Profile, Project  # noqa: E402
 
 
+class CaptureSeedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = tempfile.TemporaryDirectory()
+        self.src = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        root = Path(self.src.name)
+        (root / "agents").mkdir()
+        (root / "agents" / "rev.md").write_text("agent")
+        (root / "plugins" / "cache").mkdir(parents=True)
+        (root / "plugins" / "cache" / "junk").write_text("x")
+        (root / "plugins" / "blocklist.json").write_text("{}")
+        (root / "plugins" / "foo.md").write_text("plugin")
+        (root / "settings.json").write_text(json.dumps({
+            "hooks": {"SessionEnd": [{"hooks": [{"command": "sync-claude.sh --save"}]}]},
+            "statusLine": {"type": "command", "command": "bun x ccusage"},
+            "permissions": {"allow": ["Bash"]},
+            "oauthAccount": {"emailAddress": "x@y.io"},
+        }))
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLAUDE_MAN_STATE_HOME", None)
+        self.state.cleanup()
+        self.src.cleanup()
+
+    def test_capture_strips_hooks_and_excludes_cruft(self) -> None:
+        from claudeman.registry.schema import ProfileSeed
+        prof = Profile(
+            name="home",
+            seed=ProfileSeed(source=self.src.name, include=("settings.json", "agents/", "plugins/")),
+        )
+        captured = seed.capture_profile_seed(prof)
+        dest = config.profile_seed_dir("home")
+        self.assertIn("settings.json", captured)
+        patched = json.loads((dest / "settings.json").read_text())
+        self.assertNotIn("hooks", patched)        # host SessionEnd hook stripped
+        self.assertNotIn("statusLine", patched)   # bun statusLine stripped
+        self.assertNotIn("oauthAccount", patched)  # identity key dropped
+        self.assertIn("permissions", patched)     # real settings kept
+        self.assertTrue((dest / "agents" / "rev.md").exists())
+        self.assertTrue((dest / "plugins" / "foo.md").exists())
+        self.assertFalse((dest / "plugins" / "cache").exists())       # machine-local excluded
+        self.assertFalse((dest / "plugins" / "blocklist.json").exists())
+
+
 class SeedTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -52,6 +96,20 @@ class SeedTest(unittest.TestCase):
         (cfg / ".claude.json").write_text('{"sentinel": true}')
         seed.seed_project_config(Project(slug="demo3"), None)
         self.assertEqual(json.loads((cfg / ".claude.json").read_text()), {"sentinel": True})
+
+    def test_account_mismatch_guard_and_reseed(self) -> None:
+        from claudeman import lifecycle
+        work = Profile(name="work", account_email="w@co.com")
+        home = Profile(name="home", account_email="h@me.com")
+        project = Project(slug="acct")
+        seed.seed_project_config(project, work)
+        self.assertEqual(seed.read_seeded_email("acct"), "w@co.com")
+        # same account → no conflict; different account → returns the existing email
+        self.assertIsNone(lifecycle.account_mismatch(project, work))
+        self.assertEqual(lifecycle.account_mismatch(project, home), "w@co.com")
+        # forced re-seed switches the recorded identity to the new account
+        seed.seed_project_config(project, home, overwrite_identity=True)
+        self.assertEqual(seed.read_seeded_email("acct"), "h@me.com")
 
     def test_load_token_roundtrip(self) -> None:
         self.assertIsNone(profiles.load_token("home"))  # not minted yet

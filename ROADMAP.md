@@ -55,10 +55,10 @@ _Review notes (docs/REVIEW.md): **SYNC-2** — when seeding `claude-config/`, fi
 hook + bun statusLine co-fire in-container) and trim `plugins/` (exclude cache/data/blocklist.json);
 the profile column upgrade is also where the **TUI-2** docker-events worker lands._
 
-- [ ] `profiles/setup_token.py` wrapping `claude setup-token` (+ `--sso` path); `0600` token store + `profiles.lock` with mint time
-- [ ] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profile.toml` schema + default resolution
-- [ ] `claude-config/` seeding from the profile `seed/` through the denylist; create/recreate use the effective profile
-- [ ] TUI profile column + token age/expiry warning; switch-time email-mismatch guard; docker-events-driven refresh
+- [x] `profiles/setup_token.py` wrapping `claude setup-token` (+ `--sso`/`--login`/`--console`/`--email`); `0600` token store; mint time = token file mtime (`profiles.token_age_days`). **Bonus:** `profile verify` (token validity + recorded account; OAuth tokens don't expose the email live, so identity is the mint-time record)
+- [x] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profiles.save` (single-default); `profile.toml` schema + default resolution
+- [x] `claude-config/` seeding from the profile `seed/` through the denylist; `profile seed` captures host `~/.claude` (settings.json field-patched per SYNC-2, cruft excluded); create/`recreate` use the effective profile
+- [~] profile column (done) + token age/expiry warning (in `profile list`/`verify`; TUI surfacing TBD); switch-time email-mismatch guard (done, `recreate --force`); docker-events-driven refresh (still polling — TUI-2)
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle
 **Goal:** projects own a set of repos, persist across restarts, and tear down cleanly.

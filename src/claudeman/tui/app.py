@@ -148,7 +148,13 @@ class ClaudeManApp(App):
         self._log("(phase 3) delete confirm modal — see ROADMAP.md")
 
     def action_recreate(self) -> None:
-        self._log("(phase 3) recreate (version bump) — see ROADMAP.md")
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            return
+        self._log(f"recreating {slug} …")
+        res = lifecycle.recreate(slug)
+        self._log(f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
+        self.refresh_projects()
 
 
 def run() -> None:

@@ -113,7 +113,27 @@ def cmd_profile_renew(args) -> int:
 
 
 def cmd_profile_seed(args) -> int:
-    return _todo(2, f"rebuild config seed for profile {args.name!r}")
+    from .profiles import seed
+
+    try:
+        prof = profiles.load(args.name)
+    except FileNotFoundError:
+        print(
+            f"no profile {args.name!r}; create it with `claudemanctl profile add {args.name}`",
+            file=sys.stderr,
+        )
+        return 1
+    captured = seed.capture_profile_seed(prof)
+    dest = config.profile_seed_dir(args.name)
+    if not captured:
+        print(f"nothing to capture from {prof.seed.source} "
+              f"(include: {', '.join(prof.seed.include) or 'none'})")
+        return 0
+    print(f"captured into {dest}:")
+    for item in captured:
+        print(f"  {item}")
+    print("new projects on this profile inherit these (settings.json hooks/statusLine stripped)")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -180,7 +200,14 @@ def cmd_project_stop(args) -> int:
 
 
 def cmd_project_recreate(args) -> int:
-    return _todo(3, f"recreate project {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    res = lifecycle.recreate(args.slug, profile_name=args.profile, force=args.force)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_sync_repos(args) -> int:
@@ -285,7 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
     for name, func, helptext in [
         ("up", cmd_project_up, "create-if-needed + start"),
         ("stop", cmd_project_stop, "stop the container"),
-        ("recreate", cmd_project_recreate, "rebuild + recreate"),
         ("sync-repos", cmd_project_sync_repos, "git fetch each repo"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
         ("claude", cmd_project_claude, "run claude in a new terminal"),
@@ -296,6 +322,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug")
         sp.set_defaults(func=func)
+    prc = proj.add_parser("recreate", help="rebuild the container (optionally switch profile)")
+    prc.add_argument("slug")
+    prc.add_argument("--profile", help="switch the project to this profile (account)")
+    prc.add_argument("--force", action="store_true",
+                     help="override the account-mismatch guard and re-seed the identity")
+    prc.set_defaults(func=cmd_project_recreate)
     pst = proj.add_parser("status", help="live status JOINed with the registry")
     pst.add_argument("slug", nargs="?")
     pst.set_defaults(func=cmd_project_status)
