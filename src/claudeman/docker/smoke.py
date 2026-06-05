@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from .. import config
 from ..registry import profiles as profiles_registry
 from ..registry.schema import Project
-from . import runner
+from . import images, runner
 
 # Substrings in any probe's combined output that fail the smoke regardless of exit code.
 _FORBIDDEN = (
@@ -112,9 +112,8 @@ def smoke(overlay: str) -> SmokeResult:
     if shutil.which("docker") is None:
         res.lines.append("docker not found on PATH")
         return res
-    image = f"{config.IMAGE_REPO}:{overlay}"
-    if subprocess.run(["docker", "image", "inspect", image],
-                      capture_output=True, check=False).returncode != 0:
+    image = config.image_tag(overlay)
+    if not images.image_exists(overlay):
         res.lines.append(f"image {image!r} not built — run `claudemanctl image build {overlay}`")
         return res
 

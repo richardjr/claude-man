@@ -8,6 +8,8 @@ profile = "work"            # optional; omit to inherit the default profile
 overlay = "node"            # image variant: base | python | rust | node
 extra_apt = ["jq"]          # optional: thin per-project apt layer baked at create time
 # env_file = "~/Work/landarna_environment_local"   # alternative to [project.env]
+# workdir = "landarna-backend"   # where claude/shell launch (docker exec -w). Omit to use a lone
+#                                # repo's dir automatically; a multi-repo project defaults to /workspace.
 
 [project.egress]
 mode      = "open"          # "open" (default) or "strict"
@@ -28,3 +30,26 @@ dir    = "landarna-backend"     # relative path under workspace/ -> /workspace/l
 url    = "git@github.com:3ADAPT/landarna-client.git"
 branch = "main"
 dir    = "landarna-client"
+
+# Environment mounts -> host material made available INSIDE the container for the agent's own
+# runtime / git-over-ssh. PATHS ONLY (never a secret value). Mounts are fixed at container create,
+# so a change needs `project recreate`. Manage with `project env add/rm/list` + `project resync`.
+
+# ssh: forward the host ssh-agent (private keys stay on the host) + seed ~/.ssh/{config,known_hosts}.
+[[project.env_mount]]
+kind = "ssh"
+
+# file: bind a host file at an absolute container path (read-only by default).
+[[project.env_mount]]
+kind = "file"
+src  = "~/.netrc"                 # host path (~ and $VARS expanded host-side)
+dst  = "/home/agent/.netrc"       # absolute container path (a trailing "/" appends the src basename)
+# ro = false                      # opt-in writable (default true)
+
+# A workspace-root CLAUDE.md (above the per-repo ones) — /workspace/<path> is allowed; the nested
+# mountpoint is pre-created operator-owned. (Bare /home/agent/.claude, /tmp, /home/agent/.cache,
+# /home/agent/.ssh, /home/agent/.local are reserved.)
+[[project.env_mount]]
+kind = "file"
+src  = "~/Work/CLAUDE.md"
+dst  = "/workspace/CLAUDE.md"

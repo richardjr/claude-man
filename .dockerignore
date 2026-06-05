@@ -1,0 +1,13 @@
+# The base/overlay Dockerfiles COPY nothing, so the build context is only validated, not read.
+# Still, docker/images.py passes the whole repo root as context — keep the tarball the daemon
+# receives tiny (the venv alone is ~18M) so an auto-build from the TUI stays snappy.
+.git/
+.venv/
+**/__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/

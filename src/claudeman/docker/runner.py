@@ -46,6 +46,32 @@ _BAKED_ENV = {
 }
 
 
+def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[str]:
+    """Render the project's env-mounts as docker args. PURELY ADDITIVE — never emits a ``_HARDENING``
+    flag, so the hardened floor is byte-identical with or without env-mounts (invariant 2).
+
+    ``file`` → a ``-v src:dst[:ro]`` bind (read-only by default). ``ssh`` → a ``0700`` writable
+    ``~/.ssh`` tmpfs (the one ssh-conditional writable surface) plus, when ``ssh_auth_sock`` is set,
+    a read-only bind of the host agent socket + ``SSH_AUTH_SOCK`` pointing at it. Private keys never
+    enter the container — the host agent signs (the socket path is a path, not a secret).
+    """
+    args: list[str] = []
+    for m in project.env_mount:
+        if m.error:  # a load-time-invalid (flagged) mount never reaches docker
+            continue
+        if m.kind == "file":
+            suffix = ":ro" if m.ro else ""
+            args += ["-v", f"{m.resolved_src()}:{m.dst}{suffix}"]
+        elif m.kind == "ssh":
+            args += ["--tmpfs",
+                     f"{config.CONTAINER_SSH_DIR}:rw,nosuid,mode=0700,"
+                     f"uid={config.CONTAINER_UID},gid={config.CONTAINER_GID},size=1m"]
+            if ssh_auth_sock:
+                args += ["-v", f"{ssh_auth_sock}:{config.CONTAINER_SSH_AGENT_SOCK}:ro"]
+                args += ["-e", f"SSH_AUTH_SOCK={config.CONTAINER_SSH_AGENT_SOCK}"]
+    return args
+
+
 def build_create_argv(
     project: Project,
     *,
@@ -56,6 +82,7 @@ def build_create_argv(
     workspace_path: str | None = None,
     inject_token: bool = True,
     file_env: dict[str, str] | None = None,
+    ssh_auth_sock: str | None = None,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
 
@@ -100,6 +127,8 @@ def build_create_argv(
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
     argv += ["-v", f"{ws_path}:{config.CONTAINER_WORKSPACE}"]
+    # Env-mounts (ssh + files) — additive only; the hardened floor above is untouched.
+    argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
     argv += [project.image, "sleep", "infinity"]
@@ -110,7 +139,16 @@ def build_create_argv(
 # Thin execution wrappers (need a docker daemon; not unit-tested)
 # ---------------------------------------------------------------------------
 def _run(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        # The binary (docker/git) isn't on PATH. Surface it as a non-zero result — like a 127
+        # "command not found" — so every caller (CLI, the synchronous UI actions, and the TUI
+        # create worker) logs a red line instead of an uncaught FileNotFoundError tearing down
+        # the process. 127 is the conventional shell exit code for a missing command.
+        return subprocess.CompletedProcess(
+            argv, 127, stdout="", stderr=f"{argv[0]!r} not found on PATH"
+        )
 
 
 def read_env_file(path: str) -> dict[str, str]:
@@ -162,9 +200,15 @@ def create(
     works, but in-container ``claude`` won't authenticate.
     """
     file_env = read_env_file(project.env_file) if project.env_file else {}
+    # Resolve the host ssh-agent socket only if an ssh env-mount is configured (the socket PATH is not
+    # a secret; the private keys stay in the host agent — agent-forward).
+    ssh_sock = (
+        os.environ.get("SSH_AUTH_SOCK")
+        if any(m.kind == "ssh" for m in project.env_mount) else None
+    )
     argv = build_create_argv(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
-        file_env=file_env, inject_token=bool(token),
+        file_env=file_env, inject_token=bool(token), ssh_auth_sock=ssh_sock,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:
@@ -173,6 +217,28 @@ def create(
         env[OAUTH_TOKEN_ENV] = token
     env.update(file_env)
     return _run(argv, env=env)
+
+
+def is_running(slug: str) -> bool:
+    cp = _run(["docker", "inspect", "-f", "{{.State.Running}}", config.container_name(slug)])
+    return cp.returncode == 0 and cp.stdout.strip() == "true"
+
+
+def exec_write_file(slug: str, container_path: str, data: bytes, *, mode: str = "600"):
+    """Write ``data`` into ``container_path`` inside the running container via ``docker exec -i`` stdin.
+
+    Used to seed the ssh ~/.ssh tmpfs (config/known_hosts): ``docker cp`` into a ``--read-only``
+    container fails ("container rootfs is marked read-only" — verified), but an exec writing to a
+    writable tmpfs as the container uid works. Bytes mode (no ``text=``) so binary content is exact.
+    """
+    try:
+        return subprocess.run(
+            ["docker", "exec", "-i", config.container_name(slug), "sh", "-c",
+             f"cat > {container_path} && chmod {mode} {container_path}"],
+            input=data, capture_output=True, check=False,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess([], 127, stdout=b"", stderr=b"docker not found")
 
 
 def start(slug: str) -> subprocess.CompletedProcess:

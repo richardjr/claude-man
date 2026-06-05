@@ -11,7 +11,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from claudeman.docker import runner  # noqa: E402
 from claudeman.docker.runner import OAUTH_TOKEN_ENV  # noqa: E402
-from claudeman.registry.schema import Project, Repo  # noqa: E402
+from claudeman.registry.schema import EnvMount, Project, Repo  # noqa: E402
+
+
+def _contains_sublist(big: list, small: list) -> bool:
+    n = len(small)
+    return any(big[i:i + n] == small for i in range(len(big) - n + 1))
 
 
 def _project() -> Project:
@@ -86,6 +91,99 @@ class HardenedArgvTest(unittest.TestCase):
         self.assertIn("claude-man.repos=1", joined)
 
 
+class RepoFeatureDoesNotTouchHardeningTest(unittest.TestCase):
+    """Adding repos must change ONLY the `claude-man.repos` label value — never a mount, env, or
+    hardening flag. This is what lets the live-clone-no-recreate design skip an `image smoke` re-run
+    (invariant 2 untouched; invariant 1's no-credential-in-container surface unchanged)."""
+
+    def _argv(self, *repos):
+        return runner.build_create_argv(
+            Project(slug="p", overlay="node", repos=tuple(repos)),
+            profile_name="work", created_iso="t",
+            claude_config_path="/state/p/claude-config", workspace_path="/state/p/workspace",
+        )
+
+    def test_only_repos_label_count_differs(self) -> None:
+        one = self._argv(Repo(url="git@github.com:o/a.git"))
+        two = self._argv(Repo(url="git@github.com:o/a.git"), Repo(url="git@github.com:o/b.git"))
+        # Exactly the two repos label values differ; nothing else in the rendered argv changes.
+        self.assertIn("claude-man.repos=1", one)
+        self.assertIn("claude-man.repos=2", two)
+        diff_one = [a for a in one if a not in two]
+        diff_two = [a for a in two if a not in one]
+        self.assertEqual(diff_one, ["claude-man.repos=1"])
+        self.assertEqual(diff_two, ["claude-man.repos=2"])
+
+    def test_mounts_and_no_ssh_or_credentials_regardless_of_repos(self) -> None:
+        argv = self._argv(Repo(url="https://u:tok@github.com/o/a.git"))
+        # Exactly the two persistent binds, no others; no ssh-agent / credential surface ever.
+        binds = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+        self.assertEqual(sorted(binds), [
+            "/state/p/claude-config:/home/agent/.claude",
+            "/state/p/workspace:/workspace",
+        ])
+        joined = " ".join(argv)
+        for forbidden in ("SSH_AUTH_SOCK", ".ssh", "GIT_ASKPASS", "GITHUB_TOKEN", "u:tok@"):
+            self.assertNotIn(forbidden, joined)
+
+
+class EnvMountRenderTest(unittest.TestCase):
+    """Env-mounts render the expected -v/--tmpfs/-e and NEVER alter the hardened floor."""
+
+    def _argv(self, *mounts, ssh_auth_sock=None):
+        return runner.build_create_argv(
+            Project(slug="p", overlay="base", env_mount=tuple(mounts)),
+            profile_name="work", created_iso="t", ssh_auth_sock=ssh_auth_sock,
+        )
+
+    def test_file_mount_ro_and_rw(self) -> None:
+        argv = self._argv(
+            EnvMount(kind="file", src="/abs/netrc", dst="/home/agent/.netrc"),
+            EnvMount(kind="file", src="/abs/scratch", dst="/home/agent/out", ro=False),
+        )
+        self.assertIn("/abs/netrc:/home/agent/.netrc:ro", argv)
+        self.assertIn("/abs/scratch:/home/agent/out", argv)        # rw -> no :ro suffix
+        self.assertNotIn("/abs/scratch:/home/agent/out:ro", argv)
+
+    def test_ssh_mount_with_agent_socket(self) -> None:
+        argv = self._argv(EnvMount(kind="ssh"), ssh_auth_sock="/run/user/1000/ssh.sock")
+        joined = " ".join(argv)
+        self.assertIn("/home/agent/.ssh:rw,nosuid,mode=0700,uid=1000,gid=1000,size=1m", joined)
+        self.assertIn("/run/user/1000/ssh.sock:/ssh-agent:ro", argv)
+        self.assertIn("SSH_AUTH_SOCK=/ssh-agent", argv)
+
+    def test_ssh_mount_without_agent_renders_tmpfs_but_no_socket(self) -> None:
+        argv = self._argv(EnvMount(kind="ssh"), ssh_auth_sock=None)
+        joined = " ".join(argv)
+        self.assertIn("/home/agent/.ssh:rw", joined)         # tmpfs still present
+        self.assertNotIn("/ssh-agent", joined)               # but no socket forward
+        self.assertNotIn("SSH_AUTH_SOCK", joined)
+
+    def test_flagged_mount_is_not_rendered(self) -> None:
+        # A load-time-invalid (flagged) mount must never reach docker — its argv must equal no-mount.
+        flagged = EnvMount.lenient(kind="file", src="/abs/x", dst="/Workspace/CLAUDE.md")
+        self.assertTrue(flagged.error)
+        self.assertEqual(self._argv(flagged), self._argv())
+
+    def test_floor_byte_identical_with_and_without_mounts(self) -> None:
+        # The contiguous _HARDENING block must be present and identical whether or not env-mounts exist.
+        a0 = self._argv()
+        a1 = self._argv(
+            EnvMount(kind="file", src="/abs/x", dst="/home/agent/.gitconfig"),
+            EnvMount(kind="ssh"), ssh_auth_sock="/run/ssh",
+        )
+        self.assertTrue(_contains_sublist(a0, runner._HARDENING))
+        self.assertTrue(_contains_sublist(a1, runner._HARDENING))
+        # Env-mounts only ADD value tokens — the -v/-e/--tmpfs flags already exist in a0, so the
+        # net-new tokens are exactly the mount values (no floor token is removed or altered).
+        self.assertEqual(set(a1) - set(a0), {
+            "/home/agent/.ssh:rw,nosuid,mode=0700,uid=1000,gid=1000,size=1m",
+            "/abs/x:/home/agent/.gitconfig:ro",
+            "/run/ssh:/ssh-agent:ro",
+            "SSH_AUTH_SOCK=/ssh-agent",
+        })
+
+
 class EnvFileScrubTest(unittest.TestCase):
     """env_file values must be pass-through (not in argv) and ANTHROPIC_* must never appear."""
 
@@ -137,6 +235,16 @@ class EnvFileScrubTest(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", parsed)
         self.assertNotIn(OAUTH_TOKEN_ENV, parsed)
         self.assertNotIn("BARE_LINE_NO_EQUALS", parsed)
+
+
+class RunMissingBinaryTest(unittest.TestCase):
+    def test_missing_binary_becomes_nonzero_result(self) -> None:
+        # A missing docker/git binary must NOT raise FileNotFoundError out of _run — that would
+        # tear down the TUI create worker. _run maps it to a 127 "not found" CompletedProcess so
+        # every caller logs a red line instead. (See review: worker crash-the-app finding.)
+        cp = runner._run(["__claude_man_definitely_missing_binary__", "--version"])
+        self.assertEqual(cp.returncode, 127)
+        self.assertIn("not found", cp.stderr)
 
 
 if __name__ == "__main__":

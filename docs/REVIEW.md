@@ -86,3 +86,29 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 
 *Full per-finding evidence (verifier reasoning, reproduction) is in the workflow transcript that
 produced this review.*
+
+# New-project form review — 2026-06-03
+
+A multi-agent adversarial review of the TUI new-project form (`tui/screens/create.py` +
+`action_new_project`/`_create_project_worker` in `tui/app.py`), across correctness/Textual idioms,
+concurrency/UI-thread safety, and CLAUDE.md-invariant preservation. **4 findings raised → 4
+confirmed (0 false positives)**; they collapse to two root issues, both fixed this pass. The form
+itself preserves every load-bearing invariant — it funnels through the same `lifecycle.create_project
+→ ensure_created → runner.create` chain as the CLI, so the hardened argv, the no-`.credentials.json`/
+no-`ANTHROPIC_*` rule, registry-as-source-of-truth, and one-claude-per-container are all untouched.
+
+| ID | Location | Finding | Fix | Status |
+|----|----------|---------|-----|--------|
+| FORM-1 | `tui/app.py` `_create_project_worker`; `docker/runner.py:_run` | The `@work(thread=True)` create worker caught only `ValidationError`/`RuntimeError`. `OSError` from config-dir seeding **and `FileNotFoundError` from a missing `docker` binary** escaped the worker → Textual's default `exit_on_error=True` tore the whole TUI down (contradicting the worker's own docstring). The synchronous `up`/`recreate` paths shared the missing-`docker` hole. | Root-caused in `runner._run`: a missing binary now maps to a `127` "not found" `CompletedProcess` (benefits CLI + sync UI paths too). Broadened the worker catch to `(OSError, RuntimeError)` + a last-resort `except Exception`, each → a red `Result`. | DONE (2026-06-03) |
+| FORM-2 | `registry/projects.py:save`/`list_projects`; `tui/app.py` 2 s poll | Moving create into a background worker created a new cross-thread race: the UI-thread projects poll reads the registry via `tomllib.load` while the worker's **non-atomic** `save()` writes it → a torn read raises `TOMLDecodeError` (uncaught) → UI crash. Same root enables a benign same-slug write race (FORM-3, nit). | `save()` now writes a sibling temp file + `os.replace` (atomic on one FS); `list_projects` also skips `TOMLDecodeError` as defense-in-depth. | DONE (2026-06-03) |
+
+Tests added (now 51 total): `runner._run` maps a missing binary to `127`; `projects.save`
+round-trips atomically with no `.tmp` residue; `list_projects` skips malformed TOML. Behavioural
+verification was via a headless Textual harness (form validation: empty/invalid/duplicate blocked,
+dismiss via button/Enter/Escape; worker robustness: forced `OSError` and `KeyError` both log a red
+`Result` with the app still running).
+
+**Not addressed here (unchanged scope):** **SEC-6** remains open — it is the CLI `project
+shell`/`claude` exec boundary in `terminals.py`, *distinct* from the create-form slug check this
+work added. **SEC-3** (one-claude guard) and **TUI-2** (async projects poll) also remain open; TUI-2
+in particular would further reduce the create-worker/poll contention noted in FORM-2.

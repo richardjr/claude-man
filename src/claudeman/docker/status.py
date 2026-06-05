@@ -104,9 +104,20 @@ def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
         if cs is None:
             rows.append(Row(slug, DEFINED, profile or "", egress or "", str(repos), "", ""))
         else:
+            # Registry wins for the repo count (invariant 4 / review BUG-5): the container's
+            # `claude-man.repos` label is a create-time projection and goes stale the instant a repo
+            # is added to a live project (labels are immutable post-create). Show the registry count
+            # and mark the divergence with `*` + a detail note rather than trusting the stale label.
+            reg_repos = str(repos)
+            if cs.repos and cs.repos != reg_repos:
+                repos_cell = f"{reg_repos}*"
+                detail = (cs.status_text + " (repos label stale — recreate to re-stamp)").strip()
+            else:
+                repos_cell = reg_repos
+                detail = cs.status_text
             rows.append(
                 Row(slug, cs.kind, cs.profile or profile or "", cs.egress or egress or "",
-                    cs.repos or str(repos), cs.version, cs.status_text)
+                    repos_cell, cs.version, detail)
             )
     # Containers with no registry entry (orphans) — surface them so they can be reconciled.
     for slug, cs in containers.items():

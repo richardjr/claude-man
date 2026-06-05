@@ -35,6 +35,11 @@ bridge gateway `172.17.0.1`).
 | **State** | `~/.local/state/claude-man/...` | *durable bytes* (checkouts, tokens, config dirs, baselines, backups) | written by claude-man; some secret; never committed |
 | **Liveness** | `docker ps` / `docker inspect` | *what state the container is in right now* | never stored; read fresh, never cached |
 
+The Definition and State roots resolve from `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` (falling back to
+`~/.config` / `~/.local/state`), and can be relocated wholesale with the `CLAUDE_MAN_CONFIG_HOME` /
+`CLAUDE_MAN_STATE_HOME` env overrides — the unit suite sets these to a tmpdir so it exercises the
+real path logic without touching operator state. See `config.config_home()` / `config.state_home()`.
+
 A project **exists iff** its `projects/<slug>.toml` exists — fully decoupled from whether a
 container is alive. Labels (`claude-man.{slug,profile,overlay,egress,repos,version,created}`) make
 `docker ps` self-describing, but they are a **projection**: on divergence the registry wins and
@@ -97,7 +102,14 @@ separate from sync-back — nothing crosses the denylist boundary) and counts on
 - **Checkout:** on `project create`, repos are cloned **host-side** with the host's `gh` PAT (the
   PAT never enters the container). Because `workspace/` is a bind mount and the container runs
   `--user 1000:1000` (matching the host uid), in-container edits land on the host with correct
-  ownership. `project sync-repos` does `git fetch` and reports ahead/behind but never auto-resets.
+  ownership. `project repo add` clones one repo live into the existing `/workspace` bind (visible in a
+  running container at once — no recreate; the immutable `claude-man.repos` count label is allowed to
+  drift, registry wins). `project sync-repos` clones any missing repo then `git fetch`es, never
+  auto-resets. Live per-repo state — branch, clean/dirty, ahead/behind (parsed from a single
+  `git status --porcelain=v2 --branch` header against the actual `@{upstream}`), and branch-vs-config
+  drift — is read host-side by `checkout/gitstate.py` (a pure parser + thin subprocess shell), surfaced
+  by `project repo list`. A repo `dir` is containment-checked so it can never escape `workspace/`, and
+  any credential in a remote URL is masked before it reaches a surfaced string.
 - **Container:** one long-lived **named** container per project (`claude-man-<slug>`), created with
   `docker create` (never `--rm`), `docker start`/`stop`. Restarts/reboots leave the binds untouched,
   so checkouts, sessions, memory, and agents persist. A baked-claude version bump is an explicit
@@ -154,9 +166,49 @@ docker create --name claude-man-<slug> \
 
 **Writable surfaces (everything else is read-only):** `/home/agent/.claude` (persistent bind —
 the sync-back surface), `/workspace` (persistent bind), `/tmp` and `/home/agent/.cache` (tmpfs,
-`exec`). `--pids-limit` is **1024** (not small): claude forks Bash, ripgrep, MCP servers, hooks — a
+`exec`), and — **only when a project declares an `ssh` env-mount** — a `0700` `/home/agent/.ssh`
+tmpfs. `--pids-limit` is **1024** (not small): claude forks Bash, ripgrep, MCP servers, hooks — a
 low limit silently breaks parallel tool calls. `no-new-privileges` + `--cap-drop ALL` is exactly
 why the firewall is a network-layer sidecar.
+
+## Environment mounts (ssh + files)
+
+A project can declare `[[project.env_mount]]` entries to make host material available **inside** the
+container for the agent's own runtime/git ops (the host-side clone uses the host's ssh; this is for
+in-container `git push`/`pull`, `.netrc`, certs, etc.). Two kinds, both rendered **additively** by
+`docker/runner.py::_render_env_mounts` — they emit only `-v`/`--tmpfs`/`-e`, never a `_HARDENING`
+flag, so the floor is byte-identical with or without them (a unit test pins this; the design was
+verified empirically against the exact hardened profile, including a real GitHub ssh round-trip):
+
+- **`file`** → a read-only (`:ro`, default; `rw` opt-in) bind of a host `src` at an absolute container
+  `dst`. A bind overlays any path even on the read-only rootfs, with host perms (e.g. `0600`)
+  preserved. `src` must resolve to an **absolute** host path (a relative one becomes a docker named
+  volume, not a bind); a **trailing-slash `dst`** appends the src basename (`cp`-style). `dst` is
+  **containment-checked** (`schema.EnvMount`, with a leading-`//` collapse so the kernel's
+  normalization can't be used to slip the check): it may not be relative, contain `..`, or target a
+  claude-man-managed mount — **never** `/home/agent/.claude/…` (a bind there smuggles a working
+  `.credentials.json` — a verified attack), the `.claude.json` sibling, `/home/agent/.ssh` (no binding
+  a private key in), `/home/agent/.local/` (the baked claude launcher runs with the OAuth token),
+  `/tmp`, or `/home/agent/.cache`. **`/workspace/<path>` IS allowed** (a workspace-root `CLAUDE.md`
+  above the per-repo ones is a primary use case) — gitstate reads the registry not the filesystem, so
+  it isn't polluted, and `lifecycle._ensure_workspace_mountpoints` pre-creates the nested mountpoint
+  operator-owned so Docker doesn't root-create it.
+- **`ssh`** → **agent-forwarding**: a read-only bind of the host `$SSH_AUTH_SOCK` at `/ssh-agent` +
+  `SSH_AUTH_SOCK` pointing at it, plus the `0700` `~/.ssh` tmpfs. **Private keys never enter the
+  container** — the host agent signs. Post-start, the host's `~/.ssh/{config,known_hosts}` (non-secret)
+  are seeded into the tmpfs via `docker exec -i … 'cat > …'` (a `docker cp` into a `--read-only`
+  container fails — verified).
+
+**Mounts are fixed at `docker create`**, so adding/removing an env-mount needs a `recreate` to take
+effect (surfaced in the `add`/`remove` Result, the same honesty as the repos count-label drift). The
+host source must exist operator-owned before start — a missing `file` source is **refused, never
+auto-created** (Docker would create a missing bind source as `root` at start). `project resync`
+re-validates sources and re-seeds the ssh tmpfs into a running container (no recreate). Verbs:
+`project env add ssh|file`, `project env rm`, `project env list`, `project resync`. The base image
+ships `openssh-client` for the in-container `ssh`. **Validation is strict at the add boundary but lenient
+at load** (`EnvMount.lenient`): a mount valid when saved but invalidated by a later-tightened rule (e.g.
+the case-typo guard) loads **flagged** (`error` set) — visible/removable in the env screen, round-tripped
+on save, and skipped by the render/lifecycle — rather than crashing `projects.load` (and the TUI).
 
 ## Network / egress
 
@@ -217,15 +269,28 @@ Textual app (`tui/app.py`). The **projects screen** is a `DataTable`
 (Project · Status · Profile · Egress · Repos · Version) populated by an async worker running
 `docker ps -a --filter label=claude-man.slug --format '{{json .}}'`, JOINed with the registry so
 DEFINED projects with no container still show. A `set_interval` refresh upgrades to an event-driven
-worker tailing `docker events`. Bindings: `n` new · `enter` shell · `c` claude · `l` logs · `s`
-start/stop · `y` sync-review · `d` delete · `r` recreate.
+worker tailing `docker events`. The **Repos column** is the live git-state summary (`3 ✓`, `2 ✓ client:~↑1`,
+`1 uncloned`) from a separate **8 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
+thread, cached between scans — host-FS state, distinct from the never-cached container liveness); a
+**repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·
+Last commit), repainted on cursor-move from the same cache. Bindings: `n` new · `a` add-repo ·
+`R` remove-repo · `e` env-mounts · `enter` shell · `c` claude · `l` logs · `s` start/stop · `u` usage ·
+`g` refresh-git (fetch-ful) · `y` sync-review · `d` delete · `r` recreate. Add/Remove-repo are modal
+screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
+`lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
+`e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` + `add_mount.py`): a modal listing the
+project's ssh/file mounts with in-screen add (validated against the dest-denylist) / remove / resync —
+the fast registry mutations run inline, `resync` (docker exec) on a thread worker.
 
 - **Logs:** a `RichLog` fed by a worker running `docker logs -f --tail 200 --timestamps`; the
   follower is reaped on container switch and app shutdown.
 - **Terminal spawn** (`tui/terminals.py`): a **separate OS window** (not `suspend()`), launched
   detached via `Popen(..., start_new_session=True)`. `ghostty` preferred, `alacritty` fallback, with
   `--class=claude-man-<slug>` so a Hyprland `windowrulev2` can place it:
-  `ghostty --class=claude-man-<slug> -e docker exec -it claude-man-<slug> {bash|claude}`.
+  `ghostty --class=claude-man-<slug> -e docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude}`.
+  `claude`/shell open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
+  `[project] workdir`, else a **lone repo's checkout dir** (so a single-repo project drops you straight
+  into it), else `/workspace`.
 
 ## Open risks
 

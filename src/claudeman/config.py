@@ -40,6 +40,8 @@ CONTAINER_CLAUDE_CONFIG = "/home/agent/.claude"   # = CLAUDE_CONFIG_DIR in the c
 CONTAINER_CACHE = "/home/agent/.cache"
 CONTAINER_STATE = "/home/agent/.cache/state"      # XDG_STATE_HOME (under the writable .cache tmpfs)
 CONTAINER_WORKSPACE = "/workspace"
+CONTAINER_SSH_DIR = "/home/agent/.ssh"            # ssh-conditional writable tmpfs (known_hosts/config)
+CONTAINER_SSH_AGENT_SOCK = "/ssh-agent"           # forwarded host ssh-agent socket (path, not a secret)
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
@@ -72,6 +74,11 @@ def state_home() -> Path:
 
 
 # -- definition (config) tier -----------------------------------------------
+def settings_toml_path() -> Path:
+    """Global claude-man settings (general features + ssh keys) — secret-free, git-versionable."""
+    return config_home() / "config.toml"
+
+
 def projects_config_dir() -> Path:
     return config_home() / "projects"
 
@@ -135,5 +142,38 @@ def sync_audit_dir() -> Path:
     return state_home() / "sync-audit"
 
 
+def managed_ssh_agent_sock() -> Path:
+    """Stable socket for a claude-man-managed ssh-agent (used only when no session agent exists).
+
+    A fixed path so the agent survives across TUI restarts and a recreated container can re-forward it.
+    Holds no secret (a unix socket); the keys live in the agent process, never on disk here."""
+    return state_home() / "ssh-agent.sock"
+
+
 def container_name(slug: str) -> str:
     return f"{CONTAINER_PREFIX}{slug}"
+
+
+# ---------------------------------------------------------------------------
+# Repo / image-build paths (package-relative so an auto-build triggered from the
+# TUI resolves the Dockerfiles regardless of the process CWD; the CLI used to rely
+# on being run from the checkout root).
+# ---------------------------------------------------------------------------
+def repo_root() -> Path:
+    """The claude-man checkout root — holds ``images/`` and ``src/``.
+
+    config.py lives at ``src/claudeman/config.py``; ``parents[2]`` is the checkout root.
+    """
+    return Path(__file__).resolve().parents[2]
+
+
+def image_tag(overlay: str) -> str:
+    """The local docker tag for an overlay (``claude-man:<overlay>``)."""
+    return f"{IMAGE_REPO}:{overlay}"
+
+
+def image_dockerfile(overlay: str) -> Path:
+    """Absolute path to the Dockerfile that builds ``claude-man:<overlay>``."""
+    if overlay == "base":
+        return repo_root() / "images" / "base" / "Dockerfile"
+    return repo_root() / "images" / "overlays" / f"{overlay}.Dockerfile"

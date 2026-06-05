@@ -18,13 +18,19 @@ These are security- and correctness-critical. Every change must preserve them.
    silently outrank the OAuth token and can bill the wrong account, so they are scrubbed from the
    rendered container env — including `env_file`, which is parsed + scrubbed host-side and injected
    as pass-through so values never reach argv. Never pass `--bare` to the in-container `claude`
-   (it ignores the token).
+   (it ignores the token). Relatedly, a **`file` env-mount's container `dst` may never target
+   `/home/agent/.claude` (or any managed mount)** — a bind onto `…/.claude/.credentials.json` would
+   smuggle a working credentials file in (a verified attack); `schema.EnvMount` rejects it.
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, with writable
    surfaces limited to: the persistent `claude-config` bind (`/home/agent/.claude`), the persistent
-   `workspace` bind (`/workspace`), and two `tmpfs` mounts (`/tmp`, `/home/agent/.cache`, both
-   `exec`). The image bakes a real `/etc/passwd` entry + `HOME` for uid 1000 (without it,
-   `getpwuid` fails under `--read-only --user` and `HOME` resolves to `/`). Do not relax these to
+   `workspace` bind (`/workspace`), two `tmpfs` mounts (`/tmp`, `/home/agent/.cache`, both `exec`),
+   and — **only when a project has an `ssh` env-mount** — a `0700` `/home/agent/.ssh` tmpfs (for
+   `known_hosts`/`config`; keys never enter — the host agent socket is forwarded). The image bakes a
+   real `/etc/passwd` entry + `HOME` for uid 1000 (without it, `getpwuid` fails under `--read-only
+   --user` and `HOME` resolves to `/`). **Env-mounts (`[[project.env_mount]]`) are additive `-v`/
+   `--tmpfs`/`-e` only** — `docker/runner.py::_render_env_mounts` never emits a `_HARDENING` flag, so
+   the floor is byte-identical with or without them (a unit test pins this). Do not relax these to
    "make something work" — fix the writable-mount set or the image instead, and re-run
    `claudemanctl image smoke`.
 3. **The firewall lives at the network layer, never in-container iptables.** `--cap-drop ALL`
@@ -54,16 +60,16 @@ These are security- and correctness-critical. Every change must preserve them.
 src/claudeman/
   config.py            XDG paths + all shared constants (label prefix, container/image names, baked container paths)
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
-  lifecycle.py         create / up / stop / recreate orchestration shared by the CLI + TUI (+ account-mismatch guard)
+  lifecycle.py         create / up / stop / recreate orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed)
   usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
   registry/            projects.py, profiles.py (load/save/default/load_token/token_age), schema.py  — TOML store
-  docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub), status.py (live ps JOIN), smoke.py (hardened-profile image gate)
+  docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
   profiles/            setup_token.py (mint/renew/verify via `claude setup-token`+`auth status`), identity.py (scrubbed stub), seed.py (claude-config seeding + host ~/.claude capture)
-  checkout/            repos.py — host-side git clone/fetch into workspace/ (host PAT never enters the container)
+  checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + per-profile usage panel), terminals.py (detached ghostty/alacritty spawn), screens/
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount)
 images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)

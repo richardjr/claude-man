@@ -15,10 +15,12 @@ FROM debian:trixie-slim
 ARG CLAUDE_VERSION=2.1.160
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
+# openssh-client provides `ssh` for in-container git-over-ssh when a project adds an `ssh` env-mount
+# (agent-forwarded — no keys baked or stored here).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl git ripgrep nodejs npm; \
+        ca-certificates curl git ripgrep nodejs npm openssh-client; \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user with a real passwd entry and a baked home dir (owned 1000:1000).
