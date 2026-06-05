@@ -92,6 +92,43 @@ separate from sync-back — nothing crosses the denylist boundary) and counts on
 *inside* claude-man containers, not the operator's host `~/.claude`. Surfaced via
 `claudemanctl profile usage` and a worker-refreshed TUI panel (`u` to refresh).
 
+## Subscription usage (per-account 5-hour + weekly limits)
+
+Transcript token-totals (above) measure what claude-man *itself* spent; they cannot reveal how close
+an **account** is to the rolling-window subscription caps Claude Code's `/usage` shows — that figure
+spans *all* usage on the account, including the operator's own host sessions. `usage_api.py` reads it
+straight from the source: `GET https://api.anthropic.com/api/oauth/usage` (`config.OAUTH_USAGE_URL`,
+beta header `oauth-2025-04-20`) with a profile's stored OAuth bearer token, returning the `five_hour`
+and `seven_day` *utilization* percentages (0–100) plus reset timestamps (the endpoint also carries
+`seven_day_opus`/`seven_day_sonnet`, parsed into `Utilization` for a future per-model view but not yet
+surfaced). The fetch is **read-only and does not consume quota** — it's a status read, safe to poll.
+
+- **The token-scope split (why minting now requests both).** `claude setup-token` mints a token with
+  the `user:inference` scope only — enough to *run* Claude in the container, but a **403** on
+  `/api/oauth/usage`, which needs `user:profile`. Rather than carry a second token, `profiles/setup_token.py`
+  mints with `CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"` (`config.OAUTH_USAGE_SCOPES`) so the
+  **same** token both runs inference *and* reads usage. Tokens minted before this change lack the scope;
+  the fetch folds their 403 into the note `re-mint`, and the operator re-mints in place with
+  `claudemanctl profile renew <name>` to gain it.
+- **The no-redirect opener (a credential-leak fix).** The fetch uses a module-level
+  `urllib.request.build_opener(_NoRedirect())` whose `redirect_request` returns `None`, so a `30x` is
+  turned into an `HTTPError` instead of being followed. urllib's default redirect handler copies the
+  `Authorization` bearer onto the redirect target *without* stripping it on a cross-host hop — for this
+  fixed JSON endpoint a redirect is anomalous, and following one would re-send the account credential to
+  another host (invariant 1). The token is therefore never sent twice. Standard TLS verification is kept.
+- **User-Agent matters.** The endpoint rate-limits a generic UA aggressively, so requests send
+  `User-Agent: claude-code/<ver>` (`config.CLAUDE_CODE_USER_AGENT`).
+- **Pure/network split + failure handling.** `parse_utilization` / `render_bar` / `level` are pure
+  (unit-tested without sockets); `fetch_utilization` / `fetch_for_profile` do the I/O and **never raise** —
+  every failure folds into a short `UsageResult.note` (`no token`, `re-mint` for the 403, `auth` for a
+  401, `offline`, `http NNN`, `bad resp`). `_window` rejects `bool`/`NaN`/`inf` so a junk utilization can't
+  read as a colour band in `level()`.
+- **Worker + surfaces.** The TUI runs a **separate 60 s `refresh_utilization` worker** off the UI thread,
+  caching results in `self._util`; the usage panel reads that cache and renders 5h + Week columns as
+  coloured mini bars (green `<70%` < yellow `<90%` < red, via `level`), with a panel title noting the
+  figures are account-wide subscription limits, not claude-man's slice. `u` refreshes both the transcript
+  totals and the utilization cache. The CLI surface is `claudemanctl profile limits [name]`.
+
 ## Persistence + container lifecycle
 
 - **Definition:** `projects/<slug>.toml` — slug, profile, overlay (image variant), egress mode,
@@ -120,16 +157,19 @@ separate from sync-back — nothing crosses the denylist boundary) and counts on
 ## Container image
 
 `debian:trixie-slim` (glibc — `claude` is a glibc native ELF; alpine/musl would need extra libs).
-Installs `ca-certificates git ripgrep curl` + node (for project tooling / MCP stdio servers), and
-installs the **pinned native `claude`** into the agent's own `~/.local` by running the official
+Installs `ca-certificates git ripgrep curl` + node (for project tooling / MCP stdio servers), the
+**pinned GitHub CLI `gh`** (from the upstream `.deb` — see "In-container git identity + GitHub CLI"),
+and installs the **pinned native `claude`** into the agent's own `~/.local` by running the official
 installer **as uid 1000** — the exact location `installMethod: native` and `claude doctor` expect,
 so the runtime is doctor-clean and the binary is reachable under `--read-only --user` (auto-update
 is disabled, so a read-only `~/.local` is fine; NOT npm-installed at runtime). Creates user `agent`
 (uid/gid 1000) with a **real `/etc/passwd` entry** and a baked `/home/agent` (0755). Baked env:
 `HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` (under the writable `.cache` tmpfs so
-claude's version-lock dir doesn't hit the read-only rootfs), `PATH` (prepends `~/.local/bin`),
-`USE_BUILTIN_RIPGREP=0` (use the apt ripgrep so claude never extracts a binary to a writable temp),
-`DISABLE_AUTOUPDATER=1` (auto-update can't write a read-only rootfs; claude-man owns version bumps).
+claude's version-lock dir doesn't hit the read-only rootfs), `GIT_CONFIG_GLOBAL`/`GH_CONFIG_DIR` (also
+under `.cache` so `git config --global`/`gh auth` don't hit the read-only rootfs — see "In-container git
+identity"), `PATH` (prepends `~/.local/bin`), `USE_BUILTIN_RIPGREP=0` (use the apt ripgrep so claude never
+extracts a binary to a writable temp), `DISABLE_AUTOUPDATER=1` (auto-update can't write a read-only
+rootfs; claude-man owns version bumps).
 
 **Overlays** (`images/overlays/<name>.Dockerfile`, `FROM` the base) add toolchains: `python` (uv),
 `rust` (rustup), `node` (extra node). Project-specific lightweight packages come from
@@ -152,11 +192,14 @@ docker create --name claude-man-<slug> \
   --user 1000:1000 \
   --pids-limit 1024 \
   --tmpfs /tmp:rw,exec,nosuid,size=512m \
-  --tmpfs /home/agent/.cache:rw,exec,nosuid,size=256m \
+  --tmpfs /home/agent/.cache:rw,exec,nosuid,size=256m,uid=1000,gid=1000,mode=0700 \
   -e HOME=/home/agent -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
   -e XDG_CACHE_HOME=/home/agent/.cache -e XDG_STATE_HOME=/home/agent/.cache/state \
+  -e GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig -e GH_CONFIG_DIR=/home/agent/.cache/gh \
   -e USE_BUILTIN_RIPGREP=0 -e DISABLE_AUTOUPDATER=1 \
   -e CLAUDE_CODE_OAUTH_TOKEN=<profile token>  (ANTHROPIC_API_KEY/AUTH_TOKEN omitted) \
+  -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=user.name -e GIT_CONFIG_VALUE_0=<name> \
+  -e GIT_CONFIG_KEY_1=user.email -e GIT_CONFIG_VALUE_1=<email>   (when a git identity resolves) \
   -v <state>/projects/<slug>/claude-config:/home/agent/.claude \
   -v <state>/projects/<slug>/workspace:/workspace \
   -w /workspace \
@@ -170,6 +213,59 @@ the sync-back surface), `/workspace` (persistent bind), `/tmp` and `/home/agent/
 tmpfs. `--pids-limit` is **1024** (not small): claude forks Bash, ripgrep, MCP servers, hooks — a
 low limit silently breaks parallel tool calls. `no-new-privileges` + `--cap-drop ALL` is exactly
 why the firewall is a network-layer sidecar.
+
+**The `.cache` tmpfs must be agent-owned.** Docker special-cases `/tmp` to sticky world-writable
+(`1777`), so it's writable for free — but a *named* tmpfs like `/home/agent/.cache` defaults to
+`root:root mode=755`, which uid 1000 cannot write. Left bare, `node`/`corepack` (`mkdir ~/.cache/node`),
+claude's `XDG_STATE_HOME=~/.cache/state`, and the git/gh config redirect (below) all fail `EACCES`/`EROFS`
+under `--read-only --user 1000`. So `_HARDENING` pins the `.cache` tmpfs `uid=1000,gid=1000,mode=0700`
+(keeping `nosuid,exec,size=256m`). This is **not** a floor relaxation — it makes a surface invariant 2
+already calls writable *actually* writable by the agent. tmpfs options are fixed at `docker create`, so
+the fix lands on **`recreate`** with no image rebuild, and `image smoke` now probes the `.cache` write.
+
+## In-container git identity + GitHub CLI
+
+`git commit` and `gh` both want to write config into the home dir, but the rootfs is `--read-only`:
+`git commit` fails *Author identity unknown* and `git config --global` / `gh auth` fail with
+*could not lock … Read-only file system*. claude-man fixes both without relaxing the floor.
+
+- **Identity via git ENV-config, not a file.** `gitconfig.py::env_for` renders the author identity as
+  git's environment config — `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (equivalent to
+  `git -c user.name=… -c user.email=…`) — which needs **no writable `~/.gitconfig`**, so `git commit`
+  works under the read-only rootfs. The env is injected at `docker create` via
+  `runner.build_create_argv(git_env=…)` ← `lifecycle.ensure_created` ← `gitconfig.container_env()`. Name
+  and email are **non-secret**, so they're rendered as plain `-e KEY=value` (unlike the OAuth token's
+  pass-through form). An empty identity emits `{}` — nothing is forced.
+- **Settings-override-else-inherit-host precedence.** `resolve_identity()` takes the claude-man global
+  settings (`config.toml` `[git]` `user_name`/`user_email`) when set, else inherits the operator's own
+  host `git config --global user.{name,email}`, else `""`. So a fresh install "just works" with the
+  operator's host identity, and a profile/workspace that should commit under a different name overrides it
+  in settings. Identity is fixed at create time, so a change needs a **`recreate`** to apply.
+- **Writable git/gh config redirected to the `.cache` tmpfs.** For everything *other* than identity —
+  `git config --global` writes, `gh auth login` state — `GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig`
+  and `GH_CONFIG_DIR=/home/agent/.cache/gh` (`config.CONTAINER_GITCONFIG`/`CONTAINER_GH_CONFIG`, baked in
+  both `runner._BAKED_ENV` and the Dockerfile `ENV`) point those at the writable `.cache` tmpfs instead of
+  the read-only `~/.gitconfig` / `~/.config/gh`, dodging `EROFS`.
+- **`gh` baked into the image, auth left to the operator.** The GitHub CLI isn't in Debian's repos, so
+  `images/base/Dockerfile` installs the **pinned upstream `.deb`** (arch-aware; `ARG GH_VERSION`,
+  `config.DEFAULT_GH_VERSION = 2.93.0`). **No token is injected** — `gh auth` is the operator's job:
+  `gh auth login` works in-container (writing the writable `GH_CONFIG_DIR`), or a `GH_TOKEN` can be supplied
+  via an env-mount. Because this is an image change, picking up `gh` needs an **image rebuild**
+  (`image build base`, then the overlay e.g. `image build node`) followed by a `recreate`. `image smoke`
+  probes `gh` presence and the `git config --global` writability.
+
+## Global settings (`config.toml`)
+
+The "general features" config tier lives at `~/.config/claude-man/config.toml` — a third store beside
+the per-project and per-profile TOMLs, holding cross-cutting operator preferences rather than anything
+project-scoped. It is **secret-free** (ssh key *paths* and a git name/email only), so like the other
+definitions it round-trips through git. `registry/settings.py` reads it with stdlib `tomllib` and writes
+it comment-preserving with `tomlkit`; a missing file is not an error (it resolves to a default
+`Settings()`). Today it carries `[ssh] keys`/`auto_load` (host keys to forward) and `[git]
+user_name`/`user_email` (the identity override above; `set_git_identity` clears it with empty strings).
+The TUI opens a Settings screen with `,` (showing the resolved git identity, edited via a `GitIdentityScreen`
+where a blank field means *inherit host*); the CLI surface is `claudemanctl config git [--name … --email … |
+--clear]` and `config show` (which now also prints the resolved git identity).
 
 ## Environment mounts (ssh + files)
 
@@ -275,7 +371,8 @@ thread, cached between scans — host-FS state, distinct from the never-cached c
 **repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·
 Last commit), repainted on cursor-move from the same cache. Bindings: `n` new · `a` add-repo ·
 `R` remove-repo · `e` env-mounts · `enter` shell · `c` claude · `l` logs · `s` start/stop · `u` usage ·
-`g` refresh-git (fetch-ful) · `y` sync-review · `d` delete · `r` recreate. Add/Remove-repo are modal
+`g` refresh-git (fetch-ful) · `y` sync-review · `d` delete · `r` recreate · `,` settings (ssh keys +
+git identity; `g` there opens the git-identity edit modal). Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
 `e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` + `add_mount.py`): a modal listing the

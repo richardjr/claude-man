@@ -22,7 +22,7 @@ What crosses each way, and what must never cross:
 
 | Direction | Allowed | Forbidden |
 |---|---|---|
-| host → container | the **one** profile's OAuth token (env), project env vars, the checked-out repos | `.credentials.json`, the `gh` PAT, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
+| host → container | the **one** profile's OAuth token (env), the non-secret git author identity (name/email), project env vars, the checked-out repos | `.credentials.json`, the `gh` PAT/`GH_TOKEN`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
 | container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (auth is env-injected — no token file exists in the bind to refresh back), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
 
 ## Controls
@@ -36,6 +36,15 @@ What crosses each way, and what must never cross:
   baked `/etc/passwd` entry.
 - `--pids-limit 1024` bounds fork bombs while still allowing claude's tool subprocesses.
 - `tmpfs` mounts are `nosuid`; `exec` is required (claude/MCP execute helpers from temp).
+- The `/home/agent/.cache` tmpfs is pinned **agent-owned** (`uid=1000,gid=1000,mode=0700`). A bare
+  tmpfs defaults to `root:root` mode `0755`, which the uid-1000 agent cannot write — so node/corepack
+  (`mkdir ~/.cache/node`), claude's `XDG_STATE_HOME` (`~/.cache/state`), and the redirected
+  git/`gh` config (below) all failed `EACCES`. This is a **writability fix, not a floor relaxation**:
+  the surface is one already-declared-writable tmpfs (invariant 2's writable set is unchanged), it
+  keeps `nosuid`/`exec`/size, and grants **no new capability** — it just makes the agent the owner of
+  its own scratch mount. (`/tmp` needed no fix: Docker special-cases it to sticky `1777`.) The smoke
+  gate probes the `.cache` write; `test_docker_argv` pins `uid=1000` on it. Applied on **recreate**
+  (tmpfs options are fixed at `docker create`; no image rebuild).
 
 ### Credential isolation
 - **No `.credentials.json` ever enters a container.** Auth is a long-lived token minted by
@@ -48,11 +57,50 @@ What crosses each way, and what must never cross:
   email-mismatch guard refuses to cross identities into an existing config dir.
 - The **`gh` PAT stays on the host** — repos are cloned host-side; the container only sees the
   working tree.
+- **Git author identity is non-secret and injected without a writable file.** The container needs a
+  `user.name`/`user.email` for `git commit` (the read-only rootfs blocks `git config --global`
+  writing `~/.gitconfig` → *Author identity unknown*). claude-man renders the identity as git's
+  **ENV-config** (`GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, equivalent to
+  `git -c user.name=…`) — needing no writable file — and, because name/email are not secrets, passes
+  them as plain `-e KEY=value` (`gitconfig.env_for`). The identity is claude-man's `config.toml`
+  `[git]` override, else inherited from the host operator's own `git config --global user.{name,email}`
+  (`gitconfig.resolve_identity`); a blank/unset identity emits nothing. `GIT_CONFIG_GLOBAL` and
+  `GH_CONFIG_DIR` are baked to point at the writable `.cache` tmpfs so any further `git config
+  --global` / `gh` writes land somewhere writable instead of hitting `EROFS`.
+- **`gh` ships as a binary, with no token injected** — invariant 1 is preserved. The base image bakes
+  a pinned GitHub CLI (`config.DEFAULT_GH_VERSION`), but claude-man never injects a `gh` credential:
+  authenticating is the **operator's job**, done in-container via `gh auth login` (writing the
+  agent-writable `GH_CONFIG_DIR`) or by supplying `GH_TOKEN` through an explicit `[[project.env_mount]]`.
+  No host `gh` PAT or host `~/.config/gh` is mounted.
+- **A managed ssh-agent socket forward is ownership-guarded.** Only a socket owned by the host
+  operator is adopted into the container, so a hostile world-writable socket left in the agent's
+  reach can't be smuggled in as the forwarded agent.
 
 ### Network containment
 - Open egress by default; per-project **strict** mode routes all egress through a squid sidecar on
   an `internal: true` network (no direct route → the proxy can't be bypassed). Recommended for
   untrusted project code. The allowlist always includes `claude.ai` (token refresh).
+
+### Subscription-usage query (read-only, host-side)
+- claude-man queries `GET https://api.anthropic.com/api/oauth/usage` host-side, per profile, with that
+  profile's stored OAuth token, to show how close each **account** is to its 5-hour and weekly
+  subscription limits (`usage_api.py`). The fetch is **read-only and consumes no quota**; it never runs
+  inside a container.
+- **The token carries a broadened `user:profile` scope.** `claude setup-token` defaults to
+  `user:inference` only (which `403`s on the usage endpoint), so `setup_token.py` mints with
+  `CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"` (`config.OAUTH_USAGE_SCOPES`). `user:profile`
+  is a **read-only profile/usage scope** — it adds no billing, write, or admin power; the trade-off is
+  that the same token, when present in a container, can also read the account's profile/usage. Existing
+  `user:inference`-only tokens keep working for inference but read `re-mint` on the bars until
+  re-minted (`claudemanctl profile renew <name>`).
+- **The OAuth bearer can't leak via a redirect.** The query uses a no-redirect urllib opener
+  (`usage_api._NoRedirect`): urllib's default redirect handler copies `Authorization` onto a redirect
+  target without stripping it on a cross-host hop, so a `30x` could exfiltrate the account bearer to an
+  attacker host. The opener turns any redirect into an `HTTPError` instead — the token is never sent
+  twice. (Default TLS verification is kept; the host is pinned in `config.OAUTH_USAGE_URL`.) The
+  `User-Agent` must be `claude-code/<ver>` (`config.CLAUDE_CODE_USER_AGENT`) or the endpoint
+  rate-limits hard. Every failure folds into a short note (`re-mint`/`auth`/`offline`/`http NNN`) —
+  no token or response detail is surfaced.
 
 ### Sync-back safety (defence against exfiltration into host config / the setups git repo)
 - The **denylist is enforced before any read** and **re-asserted at git-staging time** — it refuses
@@ -73,7 +121,10 @@ What crosses each way, and what must never cross:
 2. **The token is readable from inside its own container** (`docker inspect`, process env). This is
    inherent to env-var injection and the same caveat Anthropic flags for sandboxed agents. →
    Per-project isolation + strict egress (no arbitrary exfil path) is the real mitigation; recommend
-   strict egress for untrusted code.
+   strict egress for untrusted code. The token also carries the `user:profile` scope (for usage bars),
+   so a token read from inside its container can additionally read that account's profile/usage — but
+   it grants no billing/write power beyond the inference the token already authorises, and the same
+   isolation + strict-egress mitigation applies.
 3. **The hardened profile is stricter than Anthropic's reference devcontainer**; an undocumented
    write path may only surface at runtime (`EROFS`/`getpwuid`). → `image smoke` gate; add writable
    mounts reactively; re-verify per claude version bump.

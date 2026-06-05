@@ -27,9 +27,12 @@ def _parse(data: dict) -> Settings:
     keys = ssh.get("keys", [])
     if not isinstance(keys, list):
         raise ValidationError("config ssh.keys must be a list of host key paths")
+    git = data.get("git", {}) or {}
     return Settings(
         ssh_keys=tuple(str(k) for k in keys),
         ssh_auto_load=bool(ssh.get("auto_load", True)),
+        git_user_name=str(git.get("user_name", "") or ""),
+        git_user_email=str(git.get("user_email", "") or ""),
     )
 
 
@@ -54,6 +57,10 @@ def save(settings: Settings) -> Path:
     ssh["keys"] = list(settings.ssh_keys)
     ssh["auto_load"] = bool(settings.ssh_auto_load)
     doc["ssh"] = ssh
+    git = tomlkit.table()
+    git["user_name"] = settings.git_user_name
+    git["user_email"] = settings.git_user_email
+    doc["git"] = git
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,3 +92,12 @@ def remove_ssh_key(path: str) -> tuple[Settings, bool]:
     )
     save(updated)
     return updated, True
+
+
+def set_git_identity(name: str, email: str) -> Settings:
+    """Set (or clear, with empty strings) the git author identity injected into containers."""
+    updated = dataclasses.replace(
+        load(), git_user_name=name.strip(), git_user_email=email.strip()
+    )
+    save(updated)
+    return updated

@@ -28,9 +28,9 @@ from ..registry.schema import Profile
 _TOKEN_PREFIX = "sk-ant-oat"
 
 
-def _run_interactive(argv: list[str]) -> int:
+def _run_interactive(argv: list[str], *, env: dict | None = None) -> int:
     """Run a claude subcommand with all stdio inherited so its browser/code flow works."""
-    return subprocess.run(argv).returncode
+    return subprocess.run(argv, env=env).returncode
 
 
 def _extract_email(data: object) -> str:
@@ -68,11 +68,18 @@ def _account_email() -> str:
 
 
 def _mint_token() -> str:
-    """Run ``claude setup-token`` interactively and return the pasted token."""
+    """Run ``claude setup-token`` interactively and return the pasted token.
+
+    Mints with ``CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"`` so the token can BOTH run
+    inference (in the container) AND read the account's subscription usage (``/api/oauth/usage`` — the
+    5h/weekly bars). The default ``user:inference``-only token 403s on the usage endpoint.
+    """
     print("→ minting a long-lived token (claude setup-token).", file=sys.stderr)
     print("  Complete the flow in the browser; the token is printed at the end — copy it.",
           file=sys.stderr)
-    rc = _run_interactive(["claude", "setup-token"])
+    env = dict(os.environ)
+    env["CLAUDE_CODE_OAUTH_SCOPES"] = config.OAUTH_USAGE_SCOPES
+    rc = _run_interactive(["claude", "setup-token"], env=env)
     if rc != 0:
         raise RuntimeError(f"`claude setup-token` exited {rc} (cancelled or failed)")
     token = input("Paste the long-lived token: ").strip()

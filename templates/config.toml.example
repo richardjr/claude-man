@@ -1,0 +1,36 @@
+# Global claude-man settings  ->  ~/.config/claude-man/config.toml
+#
+# The "general features" config tier — cross-cutting operator preferences that aren't tied to a
+# single project or account profile. A missing file is not an error: it resolves to built-in
+# defaults. Read with stdlib tomllib; written comment-preserving with tomlkit.
+#
+# Secret-free and git-versionable. Every value here is a non-secret: ssh key PATHS (never key
+# material) and a git author name/email (non-secret identity, not a token). Like the project and
+# profile definitions, this file round-trips cleanly through version control — no credentials.
+#
+# How it's used:
+#   - [ssh].keys are ensure-loaded into the HOST ssh-agent on startup (and on add) so you never have
+#     to `ssh-add` by hand. The keys themselves stay host-side; a container only ever sees the
+#     forwarded agent socket — and only when a project has an `ssh` env-mount.
+#   - [git] identity is injected into containers via git ENV-config (no writable file needed under
+#     the read-only rootfs), so `git commit` works without "Author identity unknown". Changing the
+#     identity needs a `claudemanctl project recreate <slug>` to apply (it's stamped at create time).
+#
+# Edit via the CLI/TUI rather than by hand if you prefer:
+#   claudemanctl config show                       # print resolved settings + git identity
+#   claudemanctl config git --name "…" --email "…" # set the injected git identity (--clear to reset)
+#   claudemanctl config git --clear                # back to inherit-from-host
+# TUI: press ',' for the Settings screen; 'g' edits the git identity (blank field = inherit host).
+
+[ssh]
+# Host private-key PATHS to ensure-load into the host ssh-agent (never the key material itself).
+keys      = ["~/.ssh/id_ed25519"]
+# Load the keys above into the agent automatically on TUI/CLI startup (and whenever one is added).
+auto_load = true
+
+[git]
+# Git author identity injected into every container (plain, non-secret name/email).
+# Leave BLANK ("") to inherit the host operator's `git config --global user.{name,email}`.
+# Changing either value requires `claudemanctl project recreate <slug>` to take effect.
+user_name  = ""
+user_email = ""

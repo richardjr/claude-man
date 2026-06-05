@@ -280,6 +280,8 @@ class Settings:
     """
     ssh_keys: tuple[str, ...] = ()       # host private-key paths to ensure-load into the agent
     ssh_auto_load: bool = True           # load them on TUI/CLI startup (and on add)
+    git_user_name: str = ""              # git author identity injected into containers ("" -> inherit host)
+    git_user_email: str = ""             # "" -> inherit the host's `git config --global user.email`
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:

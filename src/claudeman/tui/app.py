@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import time
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Header, Label, RichLog
 
-from .. import config, lifecycle, usage
+from .. import config, lifecycle, usage, usage_api
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
 from ..docker import status
@@ -36,7 +37,10 @@ from .screens.settings import SettingsScreen
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
-_USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total")
+# "5h"/"Week" are ACCOUNT-wide subscription windows from /api/oauth/usage (not container-scoped).
+_USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", "5h", "Week")
+# Bar colour by utilization band (usage_api.level): green < 70% < yellow < 90% < red.
+_USAGE_LEVEL_STYLE = {"ok": "green", "warn": "yellow", "crit": "red", "none": "dim"}
 
 
 class ClaudeManApp(App):
@@ -88,7 +92,8 @@ class ClaudeManApp(App):
             yield DataTable(id="projects", cursor_type="row")
             yield Label("Repos · —", id="repos-title", classes="panel-title")
             yield DataTable(id="repos")
-            yield Label("Token usage per profile (claude-man containers)", classes="panel-title")
+            yield Label("Token usage per profile (containers) · 5h/Week = account subscription limits",
+                        classes="panel-title")
             yield DataTable(id="profiles")
             yield RichLog(id="log", highlight=True, markup=True)
         yield Footer()
@@ -105,18 +110,23 @@ class ClaudeManApp(App):
         self._gitstate_at: float | None = None  # monotonic of the last completed scan, for the panel title
         self._gitstate_seq = 0       # dispatch counter; the latest-dispatched scan wins the cache merge
         self._gitstate_applied = 0   # seq of the last applied batch (drops a slower batch finishing late)
+        # profile name -> last subscription-usage result (5h/weekly). Fetched off-thread on a gentle
+        # cadence (external endpoint); the usage panel reads this cache for the bar cells.
+        self._util: dict[str, usage_api.UsageResult] = {}
         table = self.query_one("#projects", DataTable)
         self._repos_col = table.add_columns(*_COLUMNS)[_COLUMNS.index("Repos")]
         self.query_one("#repos", DataTable).add_columns(*_REPO_COLUMNS)
         self.query_one("#profiles", DataTable).add_columns(*_USAGE_COLUMNS)
         self.refresh_projects()
         self.refresh_usage()
+        self.refresh_utilization()
         self._dispatch_gitstate(fetch=False)
         self._render_repo_detail()
         self._bootstrap_env()  # load configured ssh keys into the agent so containers can use them
         # Phase 1: poll. Phase 2 upgrades this to a `docker events` worker.
         self.set_interval(2.0, self.refresh_projects)
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
+        self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(8.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
 
     # -- data -------------------------------------------------------------
@@ -147,8 +157,12 @@ class ClaudeManApp(App):
 
     @work(thread=True, exclusive=True, group="usage")
     def refresh_usage(self) -> None:
-        """Scan transcripts + aggregate per-profile usage off the UI thread (review TUI-2 pattern)."""
+        """Scan transcripts + aggregate per-profile usage off the UI thread (review TUI-2 pattern).
+
+        The 5h/Week cells come from the ``_util`` cache (populated by ``refresh_utilization`` on a
+        slower cadence — the external usage endpoint shouldn't be polled at the 15 s transcript rate)."""
         data = usage.usage_by_profile()
+        util = self._util  # snapshot the cache reference (replaced wholesale on the UI thread)
         h = usage.human
         rows: list[tuple] = []
         for name in sorted(data):
@@ -159,9 +173,36 @@ class ClaudeManApp(App):
                 acct = "-"
             age = profiles_registry.token_age_days(name)
             tok = "none" if age is None else (f"{int(age)}d" + ("!" if age > 330 else ""))
+            five, week = self._usage_bars(util.get(name))
             rows.append((name, acct, tok, h(u.input), h(u.output),
-                         h(u.cache_creation + u.cache_read), h(u.total)))
+                         h(u.cache_creation + u.cache_read), h(u.total), five, week))
         self.call_from_thread(self._render_usage, rows)
+
+    @staticmethod
+    def _bar(pct: float | None) -> Text:
+        return Text(usage_api.render_bar(pct), style=_USAGE_LEVEL_STYLE.get(usage_api.level(pct), "dim"))
+
+    def _usage_bars(self, res) -> tuple[Text, Text]:
+        """The (5h, Week) cells for one profile: coloured bars, a dim note (``re-mint``/``offline``),
+        or ``…`` before the first utilization fetch has landed."""
+        if res is None:
+            return Text("…", style="dim"), Text("…", style="dim")
+        if res.util is None:
+            return Text(res.note or "—", style="dim"), Text("", style="dim")
+        return self._bar(res.util.five_hour.pct), self._bar(res.util.seven_day.pct)
+
+    @work(thread=True, exclusive=True, group="util")
+    def refresh_utilization(self) -> None:
+        """Fetch each profile's 5h/weekly subscription usage off the UI thread (gentle cadence).
+
+        Folds every failure into a note inside ``UsageResult`` (never raises), then repaints the panel.
+        A 403 (token minted without the ``user:profile`` scope) shows as ``re-mint``."""
+        results = {name: usage_api.fetch_for_profile(name) for name in profiles_registry.list_names()}
+        self.call_from_thread(self._apply_util, results)
+
+    def _apply_util(self, results: dict) -> None:
+        self._util = results
+        self.refresh_usage()  # repaint the panel with the fresh bars
 
     def _render_usage(self, rows: list[tuple]) -> None:
         table = self.query_one("#profiles", DataTable)
@@ -343,7 +384,8 @@ class ClaudeManApp(App):
 
     def action_refresh_usage(self) -> None:
         self.refresh_usage()
-        self._log("refreshing token usage …")
+        self.refresh_utilization()
+        self._log("refreshing token usage + subscription limits …")
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen())

@@ -50,10 +50,32 @@ class HardenedArgvTest(unittest.TestCase):
         self.assertEqual(a[a.index("--user") + 1], "1000:1000")
         self.assertEqual(a[a.index("--pids-limit") + 1], "1024")
 
+    def test_git_gh_config_dirs_redirected_to_writable_cache(self) -> None:
+        # The read-only rootfs makes ~/.gitconfig and ~/.config/gh unwritable; redirect both to the
+        # writable .cache tmpfs so `git config --global` / `gh` don't fail with EROFS.
+        joined = " ".join(self.argv)
+        self.assertIn("GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig", joined)
+        self.assertIn("GH_CONFIG_DIR=/home/agent/.cache/gh", joined)
+
+    def test_git_identity_env_rendered_as_values(self) -> None:
+        argv = runner.build_create_argv(
+            _project(), profile_name="work", created_iso="t",
+            git_env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                     "GIT_CONFIG_VALUE_0": "Ada Lovelace"},
+        )
+        self.assertTrue(_contains_sublist(argv, ["-e", "GIT_CONFIG_COUNT=1"]))
+        self.assertTrue(_contains_sublist(argv, ["-e", "GIT_CONFIG_KEY_0=user.name"]))
+        self.assertTrue(_contains_sublist(argv, ["-e", "GIT_CONFIG_VALUE_0=Ada Lovelace"]))
+
     def test_tmpfs_mounts(self) -> None:
         tmpfs = [a for a in self.argv if a.startswith("/tmp:") or a.startswith("/home/agent/.cache:")]
         self.assertTrue(any(t.startswith("/tmp:") and "exec" in t for t in tmpfs))
-        self.assertTrue(any(t.startswith("/home/agent/.cache:") for t in tmpfs))
+        # .cache must be pinned agent-owned (uid/gid 1000) + nosuid — a bare tmpfs is root:root 755
+        # and the agent (uid 1000) can't write it (node/corepack + claude's XDG_STATE_HOME break).
+        cache = next(t for t in tmpfs if t.startswith("/home/agent/.cache:"))
+        self.assertIn("uid=1000", cache)
+        self.assertIn("gid=1000", cache)
+        self.assertIn("nosuid", cache)
 
     def test_token_is_passthrough_never_a_value(self) -> None:
         # The token name is present as an env pass-through (no "=value").

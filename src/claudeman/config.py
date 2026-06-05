@@ -29,6 +29,8 @@ EGRESS_MODES = ("open", "strict")
 # Pinned claude version baked into the image (override per build). Keep in sync
 # with images/base/Dockerfile's CLAUDE_VERSION ARG default.
 DEFAULT_CLAUDE_VERSION = "2.1.160"
+# Pinned GitHub CLI version baked into the image (keep in sync with the Dockerfile GH_VERSION ARG).
+DEFAULT_GH_VERSION = "2.93.0"
 
 # ---------------------------------------------------------------------------
 # Baked container paths (must match images/base/Dockerfile)
@@ -42,10 +44,29 @@ CONTAINER_STATE = "/home/agent/.cache/state"      # XDG_STATE_HOME (under the wr
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_SSH_DIR = "/home/agent/.ssh"            # ssh-conditional writable tmpfs (known_hosts/config)
 CONTAINER_SSH_AGENT_SOCK = "/ssh-agent"           # forwarded host ssh-agent socket (path, not a secret)
+# Redirect git's global config + gh's config onto the writable .cache tmpfs — the rootfs is read-only,
+# so the default ~/.gitconfig / ~/.config/gh are not writable and `git config --global` / `gh` would
+# fail ("could not lock config file … Read-only file system"). Identity itself is injected via
+# GIT_CONFIG_COUNT env (no file needed); these just make `git config --global` / `gh auth` work too.
+CONTAINER_GITCONFIG = CONTAINER_CACHE + "/gitconfig"   # GIT_CONFIG_GLOBAL
+CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
 SCRUBBED_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+# ---------------------------------------------------------------------------
+# Subscription usage endpoint (the 5-hour + weekly windows Claude Code's /usage shows)
+# ---------------------------------------------------------------------------
+# GET this with a profile's OAuth bearer token to read per-account 5h/weekly utilization.
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_USAGE_BETA = "oauth-2025-04-20"
+# Mint scopes that enable /api/oauth/usage. `claude setup-token` defaults to `user:inference` only,
+# which 403s on the usage endpoint; minting with `user:profile user:inference` (via the
+# CLAUDE_CODE_OAUTH_SCOPES env var) lets the same token also read subscription usage.
+OAUTH_USAGE_SCOPES = "user:profile user:inference"
+# The usage endpoint rate-limits a generic User-Agent aggressively; send the claude-code UA.
+CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
 
 
 # ---------------------------------------------------------------------------

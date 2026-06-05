@@ -21,12 +21,23 @@ These are security- and correctness-critical. Every change must preserve them.
    (it ignores the token). Relatedly, a **`file` env-mount's container `dst` may never target
    `/home/agent/.claude` (or any managed mount)** — a bind onto `…/.claude/.credentials.json` would
    smuggle a working credentials file in (a verified attack); `schema.EnvMount` rejects it.
+   The in-container **git identity and GitHub CLI do not breach this**: the git author identity is
+   non-secret (`user.name`/`user.email`), injected as git ENV-config (`GIT_CONFIG_COUNT` +
+   `GIT_CONFIG_KEY_n`/`VALUE_n`) rendered as plain `-e KEY=value`; and `gh` is the binary only — **no
+   `GH_TOKEN` is injected** (the operator runs `gh auth login` in-container, or supplies a token via
+   an env-mount).
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, with writable
    surfaces limited to: the persistent `claude-config` bind (`/home/agent/.claude`), the persistent
    `workspace` bind (`/workspace`), two `tmpfs` mounts (`/tmp`, `/home/agent/.cache`, both `exec`),
    and — **only when a project has an `ssh` env-mount** — a `0700` `/home/agent/.ssh` tmpfs (for
-   `known_hosts`/`config`; keys never enter — the host agent socket is forwarded). The image bakes a
+   `known_hosts`/`config`; keys never enter — the host agent socket is forwarded). The
+   `/home/agent/.cache` tmpfs **must be pinned agent-owned** (`uid=1000,gid=1000,mode=0700` in
+   `_HARDENING`): a bare tmpfs defaults to `root:root` mode 755 and the agent (uid 1000) can't write
+   it, so node/corepack (`mkdir ~/.cache/node`), claude's `XDG_STATE_HOME` (`~/.cache/state`), and the
+   git/gh config redirects (below) all fail `EACCES`. Pinning the owner is *not* a floor relaxation —
+   it makes a declared-writable surface actually writable, as this invariant intends (`/tmp` needs no
+   pin: Docker special-cases it to sticky 1777). The image bakes a
    real `/etc/passwd` entry + `HOME` for uid 1000 (without it, `getpwuid` fails under `--read-only
    --user` and `HOME` resolves to `/`). **Env-mounts (`[[project.env_mount]]`) are additive `-v`/
    `--tmpfs`/`-e` only** — `docker/runner.py::_render_env_mounts` never emits a `_HARDENING` flag, so
@@ -62,14 +73,16 @@ src/claudeman/
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
   lifecycle.py         create / up / stop / recreate orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed)
   usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
+  usage_api.py         per-account subscription usage (5-hour + weekly bars) via GET /api/oauth/usage with a profile's OAuth token — no-redirect opener (no cross-host token leak); pure parse/render split from the network fetch
+  gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
-  registry/            projects.py, profiles.py (load/save/default/load_token/token_age), schema.py  — TOML store
-  docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
+  registry/            projects.py, profiles.py (load/save/default/load_token/token_age), settings.py (global config.toml: ssh keys + git identity), schema.py  — TOML store
+  docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed + git_env identity + baked GIT_CONFIG_GLOBAL/GH_CONFIG_DIR redirects), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
   profiles/            setup_token.py (mint/renew/verify via `claude setup-token`+`auth status`), identity.py (scrubbed stub), seed.py (claude-config seeding + host ~/.claude capture)
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount)
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, add_key, menu, pull_confirm, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)
@@ -105,11 +118,16 @@ Key operator verbs (all under `claudemanctl`):
 
 ```bash
 image build base; image smoke base                 # build + gate the hardened image
-profile add <name> [--default|--sso|--email ...]   # mint a token via `claude setup-token`
+profile add <name> [--default|--sso|--email ...]   # mint a token via `claude setup-token` (with the user:profile usage scope)
+profile renew <name>                               # re-mint a token (existing tokens must renew to gain the usage scope → activate the 5h/Week bars)
 profile list | verify <name> | usage | seed <name> # accounts: status, account check, token usage, host-config capture
+profile limits [name]                              # per-account 5h/weekly subscription bars + resets (GET /api/oauth/usage)
 project create <slug> [--profile X] ; project up|stop|status <slug>
-project recreate <slug> [--profile X] [--force]    # rebuild / switch account (mismatch-guarded)
+project recreate <slug> [--profile X] [--force]    # rebuild / switch account (mismatch-guarded; also applies a changed git identity)
 project shell|claude <slug>                         # open a detached terminal into the container
+config show                                         # global settings: resolved git identity + ssh keys/load status
+config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
+config ssh add|rm <path> | config ssh load         # ssh keys claude-man auto-loads into the host agent
 ```
 
 ## Commit & PR rules

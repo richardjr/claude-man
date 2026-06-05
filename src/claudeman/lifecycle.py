@@ -19,7 +19,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import config, ssh_agent
+from . import config, gitconfig, ssh_agent
 from .checkout import gitstate, repos
 from .docker import images, runner
 from .profiles import seed as seed_mod
@@ -203,7 +203,10 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         if on_progress and "no ssh keys configured" not in key_res.detail:
             on_progress(key_res.detail.splitlines()[0])
 
-    cp = runner.create(project, profile_name=profile_name, token=token, created_iso=_now_iso())
+    # Git author identity (config.toml [git] override, else inherited from the host git config),
+    # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
+    cp = runner.create(project, profile_name=profile_name, token=token, created_iso=_now_iso(),
+                       git_env=gitconfig.container_env())
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 

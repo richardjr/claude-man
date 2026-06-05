@@ -57,6 +57,23 @@ class SettingsStoreTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(ssh_keys=("",))
 
+    def test_git_identity_default_empty(self) -> None:
+        s = settings_registry.load()
+        self.assertEqual((s.git_user_name, s.git_user_email), ("", ""))
+
+    def test_git_identity_roundtrip(self) -> None:
+        settings_registry.set_git_identity("  Grace Hopper  ", "grace@example.com")
+        s = settings_registry.load()  # persisted + stripped
+        self.assertEqual(s.git_user_name, "Grace Hopper")
+        self.assertEqual(s.git_user_email, "grace@example.com")
+
+    def test_git_identity_coexists_with_ssh_keys(self) -> None:
+        settings_registry.add_ssh_key("~/.ssh/a")
+        settings_registry.set_git_identity("X", "x@y.z")
+        s = settings_registry.load()
+        self.assertEqual(s.ssh_keys, ("~/.ssh/a",))      # ssh keys preserved across a git write
+        self.assertEqual(s.git_user_name, "X")
+
 
 if __name__ == "__main__":
     unittest.main()

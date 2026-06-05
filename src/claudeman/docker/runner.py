@@ -31,8 +31,13 @@ _HARDENING = [
     "--security-opt", "no-new-privileges",
     "--user", f"{config.CONTAINER_UID}:{config.CONTAINER_GID}",
     "--pids-limit", "1024",
+    # /tmp: Docker mounts a bare tmpfs sticky world-writable (1777), so the agent can write it.
     "--tmpfs", "/tmp:rw,exec,nosuid,size=512m",
-    "--tmpfs", f"{config.CONTAINER_CACHE}:rw,exec,nosuid,size=256m",
+    # .cache: a bare tmpfs defaults to root:root mode=755 (NOT agent-writable) — so it must be pinned
+    # agent-owned, or node/corepack (`mkdir ~/.cache/node`) and claude's XDG_STATE_HOME (~/.cache/state)
+    # fail with EACCES under --read-only --user 1000. The smoke gate probes this write.
+    "--tmpfs", f"{config.CONTAINER_CACHE}:rw,exec,nosuid,size=256m,"
+               f"uid={config.CONTAINER_UID},gid={config.CONTAINER_GID},mode=0700",
 ]
 
 # Baked-but-also-explicit env (matches images/base/Dockerfile).
@@ -41,6 +46,11 @@ _BAKED_ENV = {
     "CLAUDE_CONFIG_DIR": config.CONTAINER_CLAUDE_CONFIG,
     "XDG_CACHE_HOME": config.CONTAINER_CACHE,
     "XDG_STATE_HOME": config.CONTAINER_STATE,
+    # Redirect git/gh config onto the writable .cache tmpfs (rootfs is read-only). Identity itself is
+    # injected via the dynamic GIT_CONFIG_COUNT env (build_create_argv's git_env); these make
+    # `git config --global` and `gh` writes land somewhere writable instead of erroring on EROFS.
+    "GIT_CONFIG_GLOBAL": config.CONTAINER_GITCONFIG,
+    "GH_CONFIG_DIR": config.CONTAINER_GH_CONFIG,
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }
@@ -83,6 +93,7 @@ def build_create_argv(
     inject_token: bool = True,
     file_env: dict[str, str] | None = None,
     ssh_auth_sock: str | None = None,
+    git_env: dict[str, str] | None = None,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
 
@@ -123,6 +134,10 @@ def build_create_argv(
         if key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV:
             continue
         argv += ["-e", key]
+    # Git author identity (GIT_CONFIG_COUNT/KEY_n/VALUE_n) — non-secret name/email, so rendered as a
+    # direct value. Lets `git commit` work under the read-only rootfs without a writable ~/.gitconfig.
+    for key, value in (git_env or {}).items():
+        argv += ["-e", f"{key}={value}"]
 
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
@@ -190,6 +205,7 @@ def create(
     token: str | None = None,
     version: str = config.DEFAULT_CLAUDE_VERSION,
     created_iso: str,
+    git_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token + env_file values through the subprocess env.
 
@@ -208,7 +224,7 @@ def create(
     )
     argv = build_create_argv(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
-        file_env=file_env, inject_token=bool(token), ssh_auth_sock=ssh_sock,
+        file_env=file_env, inject_token=bool(token), ssh_auth_sock=ssh_sock, git_env=git_env,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:

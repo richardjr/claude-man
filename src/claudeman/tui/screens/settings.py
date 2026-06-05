@@ -18,9 +18,10 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
-from ... import lifecycle, ssh_agent
+from ... import gitconfig, lifecycle, ssh_agent
 from ...registry import settings as settings_registry
 from .add_key import AddKeyScreen
+from .git_identity import GitIdentityScreen
 
 _KEY_COLUMNS = ("Ssh key", "Status")
 
@@ -32,6 +33,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("a", "add", "Add key"),
         Binding("x", "remove", "Remove"),
         Binding("l", "load", "Load all"),
+        Binding("g", "git_identity", "Git identity"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -52,16 +54,27 @@ class SettingsScreen(ModalScreen[None]):
         with Vertical(id="dialog"):
             yield Label("Settings · ssh keys (auto-loaded into the agent on startup)", classes="title")
             yield DataTable(id="keys", cursor_type="row")
-            yield Label("a Add · x Remove · l Load all · esc Close", id="settings-status")
+            yield Label("", id="git-identity", classes="panel-title")
+            yield Label("a Add · x Remove · l Load all · g Git identity · esc Close", id="settings-status")
             with Horizontal(id="buttons"):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Load all", id="load")
+                yield Button("Git", id="git")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
         self.query_one("#keys", DataTable).add_columns(*_KEY_COLUMNS)
+        self._render_git_identity()
         self._refresh_status()
+
+    def _render_git_identity(self) -> None:
+        name, email = gitconfig.resolve_identity()
+        s = settings_registry.load()
+        src = "config" if (s.git_user_name or s.git_user_email) else ("host" if (name or email) else "unset")
+        self.query_one("#git-identity", Label).update(
+            f"Git identity: {name or '(unset)'} <{email or '(unset)'}>  [{src}] · g to edit (recreate to apply)"
+        )
 
     # -- data -------------------------------------------------------------
     def _keys(self) -> tuple[str, ...]:
@@ -141,6 +154,22 @@ class SettingsScreen(ModalScreen[None]):
     def _after_mutation(self, res: lifecycle.Result) -> None:
         self._status(res)
         self._refresh_status()
+
+    @on(Button.Pressed, "#git")
+    def action_git_identity(self) -> None:
+        s = settings_registry.load()
+        host_name, host_email = gitconfig._host_git("user.name"), gitconfig._host_git("user.email")
+        self.app.push_screen(
+            GitIdentityScreen(s.git_user_name, s.git_user_email, host_name, host_email), self._on_git
+        )
+
+    def _on_git(self, identity) -> None:
+        if identity is None:
+            return
+        name, email = identity
+        settings_registry.set_git_identity(name, email)
+        self._render_git_identity()
+        self._status(lifecycle.Result(True, "git identity saved — recreate a project to apply"))
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

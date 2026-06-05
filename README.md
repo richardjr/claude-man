@@ -24,11 +24,12 @@ It exists to solve four things at once:
 
 > Status: **Phases 0–2 + most of Phase 3 working** (2026-06-05). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
-> (mismatch-guarded); watch per-account token usage; add / remove / inspect a project's git repos with
-> live state; and mount ssh (agent-forward) + host files into a container — all from both the CLI and
-> the TUI. Phase 3 remainder (`project delete`, version-bump), Phase 4 (strict egress) and Phase 5
-> (sync-back) are next — see [`ROADMAP.md`](ROADMAP.md). 143 dependency-free tests; the hardened image
-> is `image smoke`-gated.
+> (mismatch-guarded); watch per-account token usage **and live 5-hour / weekly subscription-limit
+> bars**; commit + push from inside a container (inherited git identity + `gh` baked into every image);
+> add / remove / inspect a project's git repos with live state; and mount ssh (agent-forward) + host
+> files into a container — all from both the CLI and the TUI. Phase 3 remainder (`project delete`,
+> version-bump), Phase 4 (strict egress) and Phase 5 (sync-back) are next — see [`ROADMAP.md`](ROADMAP.md).
+> 193 dependency-free tests; the hardened image is `image smoke`-gated.
 
 ## How it fits together
 
@@ -122,8 +123,22 @@ uv run claudemanctl profile list            # all profiles, default flag, token 
 uv run claudemanctl profile verify work     # which account the token authenticates as (--raw for JSON)
 uv run claudemanctl profile renew work      # re-mint an expired token (≈1-year life, can't self-refresh)
 uv run claudemanctl profile seed work       # (re)capture the host ~/.claude seed new projects inherit
-uv run claudemanctl profile usage           # per-account token usage across all projects
+uv run claudemanctl profile usage           # per-account token usage across all projects (from transcripts)
+uv run claudemanctl profile limits [work]   # per-account 5-hour + weekly subscription-limit bars + reset
 ```
+
+### Subscription usage bars (5-hour + weekly)
+
+`profile limits` (and the TUI's per-profile panel) show how close each **account** is to its Claude
+subscription limits — the rolling 5-hour and weekly *utilization* windows that `claude`'s `/usage`
+reports. claude-man reads `GET …/api/oauth/usage` host-side with each profile's stored OAuth token; it's
+read-only and **does not consume quota**. These are account-wide figures (all usage on the account, host
+sessions included), not just what claude-man's containers spent.
+
+Reading usage needs the token to carry the `user:profile` scope. `claude setup-token` historically
+minted `user:inference` only, so **existing tokens read `re-mint` until you re-mint them** —
+`claudemanctl profile renew <name>` mints a token with both scopes (it runs inference *and* reads
+usage). Newly added profiles already get both scopes.
 
 ## Managing projects
 
@@ -159,6 +174,7 @@ uv run claudemanctl project repo add demo git@github.com:org/svc.git   # registe
 #   --no-clone        register only; a later `sync-repos` clones it
 uv run claudemanctl project repo list demo     # per-repo live state table (fetch-less)
 uv run claudemanctl project sync-repos demo    # clone any missing + git fetch all, then show state
+uv run claudemanctl project pull demo          # fast-forward each repo (ff-only; skips dirty/diverged)
 uv run claudemanctl project repo rm demo svc   # drop from the registry (checkout left on disk)
 uv run claudemanctl project repo rm demo svc --purge   # ...and delete the on-disk checkout
 ```
@@ -181,6 +197,35 @@ uv run claudemanctl project env rm demo /home/agent/.netrc            # by conta
 
 A single-repo project launches `claude`/shell **in the repo dir** by default (`docker exec -w`); set
 `[project] workdir = "<subdir>"` in the TOML to override (a multi-repo project defaults to `/workspace`).
+
+### Git identity + GitHub CLI (`gh`) inside the container
+
+So the agent can `git commit` and `gh` under the read-only rootfs:
+
+- **Git author identity** is injected as git env-config (no writable file needed). It defaults to your
+  **host** `git config --global user.{name,email}`; override it per-host in claude-man's global settings.
+  The on-disk `git config --global` and `gh` config land on a writable tmpfs, so `git config --global`
+  and `gh auth login` work in-container without hitting the read-only rootfs. **Changing the identity
+  needs a `recreate`** to take effect.
+- **`gh` is baked into every image** (pinned GitHub CLI; rebuild base, then any overlay, to add it to an
+  existing install). No GitHub token is injected — auth is the operator's job: run `gh auth login` inside
+  the container (it writes the writable config dir), or supply a `GH_TOKEN` via a `file`/env mount.
+
+```bash
+uv run claudemanctl config show                    # resolved git identity + ssh-key load status
+uv run claudemanctl config git                      # print the resolved identity (host or override)
+uv run claudemanctl config git --name "You" --email you@example.com   # set a claude-man override
+uv run claudemanctl config git --clear              # drop the override; inherit the host git config
+
+# gh needs an image rebuild + a recreate of the project:
+uv run claudemanctl image build base
+uv run claudemanctl image build node                # (or whichever overlay the project uses)
+uv run claudemanctl project recreate demo
+```
+
+In the TUI, the **Settings** screen (press `,`) shows the resolved identity and ssh-key status; press
+`g` there to open the git-identity edit modal (leave a field blank to inherit the host). Recreate a
+project afterwards to apply.
 
 ## Building images
 

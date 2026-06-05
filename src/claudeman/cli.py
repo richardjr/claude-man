@@ -138,6 +138,30 @@ def cmd_profile_usage(args) -> int:
     return 0
 
 
+def cmd_profile_limits(args) -> int:
+    from . import usage_api
+
+    names = [args.name] if args.name else profiles.list_names()
+    if not names:
+        print("(no profiles defined)")
+        return 0
+    print(f"{'PROFILE':<12} {'5-HOUR':<16} {'WEEKLY':<16} RESETS (5h)")
+    needs_renew = False
+    for name in names:
+        res = usage_api.fetch_for_profile(name)
+        if res.util is not None:
+            print(f"{name:<12} {usage_api.render_bar(res.util.five_hour.pct):<16} "
+                  f"{usage_api.render_bar(res.util.seven_day.pct):<16} {res.util.five_hour.resets_at}")
+        else:
+            needs_renew = needs_renew or res.note in ("re-mint", "auth")
+            print(f"{name:<12} {res.note}")
+    if needs_renew:
+        print("\n're-mint' = token lacks the user:profile scope · 'auth' = token expired/invalid. "
+              "Either way: `claudemanctl profile renew <name>` re-mints it (with usage access).",
+              file=sys.stderr)
+    return 0
+
+
 def cmd_profile_seed(args) -> int:
     from .profiles import seed
 
@@ -433,11 +457,14 @@ def cmd_sync_plan(args) -> int:
 # config (global settings — ssh keys + general features)
 # --------------------------------------------------------------------------
 def cmd_config_show(args) -> int:
-    from . import ssh_agent
+    from . import gitconfig, ssh_agent
     from .registry import settings as settings_registry
 
     s = settings_registry.load()
     print(f"config: {config.settings_toml_path()}")
+    name, email = gitconfig.resolve_identity()
+    src = "config" if (s.git_user_name or s.git_user_email) else ("host" if (name or email) else "unset")
+    print(f"git identity: {name or '(unset)'} <{email or '(unset)'}>  [{src}]")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -471,6 +498,28 @@ def cmd_config_ssh_load(args) -> int:
     res = lifecycle.ensure_ssh_keys(force=True)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
+
+
+def cmd_config_git(args) -> int:
+    from . import gitconfig
+    from .registry import settings as settings_registry
+
+    if args.clear:
+        settings_registry.set_git_identity("", "")
+        print("git identity cleared (containers will inherit the host git config). Recreate to apply.")
+        return 0
+    if args.name is not None or args.email is not None:
+        s = settings_registry.load()
+        updated = settings_registry.set_git_identity(
+            args.name if args.name is not None else s.git_user_name,
+            args.email if args.email is not None else s.git_user_email,
+        )
+        print(f"git identity set: {updated.git_user_name} <{updated.git_user_email}>. Recreate to apply.")
+        return 0
+    name, email = gitconfig.resolve_identity()
+    print(f"resolved git identity: {name or '(unset)'} <{email or '(unset)'}>")
+    print("set with `config git --name '…' --email '…'`, or `--clear` to inherit the host git config.")
+    return 0
 
 
 def cmd_image_build(args) -> int:
@@ -534,6 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
     prof.add_parser("usage", help="token usage per profile across claude-man projects").set_defaults(
         func=cmd_profile_usage
     )
+    pl = prof.add_parser("limits", help="per-account 5h/weekly subscription usage (/api/oauth/usage)")
+    pl.add_argument("name", nargs="?", help="a single profile (default: all)")
+    pl.set_defaults(func=cmd_profile_limits)
 
     # project
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)
@@ -637,6 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
     cssh.add_parser("load", help="load all configured keys into the agent now").set_defaults(
         func=cmd_config_ssh_load
     )
+    cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
+    cg.add_argument("--name", help="set git user.name (overrides host inherit)")
+    cg.add_argument("--email", help="set git user.email")
+    cg.add_argument("--clear", action="store_true", help="clear the override (inherit the host git config)")
+    cg.set_defaults(func=cmd_config_git)
 
     # image
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)

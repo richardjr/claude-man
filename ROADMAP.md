@@ -8,7 +8,7 @@ subsystem. Each phase lists its goal and concrete deliverables. Checkboxes track
 > the hardened profile) plus the `--env-file` credential-scrub gap are addressed in the new
 > **Phase 0.5**. Lower-severity findings are folded into the phase that owns them (tagged inline).
 
-## Current status — 2026-06-04
+## Current status — 2026-06-05
 
 **Done & verified:** Phase 0, **Phase 0.5** (hardened image runs `claude` under `--read-only
 --user`; `image smoke` gate; native `~/.local` install so `claude doctor` is clean; `env_file`
@@ -31,13 +31,22 @@ bypass, plus the ssh tmpfs, the hardened tmpfs mountpoints, and the baked claude
 operator-owned) with a `cp`-style trailing-slash dst; src must be absolute (else docker makes a named
 volume); `openssh-client` added to the base image. The **TUI** adds an `e` env-mounts manager screen
 (list / add / remove / resync). A **`workdir`** option (`Project.launch_workdir`) makes `claude`/shell
-open via `docker exec -w` in a lone repo's dir by default (else `/workspace`). 138 dependency-free
-tests + headless-pilot + real-daemon smokes; ruff clean.
+open via `docker exec -w` in a lone repo's dir by default (else `/workspace`). **Per-account
+subscription usage bars** — `usage_api.py` reads `GET /api/oauth/usage` (5-hour + weekly utilization
+%, account-wide) host-side per profile; surfaced as coloured mini-bars in the TUI usage panel (`5h` +
+`Week` columns, `u` refreshes) + `profile limits` CLI (see Phase 2). **In-container git identity + gh**
+— `gitconfig.py` injects the operator's git author identity via `GIT_CONFIG_*` env (no writable file
+needed under `--read-only`); the base image ships pinned `gh 2.93.0`; git/gh config redirected onto the
+writable `.cache` tmpfs (see Phases 0.5 + 1). 193 dependency-free
+tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
+`.cache`/`gh`/git probes).
 
 **You can today:** mint work/home profiles, create projects on either account, start/stop/shell/run
-claude in hardened containers, switch a project's account, watch per-account token usage, add / remove /
-inspect a project's checked-out repos with live git state, and mount ssh (agent-forward) + host files
-into a container (`project env` + `project resync`) — all from both the CLI and the TUI.
+claude in hardened containers, switch a project's account, watch per-account token usage **and live
+5-hour/weekly subscription-limit bars**, add / remove / inspect a project's checked-out repos with live
+git state, mount ssh (agent-forward) + host files into a container (`project env` + `project resync`),
+and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity — all
+from both the CLI and the TUI.
 
 **Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
 table to an async `docker ps`/`docker events` worker (TUI-2); the one-claude-per-container guard
@@ -48,7 +57,19 @@ items live in [`docs/REVIEW.md`](docs/REVIEW.md).
 **Operator note:** containers built before the native-install image change show stale `claude
 doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
 The `openssh-client` base-image addition (for in-container ssh) likewise needs `image build base` +
-a `project recreate <slug>` to take effect on existing projects.
+a `project recreate <slug>` to take effect on existing projects. Activating this session's three
+features on existing setups:
+
+- **Usage bars:** existing tokens were minted with `user:inference` only and 403 on the usage
+  endpoint (the bars read `re-mint`). Run `claudemanctl profile renew <name>` to re-mint with the
+  `user:profile` scope and unlock the 5h/weekly bars.
+- **`.cache` writability fix + git identity:** both are container-create options (tmpfs uid/gid +
+  `GIT_CONFIG_*` env), so `claudemanctl project recreate <slug>` applies them with **no image
+  rebuild**. Recreate is also required after changing the git identity (`config git …` / the TUI
+  Settings screen).
+- **`gh`:** the pinned `gh 2.93.0` is baked into the base image, so it needs an **image rebuild** —
+  `claudemanctl image build base` then `image build node` (or the relevant overlay) + a
+  `project recreate <slug>`. `gh auth` stays the operator's job (no token is injected).
 
 ## Phase 0 — Repo scaffold + image
 **Goal:** a buildable repo and a smoke-tested hardened image, no app logic yet.
@@ -75,6 +96,14 @@ SEC-2, IMG-2/5, IMG-3.)
   `claude --version`, getpwuid, `rg`→`/usr/bin/rg`, writable `.claude` bind; one-shot `claude -p`
   when a token exists (passes against the default profile)
 - [x] **SEC-2 (high):** `env_file` scrubbed host-side (pass-through, values out of argv) + tests
+- [x] **`.cache` tmpfs writability (hardened-profile bug):** a bare `/home/agent/.cache` tmpfs
+  defaulted to `root:root` mode 755, so the agent (uid 1000) couldn't write it —
+  `node`/`corepack` (`mkdir ~/.cache/node`) and claude's `XDG_STATE_HOME=~/.cache/state` failed
+  `EACCES` (`/tmp` was fine — Docker special-cases it to sticky `1777`). `runner._HARDENING` now
+  pins the `.cache` tmpfs `uid=1000,gid=1000,mode=0700` (keeping `nosuid,exec,size`). NOT a floor
+  relaxation — the writable surface is now actually agent-writable, as invariant 2 intends.
+  `image smoke` adds a writable-`.cache` probe; `test_docker_argv` pins `uid=1000`. Applies on
+  `recreate` (no image rebuild).
 - [ ] **IMG-4 (deferred to Phase 4 prep):** overlay toolchain caching (`COREPACK_HOME`, uv cache)
 
 ## Phase 1 — Runnable skeleton (one project, default profile)
@@ -88,6 +117,24 @@ SEC-2, IMG-2/5, IMG-3.)
 - [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (TUI-5)
 - [x] Auth: `profiles.load_token(name)` injects a `0600` token file as `CLAUDE_CODE_OAUTH_TOKEN`; minted by `profile add` (Phase 2); `ANTHROPIC_*` scrubbed incl. `env_file` (0.5)
 - [ ] **SEC-3:** enforce "one claude per container" at the spawn paths (guard not yet implemented; CLAUDE.md invariant 6 wording reflects this)
+- [x] **In-container git identity + GitHub CLI (under `--read-only` rootfs):** `git commit` failed
+  (*Author identity unknown*) and `git config --global` hit EROFS on the read-only rootfs. New
+  `gitconfig.py` injects the author identity via git ENV-config (`GIT_CONFIG_COUNT` +
+  `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, equivalent to `git -c user.name=…`) — no writable file
+  needed; precedence is the claude-man `[git]` setting (`config.toml`) else the host operator's
+  `git config --global user.{name,email}`. Identity is non-secret → plain `-e KEY=value`, injected at
+  `docker create` via `build_create_argv(git_env=…)` ← `lifecycle.ensure_created` ←
+  `gitconfig.container_env()`. `GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig` +
+  `GH_CONFIG_DIR=/home/agent/.cache/gh` (baked in `runner._BAKED_ENV` + the Dockerfile) redirect
+  git/gh config onto the writable `.cache` tmpfs. The base image installs pinned `gh 2.93.0`
+  (`config.DEFAULT_GH_VERSION` + `ARG GH_VERSION`, arch-aware upstream `.deb` — `gh` isn't in Debian
+  repos); `gh auth` is the operator's job (no token injected — `gh auth login` in-container, or supply
+  `GH_TOKEN` via an env-mount). Settings: `Settings.git_user_name/git_user_email` + `[git]` in
+  `config.toml`; TUI Settings screen (`,`) shows the resolved identity, `g` opens a `GitIdentityScreen`
+  edit modal (blank = inherit host); CLI `config git [--name … --email … | --clear]` (`config show`
+  also prints the resolved identity). `image smoke` adds `gh` present + writable git/gh-config probes.
+  Identity change needs a `recreate`; `gh` needs an image rebuild (`image build base`, then the overlay)
+  + `recreate`.
 
 ## Phase 2 — Profiles (work/home) + per-project default
 **Goal:** multiple account profiles with a per-project default and safe switching.
@@ -101,6 +148,22 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
 - [x] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profiles.save` (single-default); `profile.toml` schema + default resolution
 - [x] `claude-config/` seeding from the profile `seed/` through the denylist; `profile seed` captures host `~/.claude` (settings.json field-patched per SYNC-2, cruft excluded); create/`recreate` use the effective profile
 - [x] profile column + **per-profile token-usage panel + token age in the TUI** (`u` to refresh; worker-scanned off the UI thread) + `profile usage` CLI; switch-time email-mismatch guard (`recreate --force`)
+- [x] **Per-account subscription usage bars (5-hour + weekly):** `usage_api.py` reads
+  `GET https://api.anthropic.com/api/oauth/usage` (`config.OAUTH_USAGE_URL`, beta
+  `oauth-2025-04-20`) with a profile's OAuth bearer → `five_hour` + `seven_day` utilization % (0–100)
+  + reset times (per-model `seven_day_opus/sonnet` parsed, not yet surfaced). These are **account-wide
+  subscription limits** (all usage on the account, not just claude-man containers — the panel title
+  says so), distinct from the transcript token-totals. Pure parse/render
+  (`parse_utilization`/`render_bar`/`level`) split from the network fetch. **Security:** a no-redirect
+  urllib opener (`_NoRedirect`) so a 30x never re-sends the `Authorization` bearer cross-host
+  (credential-leak fix, invariant 1); `User-Agent` pinned to `claude-code/<ver>`
+  (`config.CLAUDE_CODE_USER_AGENT`) to avoid hard rate-limiting; read-only, does NOT consume quota.
+  **Token scope:** `setup_token.py` now mints with `CLAUDE_CODE_OAUTH_SCOPES="user:profile
+  user:inference"` (`config.OAUTH_USAGE_SCOPES`) so the SAME token runs inference AND reads usage;
+  existing `user:inference`-only tokens 403 (bars read `re-mint`) until `profile renew <name>`.
+  **TUI:** the usage panel gains `5h` + `Week` coloured mini-bars (green <70% / yellow <90% / red),
+  fed by a 60 s off-thread `refresh_utilization` worker cached in `self._util` (`u` refreshes both).
+  **CLI:** `profile limits [name]` prints per-account 5h/weekly bars + reset.
 - [~] docker-events-driven refresh — the projects table still polls (TUI-2); the usage panel already uses a thread worker
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle

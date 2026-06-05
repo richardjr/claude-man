@@ -112,3 +112,53 @@ dismiss via button/Enter/Escape; worker robustness: forced `OSError` and `KeyErr
 shell`/`claude` exec boundary in `terminals.py`, *distinct* from the create-form slug check this
 work added. **SEC-3** (one-claude guard) and **TUI-2** (async projects poll) also remain open; TUI-2
 in particular would further reduce the create-worker/poll contention noted in FORM-2.
+
+# Usage-bars + hardened-surface fixes review — 2026-06-05
+
+Per-feature adversarial reviews of three changes shipped this session: per-account subscription
+**usage bars** (`usage_api.py` + the TUI usage panel + `profile limits` CLI), the **`.cache` tmpfs
+writability** fix (`docker/runner.py::_HARDENING`), and the **in-container git identity + GitHub CLI**
+work (`gitconfig.py`, `_BAKED_ENV`, `images/base/Dockerfile`). Each review was scoped to its own
+diff. Net: **1 HIGH (credential-leak) found + fixed and proven, plus a handful of LOW hardening
+nits**; the hardened floor (invariant 2) and the no-`.credentials.json`/no-`ANTHROPIC_*` rule
+(invariant 1) are preserved by every change — the usage fetch is host-side and read-only, the
+identity is non-secret name/email, and the `.cache`/git-config writable surfaces are all *additive*
+to the existing writable set, not relaxations of the floor.
+
+## High
+
+| ID | Location | Finding | Fix | Status |
+|----|----------|---------|-----|--------|
+| USE-1 | `usage_api.py:fetch_utilization` | The usage fetch sends the profile's `CLAUDE_CODE_OAUTH_TOKEN` as an `Authorization: Bearer` header. urllib's default `HTTPRedirectHandler` re-attaches `Authorization` onto a redirect target **without stripping it on a cross-host hop** — a 30x from the endpoint (or a MITM-injected one) would leak the account OAuth credential to an arbitrary host (breaks invariant 1). | A module-level `_NoRedirect(HTTPRedirectHandler)` opener whose `redirect_request` returns `None`, turning any 30x into an `HTTPError` the caller folds into a `"http NNN"` note — the bearer is never sent twice. Proven by a live redirect test (the opener refuses to follow + never re-emits the header). | DONE (2026-06-05) |
+
+## Low
+
+| ID | Location | Finding | Fix | Status |
+|----|----------|---------|-----|--------|
+| USE-2 | `usage_api.py:_window`/`level` | A NaN/inf `utilization` value would survive into `level()`, where `NaN >= 90` is `False` and the bar would misleadingly band as `ok`. | `_window` accepts an `int`/`float` only when `math.isfinite(u)` (and excludes `bool`, an `int` subclass); a non-finite value reads as `pct=None` → renders `—`, not a false `ok`. | DONE (2026-06-05) |
+| USE-3 | `usage_api.py`; `cli.py profile limits` | A 403 (token minted with the `setup-token` default `user:inference` scope only) and a 401 (expired) folded into the same generic failure note, giving the operator no actionable hint. | Distinct notes: 403 → `re-mint` (the token lacks `user:profile`; re-mint via `claudemanctl profile renew <name>` — `setup_token.py` now mints with `CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"`), 401 → `auth`, plus a CLI auth hint on the limits view. | DONE (2026-06-05) |
+| CACHE-1 | `docker/runner.py:_HARDENING` | Surfaced from in-container failures, not a static review: the `/home/agent/.cache` tmpfs was mounted with no `uid`/`gid`, so Docker defaulted it `root:root` mode `755` and the agent (uid 1000) could not write it — `yarn`/`corepack` (`mkdir ~/.cache/node`) and claude's `XDG_STATE_HOME=~/.cache/state` failed `EACCES` under `--read-only --user`. (`/tmp` was unaffected — Docker special-cases it to sticky `1777`.) **Not a floor relaxation**: the writable surface invariant 2 already promises was simply not writable. | Pin the `.cache` tmpfs `uid=1000,gid=1000,mode=0700` (agent-owned), keeping `nosuid`/`exec`/`size`. `docker/smoke.py` gains a writable-`.cache`-tmpfs probe; `test_docker_argv` pins `uid=1000`. Applies on **recreate** (tmpfs options are fixed at container create; no image rebuild). | DONE (2026-06-05) |
+
+## Notes (git identity + gh — no defects)
+
+The in-container git-identity/`gh` work was reviewed for invariant impact and found clean — no
+severity-bearing findings, recorded here for the audit trail:
+
+- **Read-only-rootfs git identity.** `git commit` failed (*Author identity unknown*) and `git config
+  --global` failed (*could not lock `/home/agent/.gitconfig`: Read-only file system*). The fix injects
+  identity via git ENV-config (`GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, the
+  `git -c user.name=…` equivalent), which needs **no writable file**, and redirects
+  `GIT_CONFIG_GLOBAL`/`GH_CONFIG_DIR` onto the writable `.cache` tmpfs (baked in `runner._BAKED_ENV`
+  + the Dockerfile `ENV`). Identity precedence: `config.toml` `[git]` override, else inherited from the
+  host operator's own `git config --global user.{name,email}`. Name/email are **non-secret**, rendered
+  as plain `-e KEY=value`; no token of any kind is injected. Changing identity needs a **recreate**.
+- **GitHub CLI.** The base image pins `gh 2.93.0` via the upstream `.deb` (arch-aware; `gh` is not in
+  Debian repos). `gh auth` is the **operator's** job — no `GH_TOKEN` is injected; `gh auth login`
+  writes the writable `GH_CONFIG_DIR`, or the operator supplies `GH_TOKEN` via an env-mount. Picking up
+  `gh` needs an **image rebuild** (`image build base`, then `image build node`/…) **+ recreate**.
+- `docker/smoke.py` gained probes for `gh` present + `git config --global` writable. End-to-end in a
+  fresh hardened node container: `git commit` → correct inherited identity, `gh --version` → 2.93.0,
+  `git config --global` → OK, `mkdir ~/.cache/node` → OK.
+
+All 193 unittests pass, `ruff` clean, and `claudemanctl image smoke base` PASSED including the new
+`.cache`/`gh`/git-config-writable probes.

@@ -13,6 +13,7 @@
 FROM debian:trixie-slim
 
 ARG CLAUDE_VERSION=2.1.160
+ARG GH_VERSION=2.93.0
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
 # openssh-client provides `ssh` for in-container git-over-ssh when a project adds an `ssh` env-mount
@@ -22,6 +23,18 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git ripgrep nodejs npm openssh-client; \
     rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (`gh`) — not in Debian's repos, so install the pinned upstream .deb (arch-aware). Gives
+# every container `gh` for PRs/issues; auth is the operator's (GH_TOKEN env, or `gh auth login` into the
+# writable GH_CONFIG_DIR below).
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL -o /tmp/gh.deb \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.deb"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends /tmp/gh.deb; \
+    rm -rf /tmp/gh.deb /var/lib/apt/lists/*; \
+    gh --version
 
 # Non-root user with a real passwd entry and a baked home dir (owned 1000:1000).
 RUN set -eux; \
@@ -55,6 +68,8 @@ ENV HOME=/home/agent \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     XDG_CACHE_HOME=/home/agent/.cache \
     XDG_STATE_HOME=/home/agent/.cache/state \
+    GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig \
+    GH_CONFIG_DIR=/home/agent/.cache/gh \
     PATH=/home/agent/.local/bin:$PATH \
     USE_BUILTIN_RIPGREP=0 \
     DISABLE_AUTOUPDATER=1

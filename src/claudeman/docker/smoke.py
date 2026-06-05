@@ -63,6 +63,17 @@ def _base_probes() -> list[Probe]:
         # writable surfaces actually accept writes (the .claude bind + the state tmpfs).
         Probe("writable .claude bind", ["sh", "-lc", "touch /home/agent/.claude/.smoke && echo ok"],
               required=True, expect="ok"),
+        # the .cache tmpfs must be agent-WRITABLE (XDG_CACHE_HOME + claude's XDG_STATE_HOME live here,
+        # and node/corepack mkdir ~/.cache/node) — a root:root 755 tmpfs fails this with EACCES.
+        Probe("writable .cache tmpfs", ["sh", "-lc", "mkdir -p /home/agent/.cache/node && echo ok"],
+              required=True, expect="ok"),
+        # gh must be installed + runnable as the agent (Debian has no `gh` package — it's the upstream .deb).
+        Probe("gh present", ["gh", "--version"], required=True, expect="gh version"),
+        # `git config --global` must write somewhere (GIT_CONFIG_GLOBAL -> writable .cache), not EROFS the
+        # read-only ~/.gitconfig — else in-container git is unusable.
+        Probe("git config --global writable",
+              ["sh", "-lc", "git config --global user.email smoke@example.com && echo ok"],
+              required=True, expect="ok"),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]
