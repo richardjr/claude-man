@@ -117,6 +117,16 @@ class RegistryTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             projects.load("bad")
 
+    def test_gh_token_in_project_env_rejected(self) -> None:
+        # GH_TOKEN is a secret — it must never be declared in [project.env] (the git-versionable tier);
+        # configure it via `config gh-token`. Schema rejects it loudly (like the ANTHROPIC_* keys).
+        with self.assertRaises(ValidationError):
+            Project(slug="x", env={"GH_TOKEN": "ghp_leak"})
+        toml = '[project]\nslug = "ghbad"\n\n[project.env]\nGH_TOKEN = "ghp_leak"\n'
+        (Path(self.tmp.name) / "projects" / "ghbad.toml").write_text(toml)
+        with self.assertRaises(ValidationError):
+            projects.load("ghbad")
+
     def test_load_profile_and_default(self) -> None:
         prof = profiles.load("home")
         self.assertTrue(prof.default)

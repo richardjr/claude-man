@@ -23,9 +23,15 @@ These are security- and correctness-critical. Every change must preserve them.
    smuggle a working credentials file in (a verified attack); `schema.EnvMount` rejects it.
    The in-container **git identity and GitHub CLI do not breach this**: the git author identity is
    non-secret (`user.name`/`user.email`), injected as git ENV-config (`GIT_CONFIG_COUNT` +
-   `GIT_CONFIG_KEY_n`/`VALUE_n`) rendered as plain `-e KEY=value`; and `gh` is the binary only — **no
-   `GH_TOKEN` is injected** (the operator runs `gh auth login` in-container, or supplies a token via
-   an env-mount).
+   `GIT_CONFIG_KEY_n`/`VALUE_n`) rendered as plain `-e KEY=value`. `gh` is the binary only **by
+   default**; a **`GH_TOKEN` is injected only when the operator explicitly configures one**
+   (`config gh-token`, or the Settings `t` entry) — stored `0600` in the **state tier**
+   (`gh_token.py` → `config.gh_token_path()`; NEVER in the secret-free `config.toml`, never synced),
+   injected **pass-through** (`-e GH_TOKEN`, value via the child env, never argv) exactly like the
+   OAuth token, and only into containers when set. This is safe where `ANTHROPIC_*` is not: `GH_TOKEN`
+   doesn't outrank Claude auth or mis-bill, so opt-in injection doesn't breach invariant 1. With no
+   token configured, none is injected (the operator can still `gh auth login` in-container or supply
+   one via an env-mount). The token value is never echoed (`config show` reports only set/none).
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, with writable
    surfaces limited to: the persistent `claude-config` bind (`/home/agent/.claude`), the persistent
@@ -76,6 +82,7 @@ src/claudeman/
   usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
   usage_api.py         per-account subscription usage (5-hour + weekly bars) via GET /api/oauth/usage with a profile's OAuth token — no-redirect opener (no cross-host token leak); pure parse/render split from the network fetch
   gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
+  gh_token.py          optional GitHub token (state-tier 0600, NOT config.toml) injected pass-through as GH_TOKEN for in-container `gh` — opt-in via `config gh-token` (invariant 1)
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
   registry/            projects.py, profiles.py (load/save/default/load_token/token_age), settings.py (global config.toml: ssh keys + git identity), schema.py  — TOML store
   docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed + git_env identity + baked GIT_CONFIG_GLOBAL/GH_CONFIG_DIR redirects), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
@@ -83,7 +90,7 @@ src/claudeman/
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, add_key, menu, pull_confirm, delete_project, quit_confirm, logs, sync_review)
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, quit_confirm, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)
@@ -130,6 +137,7 @@ project assets <slug> [--bootstrap]                 # show the synced asset sour
 project sync <slug> [--in]                          # manually sync assets out (bind -> source); --in forces sync-in (source -> bind)
 config show                                         # global settings: resolved git identity + ssh keys/load status
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
+config gh-token [--clear | --stdin]                # set/clear the GitHub token injected as GH_TOKEN (hidden prompt; 0600 state-tier; recreate to apply)
 config ssh add|rm <path> | config ssh load         # ssh keys claude-man auto-loads into the host agent
 ```
 

@@ -275,6 +275,12 @@ class Project:
                 raise ValidationError(
                     f"env key {k!r} is forbidden (it would outrank the OAuth token); remove it"
                 )
+        if config.GH_TOKEN_ENV in self.env:
+            raise ValidationError(
+                f"env key {config.GH_TOKEN_ENV!r} must not be set in [project.env] — that would store a "
+                f"secret in the git-versionable config and leak it into argv. Configure it with "
+                f"`claudemanctl config gh-token` instead (injected pass-through from the 0600 state tier)."
+            )
 
     @property
     def image(self) -> str:

@@ -19,7 +19,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import assets, config, gitconfig, ssh_agent
+from . import assets, config, gh_token, gitconfig, ssh_agent
 from .checkout import gitstate, repos
 from .docker import images, runner
 from .profiles import seed as seed_mod
@@ -205,7 +205,8 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
 
     # Git author identity (config.toml [git] override, else inherited from the host git config),
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
-    cp = runner.create(project, profile_name=profile_name, token=token, created_iso=_now_iso(),
+    cp = runner.create(project, profile_name=profile_name, token=token,
+                       gh_token=gh_token.load(), created_iso=_now_iso(),
                        git_env=gitconfig.container_env())
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")

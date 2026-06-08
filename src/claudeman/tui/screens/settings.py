@@ -18,9 +18,10 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
-from ... import gitconfig, lifecycle, ssh_agent
+from ... import gh_token, gitconfig, lifecycle, ssh_agent
 from ...registry import settings as settings_registry
 from .add_key import AddKeyScreen
+from .gh_token import GhTokenScreen
 from .git_identity import GitIdentityScreen
 
 _KEY_COLUMNS = ("Ssh key", "Status")
@@ -34,6 +35,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("x", "remove", "Remove"),
         Binding("l", "load", "Load all"),
         Binding("g", "git_identity", "Git identity"),
+        Binding("t", "gh_token", "GH token"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -55,18 +57,28 @@ class SettingsScreen(ModalScreen[None]):
             yield Label("Settings · ssh keys (auto-loaded into the agent on startup)", classes="title")
             yield DataTable(id="keys", cursor_type="row")
             yield Label("", id="git-identity", classes="panel-title")
-            yield Label("a Add · x Remove · l Load all · g Git identity · esc Close", id="settings-status")
+            yield Label("", id="gh-token", classes="panel-title")
+            yield Label("a Add · x Remove · l Load all · g Git · t GH token · esc Close",
+                        id="settings-status")
             with Horizontal(id="buttons"):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Load all", id="load")
                 yield Button("Git", id="git")
+                yield Button("GH", id="ghtoken")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
         self.query_one("#keys", DataTable).add_columns(*_KEY_COLUMNS)
         self._render_git_identity()
+        self._render_gh_token()
         self._refresh_status()
+
+    def _render_gh_token(self) -> None:
+        state = "set" if gh_token.is_set() else "(none)"
+        self.query_one("#gh-token", Label).update(
+            f"GH token (→ GH_TOKEN): {state} · t to edit (recreate to apply)"
+        )
 
     def _render_git_identity(self) -> None:
         name, email = gitconfig.resolve_identity()
@@ -170,6 +182,22 @@ class SettingsScreen(ModalScreen[None]):
         settings_registry.set_git_identity(name, email)
         self._render_git_identity()
         self._status(lifecycle.Result(True, "git identity saved — recreate a project to apply"))
+
+    @on(Button.Pressed, "#ghtoken")
+    def action_gh_token(self) -> None:
+        self.app.push_screen(GhTokenScreen(gh_token.is_set()), self._on_gh_token)
+
+    def _on_gh_token(self, result) -> None:
+        if result is None:  # cancelled / empty input
+            return
+        action, token = result
+        if action == "set":
+            gh_token.save(token)  # 0600 state-tier; never echoed
+            msg = "gh token saved — recreate a project to inject GH_TOKEN"
+        else:
+            msg = "gh token cleared — recreate to apply" if gh_token.clear() else "no gh token was set"
+        self._render_gh_token()
+        self._status(lifecycle.Result(True, msg))
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

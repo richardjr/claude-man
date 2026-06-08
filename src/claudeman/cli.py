@@ -537,7 +537,7 @@ def cmd_sync_plan(args) -> int:
 # config (global settings — ssh keys + general features)
 # --------------------------------------------------------------------------
 def cmd_config_show(args) -> int:
-    from . import gitconfig, ssh_agent
+    from . import gh_token, gitconfig, ssh_agent
     from .registry import settings as settings_registry
 
     s = settings_registry.load()
@@ -545,6 +545,7 @@ def cmd_config_show(args) -> int:
     name, email = gitconfig.resolve_identity()
     src = "config" if (s.git_user_name or s.git_user_email) else ("host" if (name or email) else "unset")
     print(f"git identity: {name or '(unset)'} <{email or '(unset)'}>  [{src}]")
+    print(f"gh token: {'set' if gh_token.is_set() else '(none — set with `config gh-token`)'}")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -578,6 +579,25 @@ def cmd_config_ssh_load(args) -> int:
     res = lifecycle.ensure_ssh_keys(force=True)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
+
+
+def cmd_config_gh_token(args) -> int:
+    from . import gh_token
+
+    if args.clear:
+        print("gh token cleared (recreate to apply)" if gh_token.clear() else "no gh token was set")
+        return 0
+    if args.stdin:
+        token = sys.stdin.read().strip()
+    else:
+        import getpass
+        token = getpass.getpass("GitHub token (input hidden): ").strip()
+    if not token:
+        print("no token entered; nothing changed", file=sys.stderr)
+        return 1
+    gh_token.save(token)  # 0600 in the state tier; never echoed, never in argv
+    print("gh token saved (0600). Recreate a project to inject it as GH_TOKEN.")
+    return 0
 
 
 def cmd_config_git(args) -> int:
@@ -790,6 +810,12 @@ def build_parser() -> argparse.ArgumentParser:
     cg.add_argument("--email", help="set git user.email")
     cg.add_argument("--clear", action="store_true", help="clear the override (inherit the host git config)")
     cg.set_defaults(func=cmd_config_git)
+    cgt = cfg.add_parser("gh-token",
+                         help="set/clear the GitHub token injected as GH_TOKEN (recreate to apply)")
+    cgt.add_argument("--clear", action="store_true", help="remove the configured gh token")
+    cgt.add_argument("--stdin", action="store_true",
+                     help="read the token from stdin instead of an interactive (hidden) prompt")
+    cgt.set_defaults(func=cmd_config_gh_token)
 
     # image
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)

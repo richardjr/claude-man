@@ -23,6 +23,7 @@ from ..registry.schema import Project
 from . import labels
 
 OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+GH_TOKEN_ENV = config.GH_TOKEN_ENV  # optional GitHub token — injected pass-through, sole-sourced from gh_token.py
 
 # The fixed hardened flags (CLAUDE.md invariant 2 — the floor, not a suggestion).
 _HARDENING = [
@@ -91,6 +92,7 @@ def build_create_argv(
     claude_config_path: str | None = None,
     workspace_path: str | None = None,
     inject_token: bool = True,
+    inject_gh_token: bool = False,
     file_env: dict[str, str] | None = None,
     ssh_auth_sock: str | None = None,
     git_env: dict[str, str] | None = None,
@@ -119,10 +121,15 @@ def build_create_argv(
     # OAuth token: pass-through form, value stays out of argv.
     if inject_token:
         argv += ["-e", OAUTH_TOKEN_ENV]
+    # Optional GitHub token (opt-in): same pass-through form so the value never reaches argv.
+    if inject_gh_token:
+        argv += ["-e", GH_TOKEN_ENV]
 
-    # Project env vars (declared config), with scrubbed keys removed defensively.
+    # Project env vars (declared config), with auth/token keys removed defensively. GH_TOKEN is
+    # ALWAYS skipped here (like the OAuth token): its only legitimate source is the configured
+    # state-tier token injected pass-through above — never a value in argv / the secret-free config.
     for key, value in project.env.items():
-        if key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV:
+        if key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV:
             continue
         argv += ["-e", f"{key}={value}"]
     # env_file vars: injected as pass-through (-e KEY, value supplied via the subprocess
@@ -131,7 +138,9 @@ def build_create_argv(
     # NOTE: docker is NOT given --env-file directly — that path bypassed the ANTHROPIC_*
     # scrub and could silently outrank the OAuth token (review SEC-2).
     for key in file_env or {}:
-        if key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV:
+        # GH_TOKEN is sole-sourced from the configured token (above), never an env_file — so it's
+        # always skipped here too (read_env_file already scrubs it; this is belt-and-braces).
+        if (key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV):
             continue
         argv += ["-e", key]
     # Git author identity (GIT_CONFIG_COUNT/KEY_n/VALUE_n) — non-secret name/email, so rendered as a
@@ -187,8 +196,9 @@ def read_env_file(path: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if not key or key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV:
-                continue
+            if (not key or key in config.SCRUBBED_ENV_KEYS
+                    or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV):
+                continue  # GH_TOKEN never comes from an env_file — only the configured state-tier token
             out[key] = value
     return out
 
@@ -203,17 +213,19 @@ def create(
     *,
     profile_name: str,
     token: str | None = None,
+    gh_token: str | None = None,
     version: str = config.DEFAULT_CLAUDE_VERSION,
     created_iso: str,
     git_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Create the container, passing the token + env_file values through the subprocess env.
+    """Create the container, passing the token(s) + env_file values through the subprocess env.
 
-    Secrets (the OAuth token and any ``env_file`` values) are supplied via the child process
-    environment and rendered into argv only as pass-through names, so they never appear in
-    ``ps aux``. ``env_file`` is parsed + scrubbed host-side (review SEC-2). ``token`` may be
+    Secrets (the OAuth token, the optional ``gh_token``, and any ``env_file`` values) are supplied via
+    the child process environment and rendered into argv only as pass-through names, so they never
+    appear in ``ps aux``. ``env_file`` is parsed + scrubbed host-side (review SEC-2). ``token`` may be
     ``None`` (e.g. before any profile token is minted) — the container still builds and a shell
-    works, but in-container ``claude`` won't authenticate.
+    works, but in-container ``claude`` won't authenticate. ``gh_token`` is ``None`` unless the operator
+    configured one (``config gh-token``); only then is ``GH_TOKEN`` injected.
     """
     file_env = read_env_file(project.env_file) if project.env_file else {}
     # Resolve the host ssh-agent socket only if an ssh env-mount is configured (the socket PATH is not
@@ -224,14 +236,18 @@ def create(
     )
     argv = build_create_argv(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
-        file_env=file_env, inject_token=bool(token), ssh_auth_sock=ssh_sock, git_env=git_env,
+        file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
+        ssh_auth_sock=ssh_sock, git_env=git_env,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:
         env.pop(key, None)
+    env.pop(GH_TOKEN_ENV, None)  # never inherit a host GH_TOKEN — only the configured token is injected
     if token:
         env[OAUTH_TOKEN_ENV] = token
     env.update(file_env)
+    if gh_token:
+        env[GH_TOKEN_ENV] = gh_token  # the sole source; argv has the pass-through `-e GH_TOKEN`
     return _run(argv, env=env)
 
 

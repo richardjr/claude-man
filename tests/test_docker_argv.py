@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from claudeman.docker import runner  # noqa: E402
-from claudeman.docker.runner import OAUTH_TOKEN_ENV  # noqa: E402
+from claudeman.docker.runner import GH_TOKEN_ENV, OAUTH_TOKEN_ENV  # noqa: E402
 from claudeman.registry.schema import EnvMount, Project, Repo  # noqa: E402
 
 
@@ -89,6 +89,42 @@ class HardenedArgvTest(unittest.TestCase):
         for a in self.argv:
             self.assertNotIn("ANTHROPIC_API_KEY", a)
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", a)
+
+    def test_gh_token_absent_by_default(self) -> None:
+        # Opt-in: with inject_gh_token unset (the default), no GH_TOKEN is rendered at all.
+        self.assertNotIn(GH_TOKEN_ENV, self.argv)
+
+    def test_gh_token_passthrough_when_injected(self) -> None:
+        argv = runner.build_create_argv(
+            _project(), profile_name="work", created_iso="t", inject_gh_token=True
+        )
+        self.assertIn(GH_TOKEN_ENV, argv)  # name-only pass-through
+        self.assertFalse(
+            any(a.startswith(f"{GH_TOKEN_ENV}=") for a in argv),
+            "gh token must be pass-through, never inlined into argv",
+        )
+
+    def test_gh_token_never_sourced_from_project_env(self) -> None:
+        # GH_TOKEN in project.env must NEVER render (value leak), with or without a configured token —
+        # it is sole-sourced from the configured state-tier token (schema also rejects it at load).
+        proj = _project()
+        object.__setattr__(proj, "env", {GH_TOKEN_ENV: "leak", "FOO": "bar"})
+        injected = runner.build_create_argv(proj, profile_name="work", created_iso="t",
+                                            inject_gh_token=True)
+        self.assertEqual(injected.count(GH_TOKEN_ENV), 1)    # exactly the one pass-through
+        self.assertNotIn(f"{GH_TOKEN_ENV}=leak", injected)
+        self.assertIn("FOO=bar", injected)
+        off = runner.build_create_argv(proj, profile_name="work", created_iso="t")  # no opt-in
+        self.assertNotIn(GH_TOKEN_ENV, off)                  # neither pass-through nor value
+        self.assertNotIn(f"{GH_TOKEN_ENV}=leak", off)
+
+    def test_gh_token_never_sourced_from_file_env(self) -> None:
+        # Opt-in only: a GH_TOKEN passed in file_env must not render (the renderer skips it even if a
+        # raw dict slips past read_env_file's scrub).
+        argv = runner.build_create_argv(_project(), profile_name="work", created_iso="t",
+                                        file_env={GH_TOKEN_ENV: "leak", "KEEP": "1"})
+        self.assertNotIn(GH_TOKEN_ENV, argv)
+        self.assertIn("KEEP", argv)
 
     def test_scrubbed_project_env_dropped(self) -> None:
         # Even if a forbidden key sneaks past schema, the renderer drops it.
@@ -245,6 +281,7 @@ class EnvFileScrubTest(unittest.TestCase):
             'API_BASE="https://api.example/v1"\n'
             "ANTHROPIC_API_KEY=sk-should-be-dropped\n"
             "CLAUDE_CODE_OAUTH_TOKEN=should-also-drop\n"
+            "GH_TOKEN=ghp-should-also-drop\n"
             "BARE_LINE_NO_EQUALS\n"
         )
         with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
@@ -256,6 +293,7 @@ class EnvFileScrubTest(unittest.TestCase):
         self.assertEqual(parsed["API_BASE"], "https://api.example/v1")  # quotes stripped
         self.assertNotIn("ANTHROPIC_API_KEY", parsed)
         self.assertNotIn(OAUTH_TOKEN_ENV, parsed)
+        self.assertNotIn(GH_TOKEN_ENV, parsed)  # opt-in only: never sourced from an env_file
         self.assertNotIn("BARE_LINE_NO_EQUALS", parsed)
 
 

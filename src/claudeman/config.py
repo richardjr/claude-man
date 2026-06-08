@@ -55,6 +55,11 @@ CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
 SCRUBBED_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
+# The optional GitHub token's env name. Injected ONLY from the dedicated state-tier store
+# (gh_token.py) as a pass-through; it must never be sourced from project.env / env_file / the host
+# env (so it can't leak into argv or land in the secret-free config.toml). See CLAUDE.md invariant 1.
+GH_TOKEN_ENV = "GH_TOKEN"
+
 # ---------------------------------------------------------------------------
 # Subscription usage endpoint (the 5-hour + weekly windows Claude Code's /usage shows)
 # ---------------------------------------------------------------------------
@@ -185,6 +190,14 @@ def profile_seed_dir(name: str) -> Path:
 def sync_audit_dir() -> Path:
     """Git repo: per-session commit of accepted sync-back (free revert log)."""
     return state_home() / "sync-audit"
+
+
+def gh_token_path() -> Path:
+    """0600 file holding the optional GitHub token injected as ``GH_TOKEN`` into every container.
+
+    State tier (NEVER the secret-free ``config.toml``, never synced). Global / opt-in: absent unless
+    the operator sets one via ``config gh-token``. Mirrors ``profile_token_path``'s 0600 model."""
+    return state_home() / "gh-token"
 
 
 def managed_ssh_agent_sock() -> Path:
