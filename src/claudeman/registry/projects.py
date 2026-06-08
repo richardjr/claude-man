@@ -32,7 +32,15 @@ import tomllib
 from pathlib import Path
 
 from .. import config
-from .schema import EnvMount, Project, Repo, ValidationError
+from .schema import (
+    DEFAULT_SYNC_CLAUDE,
+    DEFAULT_SYNC_WORKSPACE,
+    EnvMount,
+    Project,
+    Repo,
+    Sync,
+    ValidationError,
+)
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -78,6 +86,12 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
                          ro=bool(m.get("ro", True)))
         for m in proj.get("env_mount", [])
     )
+    sync_tbl = proj.get("sync", {}) or {}
+    sync = Sync(
+        enabled=bool(sync_tbl.get("enabled", True)),
+        workspace=tuple(sync_tbl.get("workspace", DEFAULT_SYNC_WORKSPACE)),
+        claude=tuple(sync_tbl.get("claude", DEFAULT_SYNC_CLAUDE)),
+    )
     return Project(
         slug=slug,
         profile=proj.get("profile"),
@@ -90,6 +104,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         repos=repos,
         env_mount=mounts,
         allowlist=tuple(egress_tbl.get("allowlist", []) or ()),
+        sync=sync,
     )
 
 
@@ -187,6 +202,18 @@ def save(project: Project) -> Path:
                 t["ro"] = False
             marr.append(t)
         proj["env_mount"] = marr
+
+    # Emit [project.sync] only when it diverges from the defaults (keep copied templates clean).
+    default_sync = Sync()
+    if project.sync != default_sync:
+        synct = tomlkit.table()
+        if not project.sync.enabled:
+            synct["enabled"] = False
+        if project.sync.workspace != default_sync.workspace:
+            synct["workspace"] = list(project.sync.workspace)
+        if project.sync.claude != default_sync.claude:
+            synct["claude"] = list(project.sync.claude)
+        proj["sync"] = synct
 
     doc["project"] = proj
 

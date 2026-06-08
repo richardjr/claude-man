@@ -71,7 +71,8 @@ These are security- and correctness-critical. Every change must preserve them.
 src/claudeman/
   config.py            XDG paths + all shared constants (label prefix, container/image names, baked container paths)
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
-  lifecycle.py         create / up / stop / recreate / delete orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed, sync-checked delete_plan/delete_project teardown)
+  lifecycle.py         create / up / stop / recreate / delete orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed, sync-checked delete_plan/delete_project teardown, asset sync-in on up / sync-out on stop)
+  assets.py            per-project asset sync (host-side copy of CLAUDE.md + skills/agents between the synced config-tier source ~/.config/claude-man/assets/<slug>/ and the /workspace + ~/.claude binds): sync_in on start (asset wins), sync_out on stop (bind wins), backup-then-overwrite; claude side is a default-DENY allowlist (skills/agents/commands only) with a per-entry filtered recursive copy that drops denylisted-named nested entries + refuses escaping / denylist-targeting symlinks; workspace side is containment-checked; bootstraps a stub CLAUDE.md — distinct from the Phase-5 review-gated sync-back
   usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
   usage_api.py         per-account subscription usage (5-hour + weekly bars) via GET /api/oauth/usage with a profile's OAuth token — no-redirect opener (no cross-host token leak); pure parse/render split from the network fetch
   gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
@@ -82,7 +83,7 @@ src/claudeman/
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, add_key, menu, pull_confirm, delete_project, logs, sync_review)
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, add_key, menu, pull_confirm, delete_project, quit_confirm, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)
@@ -124,7 +125,9 @@ profile list | verify <name> | usage | seed <name> # accounts: status, account c
 profile limits [name]                              # per-account 5h/weekly subscription bars + resets (GET /api/oauth/usage)
 project create <slug> [--profile X] ; project up|stop|status <slug>
 project recreate <slug> [--profile X] [--force]    # rebuild / switch account (mismatch-guarded; also applies a changed git identity)
-project shell|claude <slug>                         # open a detached terminal into the container
+project shell|claude <slug>                         # auto-start the container if needed, then open a detached terminal into it
+project assets <slug> [--bootstrap]                 # show the synced asset source dirs (CLAUDE.md + skills/agents); --bootstrap a stub CLAUDE.md
+project sync <slug> [--in]                          # manually sync assets out (bind -> source); --in forces sync-in (source -> bind)
 config show                                         # global settings: resolved git identity + ssh keys/load status
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
 config ssh add|rm <path> | config ssh load         # ssh keys claude-man auto-loads into the host agent

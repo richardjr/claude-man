@@ -19,7 +19,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import config, gitconfig, ssh_agent
+from . import assets, config, gitconfig, ssh_agent
 from .checkout import gitstate, repos
 from .docker import images, runner
 from .profiles import seed as seed_mod
@@ -224,25 +224,70 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
 
 
 def up(project: Project, *, on_progress: ProgressFn | None = None) -> Result:
-    """Create-if-needed, then start."""
+    """Create-if-needed, then start (syncing per-project assets IN before start)."""
     created = ensure_created(project, on_progress=on_progress)
     if not created.ok:
         return created
+    # Sync assets IN after ensure_created (which seeds profile defaults) so per-project assets layer
+    # on top, and BEFORE start so the container sees them. Best-effort — a sync fault never blocks start.
+    sync_note = _sync_in(project, on_progress=on_progress)
     cp = runner.start(project.slug)
     if cp.returncode != 0:
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
     if _has_ssh_mount(project):
         _seed_ssh(project.slug)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
     prefix = created.detail + "; " if "created" in created.detail else ""
-    return Result(True, f"{prefix}started {project.container}")
+    return Result(True, f"{prefix}started {project.container}{sync_note}")
 
 
-def stop(slug: str) -> Result:
-    """Stop the container (never removes it — persistence is the default)."""
+def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
+    """Stop the container (never removes it — persistence is the default), then sync assets OUT."""
     cp = runner.stop(slug)
     if cp.returncode != 0:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
-    return Result(True, f"stopped {config.container_name(slug)}")
+    sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
+    return Result(True, f"stopped {config.container_name(slug)}{sync_note}")
+
+
+def _sync_in(project: Project, *, on_progress: ProgressFn | None) -> str:
+    """Asset sync-in → a ``'; <detail>'`` suffix for the Result (or ''). Never raises — a sync fault
+    must not prevent a container start."""
+    if not project.sync.enabled:
+        return ""
+    try:
+        rep = assets.sync_in(project, on_progress=on_progress)
+    except Exception as exc:  # noqa: BLE001 - never block start on a sync fault
+        if on_progress:
+            on_progress(f"asset sync-in failed: {exc!r}")
+        return f"; sync-in error: {exc}"
+    return ("; " + rep.detail) if rep.detail else ""
+
+
+def _sync_out(slug: str, *, on_progress: ProgressFn | None) -> str:
+    """Asset sync-out for a stopped project → a ``'; <detail>'`` suffix (or ''). Skips orphan
+    containers (no registry) and disabled projects; never raises (a fault mustn't fail the stop)."""
+    if not projects_registry.exists(slug):
+        return ""  # orphan container — no registry/sync config
+    try:
+        project = projects_registry.load(slug)
+        if not project.sync.enabled:
+            return ""
+        rep = assets.sync_out(project, on_progress=on_progress)
+    except Exception as exc:  # noqa: BLE001 - a sync-out fault must not make a stop look failed
+        if on_progress:
+            on_progress(f"asset sync-out failed: {exc!r}")
+        return f"; sync-out error: {exc}"
+    return ("; " + rep.detail) if rep.detail else ""
+
+
+def sync(slug: str, *, direction: str, on_progress: ProgressFn | None = None) -> Result:
+    """Manually sync a project's assets in/out (the CLI ``project sync`` verb). Explicit operator
+    action — runs even when ``project.sync.enabled`` is False."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    rep = (assets.sync_in if direction == "in" else assets.sync_out)(project, on_progress=on_progress)
+    return Result(rep.ok, rep.detail or f"{slug}: nothing to sync-{direction}")
 
 
 def account_mismatch(project: Project, profile: Profile | None) -> str | None:

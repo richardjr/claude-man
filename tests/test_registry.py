@@ -11,7 +11,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from claudeman.registry import profiles, projects  # noqa: E402
-from claudeman.registry.schema import EnvMount, Project, Repo, ValidationError  # noqa: E402
+from claudeman.registry.schema import (  # noqa: E402
+    EnvMount,
+    Project,
+    Repo,
+    Sync,
+    ValidationError,
+)
 
 PROJECT_TOML = """\
 [project]
@@ -93,6 +99,23 @@ class RegistryTest(unittest.TestCase):
         (Path(self.tmp.name) / "projects" / "typed.toml").write_text(toml)
         p = projects.load("typed")
         self.assertEqual(p.env, {"DEBUG": "true", "PORT": "3000", "RATIO": "1.5"})
+
+    def test_sync_block_roundtrips(self) -> None:
+        projects.save(Project(slug="synced", sync=Sync(
+            enabled=False, workspace=("CLAUDE.md", "docs/"), claude=("skills",))))
+        self.assertEqual(projects.load("synced").sync,
+                         Sync(enabled=False, workspace=("CLAUDE.md", "docs/"), claude=("skills",)))
+
+    def test_sync_defaults_omitted_from_save(self) -> None:
+        path = projects.save(Project(slug="plain"))
+        self.assertNotIn("[project.sync]", path.read_text())   # default Sync -> no clutter
+        self.assertEqual(projects.load("plain").sync, Sync())  # absent block loads as defaults
+
+    def test_invalid_sync_entry_rejected_on_load(self) -> None:
+        toml = '[project]\nslug = "bad"\n\n[project.sync]\nworkspace = ["../escape"]\n'
+        (Path(self.tmp.name) / "projects" / "bad.toml").write_text(toml)
+        with self.assertRaises(ValidationError):
+            projects.load("bad")
 
     def test_load_profile_and_default(self) -> None:
         prof = profiles.load("home")

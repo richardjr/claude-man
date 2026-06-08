@@ -108,6 +108,30 @@ def profiles_config_dir() -> Path:
     return config_home() / "profiles"
 
 
+def assets_config_dir() -> Path:
+    """Per-project synced-asset SOURCE root (config tier).
+
+    Lives under ``config_home()`` — NOT the state tier — so it rides the operator's external
+    ``~/.config/claude-man`` sync across machines. Holds only non-secret content (CLAUDE.md +
+    skills/agents/commands); the asset-sync denylist gate keeps credentials/session state out.
+    """
+    return config_home() / "assets"
+
+
+def project_assets_dir(slug: str) -> Path:
+    return assets_config_dir() / slug
+
+
+def project_assets_workspace_dir(slug: str) -> Path:
+    """Asset subtree synced to/from the ``/workspace`` bind root (e.g. a project CLAUDE.md)."""
+    return project_assets_dir(slug) / "workspace"
+
+
+def project_assets_claude_dir(slug: str) -> Path:
+    """Asset subtree synced to/from the ``~/.claude`` (claude-config) bind (skills/agents/commands)."""
+    return project_assets_dir(slug) / "claude"
+
+
 def project_toml_path(slug: str) -> Path:
     return projects_config_dir() / f"{slug}.toml"
 

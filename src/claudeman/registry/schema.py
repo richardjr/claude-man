@@ -194,6 +194,36 @@ class EnvMount:
         return self.dst if self.kind == "file" else "ssh"
 
 
+# Default per-project asset-sync allowlists. CLAUDE.md at the workspace root; skills/agents/commands
+# at USER scope (~/.claude). settings.json is intentionally NOT here (machine-local perms/hooks risk)
+# and is refused even if hand-added (see assets._assert_claude_allowlist_safe).
+DEFAULT_SYNC_WORKSPACE = ("CLAUDE.md",)
+DEFAULT_SYNC_CLAUDE = ("skills", "agents", "commands")
+
+
+@dataclass(frozen=True)
+class Sync:
+    """Per-project asset-sync allowlists (host-side copy of CLAUDE.md + skills/agents on start/stop).
+
+    ``workspace`` paths sync to/from the ``/workspace`` bind root; ``claude`` paths to/from the
+    ``~/.claude`` (claude-config) bind. Entries are relative in-tree paths (a file or a dir); the
+    containment guard mirrors ``_validate_subdir`` so a hand-edited ``..``/absolute entry is
+    un-saveable. ``enabled=False`` turns sync off for the project entirely.
+    """
+    enabled: bool = True
+    workspace: tuple[str, ...] = DEFAULT_SYNC_WORKSPACE
+    claude: tuple[str, ...] = DEFAULT_SYNC_CLAUDE
+
+    def __post_init__(self) -> None:
+        for rel in self.workspace + self.claude:
+            if not rel or not rel.strip():
+                raise ValidationError("sync entry must be a non-empty relative path")
+            if rel.startswith(("/", "~")):
+                raise ValidationError(f"sync entry {rel!r} must be relative (no leading '/' or '~')")
+            if any(part == ".." for part in PurePosixPath(rel).parts):
+                raise ValidationError(f"sync entry {rel!r} must not contain a '..' component")
+
+
 @dataclass(frozen=True)
 class Repo:
     url: str
@@ -225,6 +255,7 @@ class Project:
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
     allowlist: tuple[str, ...] = ()      # extra egress dstdomains (strict mode only)
+    sync: Sync = field(default_factory=Sync)  # per-project asset sync (CLAUDE.md + skills/agents)
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):

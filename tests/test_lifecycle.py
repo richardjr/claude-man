@@ -13,10 +13,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claudeman import config, lifecycle  # noqa: E402
+import subprocess  # noqa: E402
+
+from claudeman import assets, config, lifecycle  # noqa: E402
 from claudeman.checkout.gitstate import RepoState  # noqa: E402
 from claudeman.checkout.repos import RepoResult  # noqa: E402
-from claudeman.registry.schema import Project, Repo  # noqa: E402
+from claudeman.registry.schema import Project, Repo, Sync  # noqa: E402
 
 
 class WorkspaceOwnedTest(unittest.TestCase):
@@ -185,6 +187,97 @@ class DeleteProjectTest(unittest.TestCase):
             res = lifecycle.delete_project("demo")
         self.assertTrue(res.ok)
         self.assertFalse(config.project_toml_path("demo").exists())
+
+
+class SyncHooksTest(unittest.TestCase):
+    """up() syncs assets IN before start; stop() syncs OUT only after a successful stop. Both fold the
+    note into the Result and never let a sync fault break start/stop. Seams (runner, ensure_created,
+    assets, registry) are mocked so the test stays dependency-free."""
+
+    @staticmethod
+    def _cp(rc: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess([], rc, "", "")
+
+    def test_up_syncs_in_before_start(self) -> None:
+        order: list[str] = []
+        rep = assets.SyncReport(True, "asset sync-in: 1 copied")
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle, "ensure_created",
+                lambda p, on_progress=None: lifecycle.Result(True, "created claude-man-demo")))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_in",
+                lambda p, on_progress=None: (order.append("sync"), rep)[1]))
+            st.enter_context(mock.patch.object(lifecycle.runner, "start",
+                lambda slug: (order.append("start"), self._cp(0))[1]))
+            res = lifecycle.up(Project(slug="demo"))
+        self.assertTrue(res.ok)
+        self.assertEqual(order, ["sync", "start"])  # assets land before the container starts
+        self.assertIn("asset sync-in", res.detail)
+
+    def test_up_disabled_sync_skips(self) -> None:
+        called: list[str] = []
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle, "ensure_created",
+                lambda p, on_progress=None: lifecycle.Result(True, "created claude-man-demo")))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_in",
+                lambda p, on_progress=None: called.append("x")))
+            st.enter_context(mock.patch.object(lifecycle.runner, "start", lambda slug: self._cp(0)))
+            res = lifecycle.up(Project(slug="demo", sync=Sync(enabled=False)))
+        self.assertTrue(res.ok)
+        self.assertEqual(called, [])  # disabled -> sync_in never invoked
+
+    def test_up_sync_in_failure_does_not_block_start(self) -> None:
+        started: list[str] = []
+
+        def boom(p, on_progress=None):
+            raise OSError("disk full")
+
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle, "ensure_created",
+                lambda p, on_progress=None: lifecycle.Result(True, "created claude-man-demo")))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_in", boom))
+            st.enter_context(mock.patch.object(lifecycle.runner, "start",
+                lambda slug: (started.append(slug), self._cp(0))[1]))
+            res = lifecycle.up(Project(slug="demo"))
+        self.assertTrue(res.ok)               # start still happened despite the sync fault
+        self.assertEqual(started, ["demo"])
+        self.assertIn("sync-in error", res.detail)
+
+    def test_stop_syncs_out_after_stop_ok(self) -> None:
+        order: list[str] = []
+        rep = assets.SyncReport(True, "asset sync-out: 1 copied")
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle.runner, "stop",
+                lambda slug: (order.append("stop"), self._cp(0))[1]))
+            st.enter_context(mock.patch.object(lifecycle.projects_registry, "exists", lambda s: True))
+            st.enter_context(mock.patch.object(lifecycle.projects_registry, "load",
+                lambda s: Project(slug="demo")))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_out",
+                lambda p, on_progress=None: (order.append("sync"), rep)[1]))
+            res = lifecycle.stop("demo")
+        self.assertTrue(res.ok)
+        self.assertEqual(order, ["stop", "sync"])  # never read the binds before the container stops
+        self.assertIn("asset sync-out", res.detail)
+
+    def test_stop_failed_skips_sync_out(self) -> None:
+        called: list[str] = []
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle.runner, "stop", lambda slug: self._cp(1)))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_out",
+                lambda p, on_progress=None: called.append("x")))
+            res = lifecycle.stop("demo")
+        self.assertFalse(res.ok)
+        self.assertEqual(called, [])
+
+    def test_stop_orphan_no_registry_skips_sync(self) -> None:
+        called: list[str] = []
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle.runner, "stop", lambda slug: self._cp(0)))
+            st.enter_context(mock.patch.object(lifecycle.projects_registry, "exists", lambda s: False))
+            st.enter_context(mock.patch.object(lifecycle.assets, "sync_out",
+                lambda p, on_progress=None: called.append("x")))
+            res = lifecycle.stop("orphan")
+        self.assertTrue(res.ok)
+        self.assertEqual(called, [])  # no registry entry -> no sync config -> skip
 
 
 if __name__ == "__main__":

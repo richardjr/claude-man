@@ -462,6 +462,37 @@ def cmd_project_resync(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_project_assets(args) -> int:
+    from . import assets
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    print(f"asset source: {config.project_assets_dir(args.slug)}")
+    print(f"  workspace/ -> /workspace      (sync: {', '.join(project.sync.workspace) or 'none'})")
+    print(f"  claude/    -> ~/.claude        (sync: {', '.join(project.sync.claude) or 'none'})")
+    print(f"  backups:   {config.backups_dir(args.slug)}")
+    if not project.sync.enabled:
+        print("  (asset sync is DISABLED for this project — [project.sync] enabled=false)")
+    if args.bootstrap:
+        note = assets.bootstrap(project)
+        print(note or "CLAUDE.md already present in the asset source or workspace bind")
+    return 0
+
+
+def cmd_project_sync(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    direction = "in" if args.in_ else "out"
+    res = lifecycle.sync(args.slug, direction=direction)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
 def cmd_project_delete(args) -> int:
     from . import lifecycle
 
@@ -717,6 +748,16 @@ def build_parser() -> argparse.ArgumentParser:
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
     prs.add_argument("slug")
     prs.set_defaults(func=cmd_project_resync)
+    pas = proj.add_parser("assets", help="show the asset source dir(s); --bootstrap a stub CLAUDE.md")
+    pas.add_argument("slug")
+    pas.add_argument("--bootstrap", action="store_true",
+                     help="create a stub CLAUDE.md in the asset source if none exists")
+    pas.set_defaults(func=cmd_project_assets)
+    psy = proj.add_parser("sync", help="sync assets out (binds -> source); --in to sync in")
+    psy.add_argument("slug")
+    psy.add_argument("--in", dest="in_", action="store_true",
+                     help="force sync-IN (asset source -> binds; source wins)")
+    psy.set_defaults(func=cmd_project_sync)
 
     # sync
     sy = sub.add_parser("sync", help="config sync-back").add_subparsers(dest="cmd", required=True)
