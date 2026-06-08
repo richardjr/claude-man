@@ -215,6 +215,21 @@ def state_label(s: RepoState) -> str:
     return "clean"
 
 
+def state_style(s: RepoState) -> str:
+    """Rich colour for the State cell so clean vs dirty is obvious at a glance (pure — a plain colour
+    name, no rich import). green = clean; red = dirty/conflict/error/dubious-ownership (needs
+    attention); yellow = advisory (uncloned / no upstream)."""
+    if s.kind in (OWNERSHIP, ERROR) or s.error:
+        return "red"
+    if not s.present:
+        return "yellow"
+    if s.unmerged or s.staged or s.unstaged or s.untracked:
+        return "red"
+    if s.upstream is None and not s.detached:
+        return "yellow"
+    return "green"
+
+
 def branch_label(s: RepoState) -> str:
     """Branch cell for a per-repo row: ``main`` / ``feat/x (cfg:main)`` / ``detached@<sha>`` / ``-``."""
     if s.detached:

@@ -18,6 +18,13 @@ STOPPED = "STOPPED"   # container exists, not running
 UP = "UP"             # container running
 
 
+def status_style(kind: str) -> str:
+    """Rich colour for the Status cell so running vs not is obvious at a glance (pure — a plain
+    colour name, no rich import). green = UP (running); red = STOPPED (exists, not running);
+    yellow = DEFINED (no container yet)."""
+    return {UP: "green", STOPPED: "red", DEFINED: "yellow"}.get(kind, "yellow")
+
+
 @dataclass(frozen=True)
 class ContainerStatus:
     slug: str

@@ -161,8 +161,10 @@ class ClaudeManApp(App):
         rows = self._rows()
         self._last_rows = rows  # cache for _running_slugs so quit needn't block on a fresh docker ps
         for row in rows:
+            # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
+            kind = Text(row.kind, style=status.status_style(row.kind))
             table.add_row(
-                row.slug, row.kind, row.profile, row.egress,
+                row.slug, kind, row.profile, row.egress,
                 self._repos_cell(row), row.version or "-", row.status_text or "-",
                 key=row.slug,
             )
@@ -307,7 +309,9 @@ class ClaudeManApp(App):
             panel.add_row("(no repos — press 'a' to add one)", "", "", "", "")
             return
         for s in summary.states:
-            panel.add_row(s.dir, gitstate.branch_label(s), gitstate.state_label(s),
+            # Colour the State cell so clean (green) vs dirty/problem (red) is obvious at a glance.
+            state = Text(gitstate.state_label(s), style=gitstate.state_style(s))
+            panel.add_row(s.dir, gitstate.branch_label(s), state,
                           gitstate.ab_label(s), gitstate.commit_label(s))
 
     def on_data_table_row_highlighted(self, event) -> None:

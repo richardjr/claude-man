@@ -94,6 +94,21 @@ class ParsePorcelainTest(unittest.TestCase):
         self.assertEqual(s.branch, "main")
         self.assertEqual(gitstate.state_label(s), "no upstream")
 
+    def test_state_style_clean_green_dirty_red(self) -> None:
+        clean = RepoState(dir="a", kind=gitstate.OK, present=True, branch="main",
+                          upstream="origin/main")
+        dirty = RepoState(dir="b", kind=gitstate.OK, present=True, branch="main",
+                          upstream="origin/main", unstaged=1)
+        self.assertEqual(gitstate.state_style(clean), "green")
+        self.assertEqual(gitstate.state_style(dirty), "red")
+        self.assertEqual(gitstate.state_style(gitstate.parse_porcelain(CONFLICT, repo=R)), "red")
+        self.assertEqual(gitstate.state_style(RepoState(dir="c", kind=gitstate.UNCLONED)), "yellow")
+        self.assertEqual(gitstate.state_style(RepoState(dir="d", kind=gitstate.ERROR,
+                                                        error="boom")), "red")
+        self.assertEqual(gitstate.state_style(RepoState(dir="e", kind=gitstate.OWNERSHIP,
+                                                        present=True)), "red")
+        self.assertEqual(gitstate.state_style(gitstate.parse_porcelain(NO_UPSTREAM, repo=R)), "yellow")
+
 
 class ClassifyErrorTest(unittest.TestCase):
     def test_dubious_ownership(self) -> None:
