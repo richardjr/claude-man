@@ -43,7 +43,10 @@ def _validate_subdir(rel: str) -> None:
         raise ValidationError(f"repo dir {rel!r} must not contain a '..' component")
 
 
-_ENV_MOUNT_KINDS = ("ssh", "file")
+_ENV_MOUNT_KINDS = ("ssh", "file", "env")
+
+# A valid POSIX-ish env var name for a kind="env" mount.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Container destinations a file env-mount may NEVER target. Two reasons: (a) it would land inside a
 # claude-man-managed mount (the claude-config bind, the workspace bind, the tmpfs) and collide with the
@@ -141,13 +144,15 @@ class EnvMount:
     secret value (the definition store stays secret-free / git-versionable).
     """
     kind: str
-    src: str = ""          # host path (file kind); "" for ssh
-    dst: str = ""          # absolute container path (file kind); "" for ssh
+    src: str = ""          # host path (file kind); "" for ssh/env
+    dst: str = ""          # absolute container path (file kind); "" for ssh/env
     ro: bool = True        # file kind: read-only inside the container (default)
+    name: str = ""         # env var NAME (env kind); the value lives 0600 in the state tier
     error: str = ""        # set ONLY by lenient() for a load-time-invalid mount (never reaches docker)
 
     @classmethod
-    def lenient(cls, *, kind: str, src: str = "", dst: str = "", ro: bool = True) -> EnvMount:
+    def lenient(cls, *, kind: str, src: str = "", dst: str = "", ro: bool = True,
+                name: str = "") -> EnvMount:
         """Construct from stored TOML WITHOUT raising — an entry that fails validation is returned
         flagged (``error`` set) instead.
 
@@ -157,10 +162,11 @@ class EnvMount:
         render + lifecycle SKIP it, so an invalid (even security-invalid) mount never reaches docker.
         """
         try:
-            return cls(kind=kind, src=src, dst=dst, ro=ro)
+            return cls(kind=kind, src=src, dst=dst, ro=ro, name=name)
         except ValidationError as exc:
             obj = cls(kind="ssh")  # a guaranteed-valid placeholder; override fields without re-validating
-            for fld, val in (("kind", kind), ("src", src), ("dst", dst), ("ro", ro), ("error", str(exc))):
+            for fld, val in (("kind", kind), ("src", src), ("dst", dst), ("ro", ro),
+                             ("name", name), ("error", str(exc))):
                 object.__setattr__(obj, fld, val)
             return obj
 
@@ -183,6 +189,18 @@ class EnvMount:
                 if base:
                     object.__setattr__(self, "dst", self.dst.rstrip("/") + "/" + base)
             _validate_container_dst(self.dst)
+        elif self.kind == "env":
+            name = self.name.strip()
+            if not _ENV_NAME_RE.match(name):
+                raise ValidationError(
+                    f"env mount name {self.name!r} must be a valid env var name (letters/digits/_, "
+                    f"not starting with a digit)"
+                )
+            if config.is_forbidden_env_name(name):
+                raise ValidationError(
+                    f"env var {name!r} is reserved (it has dedicated handling / would breach auth) — "
+                    f"use `config gh-token` for GH_TOKEN; ANTHROPIC_*/the OAuth token are never settable"
+                )
 
     def resolved_src(self) -> str:
         """The host source path with ``~`` and ``$VARS`` expanded (host-side)."""
@@ -190,8 +208,12 @@ class EnvMount:
 
     @property
     def target(self) -> str:
-        """Short identity used for list display + remove-matching (the dst, or 'ssh')."""
-        return self.dst if self.kind == "file" else "ssh"
+        """Short identity for list display + remove-matching: a file's dst, an env var's name, or 'ssh'."""
+        if self.kind == "file":
+            return self.dst
+        if self.kind == "env":
+            return self.name
+        return "ssh"
 
 
 # Default per-project asset-sync allowlists. CLAUDE.md at the workspace root; skills/agents/commands

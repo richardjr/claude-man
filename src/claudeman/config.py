@@ -23,6 +23,11 @@ CONTAINER_PREFIX = "claude-man-"      # container name = claude-man-<slug>
 
 DEFAULT_OVERLAY = "base"
 DEFAULT_EGRESS = "open"               # "open" | "strict"
+
+# `docker stop` grace before SIGKILL. The baked CMD is `sleep infinity` as PID 1, which ignores
+# SIGTERM (the kernel applies no default disposition to PID 1), so `docker stop` ALWAYS waits the
+# full grace then SIGKILLs — a 10s default makes stop/quit feel frozen. A short grace bounds it.
+DOCKER_STOP_GRACE_S = 2
 OVERLAYS = ("base", "python", "rust", "node")
 EGRESS_MODES = ("open", "strict")
 
@@ -59,6 +64,24 @@ SCRUBBED_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # (gh_token.py) as a pass-through; it must never be sourced from project.env / env_file / the host
 # env (so it can't leak into argv or land in the secret-free config.toml). See CLAUDE.md invariant 1.
 GH_TOKEN_ENV = "GH_TOKEN"
+# The Claude OAuth token env name (the one secret auth var). Single source of truth; runner re-exports.
+OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# Env-var NAMES an operator-supplied value (a `[[project.env_mount]]` kind="env", or project.env) may
+# NEVER use: the scrubbed keys (misbill), the OAuth token, and GH_TOKEN — each has dedicated, sole-
+# sourced handling, so letting an arbitrary env var shadow them would breach invariant 1.
+FORBIDDEN_ENV_NAMES = SCRUBBED_ENV_KEYS + (OAUTH_TOKEN_ENV, GH_TOKEN_ENV)
+
+
+def is_forbidden_env_name(name: str) -> bool:
+    """True if ``name`` is a reserved/auth env var — incl. case + underscore-padding variants.
+
+    Env var names are case-sensitive, so a plain ``in`` check lets ``gh_token`` / ``_GH_TOKEN`` /
+    ``GH_TOKEN_`` slip past the exact-match guard. Normalising (strip leading/trailing ``_`` + upper)
+    rejects those padding/case variants of a reserved name while still allowing genuinely-different
+    names like ``GH_TOKEN_BACKUP`` or ``MY_GH_TOKEN``."""
+    norm = name.strip("_").upper()
+    return any(norm == f.strip("_").upper() for f in FORBIDDEN_ENV_NAMES)
 
 # ---------------------------------------------------------------------------
 # Subscription usage endpoint (the 5-hour + weekly windows Claude Code's /usage shows)
@@ -163,6 +186,14 @@ def claude_config_dir(slug: str) -> Path:
 def baseline_path(slug: str) -> Path:
     """Sync-back 3-way baseline manifest. Sibling of the mount, never inside it."""
     return project_state_dir(slug) / "baseline.json"
+
+
+def project_env_path(slug: str) -> Path:
+    """0600 JSON ({NAME: value}) holding a project's `kind="env"` env-mount VALUES.
+
+    State tier (never the secret-free config.toml, never synced) — the registry stores only the
+    NAMES; values are injected pass-through (`-e NAME`), like GH_TOKEN. See CLAUDE.md invariant 1."""
+    return project_state_dir(slug) / "env.json"
 
 
 def backups_dir(slug: str) -> Path:

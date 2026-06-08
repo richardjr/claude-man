@@ -85,6 +85,9 @@ class EnvMountsScreen(ModalScreen[None]):
             elif m.kind == "ssh":
                 table.add_row("ssh", "host ssh-agent + ~/.ssh config,known_hosts",
                               config.CONTAINER_SSH_DIR, "agent-forward", key="ssh")
+            elif m.kind == "env":
+                table.add_row("env", "(value hidden — 0600 state tier)", m.name, "pass-through",
+                              key=m.name)
             else:
                 table.add_row("file", m.src, m.dst, "ro" if m.ro else "rw", key=m.dst)
         if invalid:
@@ -109,10 +112,14 @@ class EnvMountsScreen(ModalScreen[None]):
     def action_add(self) -> None:
         self.app.push_screen(AddMountScreen(self._slug), self._on_add)
 
-    def _on_add(self, mount) -> None:
-        if mount is None:
+    def _on_add(self, result) -> None:
+        if result is None:
             return
-        self._status(lifecycle.add_mount(self._slug, mount))
+        mount, value = result
+        if mount.kind == "env":  # value -> 0600 state store; the registry holds only the name
+            self._status(lifecycle.add_env_var(self._slug, mount.name, value))
+        else:
+            self._status(lifecycle.add_mount(self._slug, mount))
         self._refresh()
 
     @on(Button.Pressed, "#remove")

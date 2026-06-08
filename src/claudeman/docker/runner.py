@@ -22,7 +22,7 @@ from .. import config
 from ..registry.schema import Project
 from . import labels
 
-OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+OAUTH_TOKEN_ENV = config.OAUTH_TOKEN_ENV
 GH_TOKEN_ENV = config.GH_TOKEN_ENV  # optional GitHub token — injected pass-through, sole-sourced from gh_token.py
 
 # The fixed hardened flags (CLAUDE.md invariant 2 — the floor, not a suggestion).
@@ -64,7 +64,9 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
     ``file`` → a ``-v src:dst[:ro]`` bind (read-only by default). ``ssh`` → a ``0700`` writable
     ``~/.ssh`` tmpfs (the one ssh-conditional writable surface) plus, when ``ssh_auth_sock`` is set,
     a read-only bind of the host agent socket + ``SSH_AUTH_SOCK`` pointing at it. Private keys never
-    enter the container — the host agent signs (the socket path is a path, not a secret).
+    enter the container — the host agent signs (the socket path is a path, not a secret). ``env`` → a
+    ``-e NAME`` pass-through (value supplied via the child env in ``create`` from the 0600 state tier,
+    never argv).
     """
     args: list[str] = []
     for m in project.env_mount:
@@ -73,6 +75,12 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
         if m.kind == "file":
             suffix = ":ro" if m.ro else ""
             args += ["-v", f"{m.resolved_src()}:{m.dst}{suffix}"]
+        elif m.kind == "env":
+            # Pass-through name only; the value is supplied via the child env in create() from the
+            # 0600 state-tier store, so it never reaches argv. Schema rejects forbidden names; this
+            # is belt-and-braces so one can never be rendered even if a flagged mount slips through.
+            if m.name and not config.is_forbidden_env_name(m.name):
+                args += ["-e", m.name]
         elif m.kind == "ssh":
             args += ["--tmpfs",
                      f"{config.CONTAINER_SSH_DIR}:rw,nosuid,mode=0700,"
@@ -162,9 +170,11 @@ def build_create_argv(
 # ---------------------------------------------------------------------------
 # Thin execution wrappers (need a docker daemon; not unit-tested)
 # ---------------------------------------------------------------------------
-def _run(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run(argv: list[str], *, env: dict[str, str] | None = None,
+         timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+        return subprocess.run(argv, env=env, capture_output=True, text=True, check=False,
+                              timeout=timeout)
     except FileNotFoundError:
         # The binary (docker/git) isn't on PATH. Surface it as a non-zero result — like a 127
         # "command not found" — so every caller (CLI, the synchronous UI actions, and the TUI
@@ -172,6 +182,12 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.Co
         # the process. 127 is the conventional shell exit code for a missing command.
         return subprocess.CompletedProcess(
             argv, 127, stdout="", stderr=f"{argv[0]!r} not found on PATH"
+        )
+    except subprocess.TimeoutExpired:
+        # A wedged docker daemon must never hang a caller forever (e.g. the quit stop-all worker).
+        # 124 is the conventional `timeout(1)` exit code; callers map non-zero to a red Result.
+        return subprocess.CompletedProcess(
+            argv, 124, stdout="", stderr=f"timed out after {timeout}s: {' '.join(argv)}"
         )
 
 
@@ -214,6 +230,7 @@ def create(
     profile_name: str,
     token: str | None = None,
     gh_token: str | None = None,
+    env_secrets: dict[str, str] | None = None,
     version: str = config.DEFAULT_CLAUDE_VERSION,
     created_iso: str,
     git_env: dict[str, str] | None = None,
@@ -248,6 +265,11 @@ def create(
     env.update(file_env)
     if gh_token:
         env[GH_TOKEN_ENV] = gh_token  # the sole source; argv has the pass-through `-e GH_TOKEN`
+    # kind="env" env-mount values (pass-through; argv has the `-e NAME` from _render_env_mounts).
+    # Forbidden names are filtered so an operator env var can never shadow the scrubbed/auth keys.
+    for key, value in (env_secrets or {}).items():
+        if not config.is_forbidden_env_name(key):
+            env[key] = value
     return _run(argv, env=env)
 
 
@@ -278,7 +300,10 @@ def start(slug: str) -> subprocess.CompletedProcess:
 
 
 def stop(slug: str) -> subprocess.CompletedProcess:
-    return _run(["docker", "stop", config.container_name(slug)])
+    # Short grace (the baked `sleep infinity` PID 1 ignores SIGTERM, so the grace is always spent
+    # then SIGKILL); a subprocess timeout above the grace guards against a wedged daemon hanging us.
+    return _run(["docker", "stop", "-t", str(config.DOCKER_STOP_GRACE_S), config.container_name(slug)],
+                timeout=config.DOCKER_STOP_GRACE_S + 15)
 
 
 def remove(slug: str) -> subprocess.CompletedProcess:

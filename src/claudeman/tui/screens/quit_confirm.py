@@ -1,16 +1,16 @@
 """Quit-confirm modal — shown when closing the TUI with containers still running.
 
 Closing the TUI stops every running container so each syncs its assets out (the per-project
-asset-sync model). That also closes any detached claude/shell windows, so we confirm first and offer
-an escape hatch: *Stop & sync all* (the intended default), *Quit & leave running* (no stop, no sync),
-or Cancel. Dismisses the chosen action string (``"stop_all"`` / ``"leave"``) or ``None`` on cancel.
-Mirrors ``pull_confirm`` / ``delete_project``.
+asset-sync model). That also closes any detached claude/shell windows, so we confirm first. The modal
+is KEYBOARD-FIRST (the operator pressed ``q``): ``Enter``/``s`` = Stop & sync all (the focused default),
+``l`` = Quit & leave running, ``Esc`` = Cancel. Dismisses ``"stop_all"`` / ``"leave"`` / ``None``.
 """
 
 from __future__ import annotations
 
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
@@ -19,7 +19,11 @@ from textual.widgets import Button, Label
 class QuitConfirmScreen(ModalScreen["str | None"]):
     """Confirm quitting with running containers. Dismisses ``"stop_all"`` | ``"leave"`` | ``None``."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("s", "stop", "Stop & sync"),
+        Binding("l", "leave", "Leave running"),
+    ]
     CSS = """
     QuitConfirmScreen { align: center middle; }
     #dialog {
@@ -43,8 +47,10 @@ class QuitConfirmScreen(ModalScreen["str | None"]):
             yield Label("Quit claude-man", classes="title")
             yield Label(f"{n} container(s) running: " + ", ".join(self._running))
             yield Label(
-                "Stopping syncs each project's assets out (CLAUDE.md + skills/agents) and closes "
-                "any detached claude/shell windows.",
+                "Stopping syncs each project's assets out (CLAUDE.md + skills/agents) and closes any "
+                "detached claude/shell windows.\n"
+                "[b]Enter[/]/[b]s[/] = Stop & sync all   ·   [b]l[/] = Quit & leave running   ·   "
+                "[b]Esc[/] = Cancel",
                 id="quit-note",
             )
             with Horizontal(id="buttons"):
@@ -52,12 +58,16 @@ class QuitConfirmScreen(ModalScreen["str | None"]):
                 yield Button("Quit & leave running", id="leave")
                 yield Button(f"Stop & sync {n}", variant="success", id="stop")
 
+    def on_mount(self) -> None:
+        self.query_one("#stop", Button).focus()  # Enter triggers Stop & sync by default
+
+    # -- actions (keyboard) + button handlers share the same dismiss values -----
     @on(Button.Pressed, "#stop")
-    def _stop(self) -> None:
+    def action_stop(self) -> None:
         self.dismiss("stop_all")
 
     @on(Button.Pressed, "#leave")
-    def _leave(self) -> None:
+    def action_leave(self) -> None:
         self.dismiss("leave")
 
     @on(Button.Pressed, "#cancel")

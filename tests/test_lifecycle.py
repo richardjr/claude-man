@@ -189,6 +189,47 @@ class DeleteProjectTest(unittest.TestCase):
         self.assertFalse(config.project_toml_path("demo").exists())
 
 
+class AddEnvVarTest(unittest.TestCase):
+    """add_env_var stores the value + registers the mount transactionally (no docker; temp registry)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        lifecycle.projects_registry.save(Project(slug="demo"))
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None)
+        os.environ.pop("CLAUDE_MAN_STATE_HOME", None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    def test_success_stores_value_and_mount(self) -> None:
+        res = lifecycle.add_env_var("demo", "FOO", "bar")
+        self.assertTrue(res.ok)
+        self.assertEqual([m.target for m in lifecycle.projects_registry.load("demo").env_mount], ["FOO"])
+        self.assertEqual(lifecycle.env_secrets.get("demo", "FOO"), "bar")
+
+    def test_value_store_failure_rolls_back_mount(self) -> None:
+        def boom(slug, name, value):
+            raise OSError("disk full")
+
+        with mock.patch.object(lifecycle.env_secrets, "set", boom):
+            res = lifecycle.add_env_var("demo", "FOO", "bar")
+        self.assertFalse(res.ok)
+        self.assertIn("failed to store value", res.detail)
+        # the value-less mount must NOT linger in the registry (rolled back)
+        self.assertEqual(lifecycle.projects_registry.load("demo").env_mount, ())
+
+    def test_remove_cleans_stored_value(self) -> None:
+        lifecycle.add_env_var("demo", "FOO", "bar")
+        res = lifecycle.remove_mount("demo", "FOO")
+        self.assertTrue(res.ok)
+        self.assertIsNone(lifecycle.env_secrets.get("demo", "FOO"))
+        self.assertEqual(lifecycle.projects_registry.load("demo").env_mount, ())
+
+
 class SyncHooksTest(unittest.TestCase):
     """up() syncs assets IN before start; stop() syncs OUT only after a successful stop. Both fold the
     note into the Result and never let a sync fault break start/stop. Seams (runner, ensure_created,

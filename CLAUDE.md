@@ -32,6 +32,12 @@ These are security- and correctness-critical. Every change must preserve them.
    doesn't outrank Claude auth or mis-bill, so opt-in injection doesn't breach invariant 1. With no
    token configured, none is injected (the operator can still `gh auth login` in-container or supply
    one via an env-mount). The token value is never echoed (`config show` reports only set/none).
+   The **same pass-through + state-tier model generalises** to arbitrary operator env vars: a
+   `[[project.env_mount]]` of `kind = "env"` carries a `name` (in the registry) whose VALUE lives
+   `0600` in the state tier (`env_secrets.py` → `config.project_env_path()`, never config.toml/synced)
+   and is injected `-e NAME` pass-through. The name is validated and **`FORBIDDEN_ENV_NAMES`**
+   (the scrubbed keys + the OAuth token + `GH_TOKEN`) are rejected, so an operator var can never shadow
+   the auth/sole-sourced secrets.
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, with writable
    surfaces limited to: the persistent `claude-config` bind (`/home/agent/.claude`), the persistent
@@ -83,6 +89,7 @@ src/claudeman/
   usage_api.py         per-account subscription usage (5-hour + weekly bars) via GET /api/oauth/usage with a profile's OAuth token — no-redirect opener (no cross-host token leak); pure parse/render split from the network fetch
   gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
   gh_token.py          optional GitHub token (state-tier 0600, NOT config.toml) injected pass-through as GH_TOKEN for in-container `gh` — opt-in via `config gh-token` (invariant 1)
+  env_secrets.py       per-project `kind="env"` env-mount VALUES (state-tier 0600 env.json, NOT config.toml/synced) — names live in the registry; values injected `-e NAME` pass-through (invariant 1)
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
   registry/            projects.py, profiles.py (load/save/default/load_token/token_age), settings.py (global config.toml: ssh keys + git identity), schema.py  — TOML store
   docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed + git_env identity + baked GIT_CONFIG_GLOBAL/GH_CONFIG_DIR redirects), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
@@ -135,6 +142,8 @@ project recreate <slug> [--profile X] [--force]    # rebuild / switch account (m
 project shell|claude <slug>                         # auto-start the container if needed, then open a detached terminal into it
 project assets <slug> [--bootstrap]                 # show the synced asset source dirs (CLAUDE.md + skills/agents); --bootstrap a stub CLAUDE.md
 project sync <slug> [--in]                          # manually sync assets out (bind -> source); --in forces sync-in (source -> bind)
+project env add <slug> ssh|file|env [...]           # add an env mount; `env <NAME>` prompts (hidden) for a value -> 0600 state, injected -e NAME (recreate to apply)
+project env rm <slug> <ssh|dst|NAME> | env list     # remove (by ssh / file dst / env var name) or list a project's env mounts
 config show                                         # global settings: resolved git identity + ssh keys/load status
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
 config gh-token [--clear | --stdin]                # set/clear the GitHub token injected as GH_TOKEN (hidden prompt; 0600 state-tier; recreate to apply)

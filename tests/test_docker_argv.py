@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from claudeman import config  # noqa: E402
 from claudeman.docker import runner  # noqa: E402
 from claudeman.docker.runner import GH_TOKEN_ENV, OAUTH_TOKEN_ENV  # noqa: E402
 from claudeman.registry.schema import EnvMount, Project, Repo  # noqa: E402
@@ -117,6 +120,22 @@ class HardenedArgvTest(unittest.TestCase):
         off = runner.build_create_argv(proj, profile_name="work", created_iso="t")  # no opt-in
         self.assertNotIn(GH_TOKEN_ENV, off)                  # neither pass-through nor value
         self.assertNotIn(f"{GH_TOKEN_ENV}=leak", off)
+
+    def test_env_var_mount_passthrough(self) -> None:
+        # A kind="env" mount renders `-e NAME` (name only) — the value is supplied via the child env.
+        proj = _project()
+        object.__setattr__(proj, "env_mount", (EnvMount(kind="env", name="MY_VAR"),))
+        argv = runner.build_create_argv(proj, profile_name="work", created_iso="t")
+        self.assertTrue(_contains_sublist(argv, ["-e", "MY_VAR"]))
+        self.assertFalse(any(a.startswith("MY_VAR=") for a in argv))  # value never inlined
+
+    def test_env_var_mount_forbidden_name_not_rendered(self) -> None:
+        # Even a flagged (lenient) env mount whose name is forbidden must never render an -e for it.
+        proj = _project()
+        object.__setattr__(proj, "env_mount", (EnvMount.lenient(kind="env", name="GH_TOKEN"),))
+        argv = runner.build_create_argv(proj, profile_name="work", created_iso="t")
+        # the only GH_TOKEN that may appear is the opt-in OAuth-style pass-through (not here)
+        self.assertNotIn("GH_TOKEN", argv)
 
     def test_gh_token_never_sourced_from_file_env(self) -> None:
         # Opt-in only: a GH_TOKEN passed in file_env must not render (the renderer skips it even if a
@@ -305,6 +324,36 @@ class RunMissingBinaryTest(unittest.TestCase):
         cp = runner._run(["__claude_man_definitely_missing_binary__", "--version"])
         self.assertEqual(cp.returncode, 127)
         self.assertIn("not found", cp.stderr)
+
+
+class RunnerStopTest(unittest.TestCase):
+    """`stop` bounds the SIGTERM grace (sleep-as-PID1 ignores it → full grace then SIGKILL) and a
+    wedged daemon can't hang the caller forever."""
+
+    def test_stop_uses_short_grace_and_subprocess_timeout(self) -> None:
+        captured: dict = {}
+
+        def fake_run(argv, *, env=None, timeout=None):
+            captured["argv"], captured["timeout"] = argv, timeout
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(runner, "_run", fake_run):
+            runner.stop("demo")
+        argv = captured["argv"]
+        self.assertIn("-t", argv)
+        self.assertEqual(argv[argv.index("-t") + 1], str(config.DOCKER_STOP_GRACE_S))
+        self.assertLess(config.DOCKER_STOP_GRACE_S, 10)            # shorter than docker's 10s default
+        self.assertIsNotNone(captured["timeout"])                  # subprocess safety net set
+        self.assertGreater(captured["timeout"], config.DOCKER_STOP_GRACE_S)
+
+    def test_run_timeout_returns_124(self) -> None:
+        def boom(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="docker stop", timeout=1)
+
+        with mock.patch.object(runner.subprocess, "run", boom):
+            cp = runner._run(["docker", "stop", "x"], timeout=1)
+        self.assertEqual(cp.returncode, 124)                       # never hangs; maps to a red Result
+        self.assertIn("timed out", cp.stderr)
 
 
 if __name__ == "__main__":

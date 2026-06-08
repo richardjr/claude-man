@@ -19,7 +19,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import assets, config, gh_token, gitconfig, ssh_agent
+from . import assets, config, env_secrets, gh_token, gitconfig, ssh_agent
 from .checkout import gitstate, repos
 from .docker import images, runner
 from .profiles import seed as seed_mod
@@ -203,10 +203,15 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         if on_progress and "no ssh keys configured" not in key_res.detail:
             on_progress(key_res.detail.splitlines()[0])
 
+    # kind="env" env-mount VALUES (0600 state tier) for the current, valid, present names — injected
+    # pass-through by runner.create (the registry holds only the names; values never touch config.toml).
+    stored = env_secrets.load(project.slug)
+    env_vars = {m.name: stored[m.name] for m in project.env_mount
+                if m.kind == "env" and not m.error and m.name in stored}
     # Git author identity (config.toml [git] override, else inherited from the host git config),
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
     cp = runner.create(project, profile_name=profile_name, token=token,
-                       gh_token=gh_token.load(), created_iso=_now_iso(),
+                       gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
                        git_env=gitconfig.container_env())
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
@@ -220,6 +225,11 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
     if clone_failures:
         notes.append(f"{len(clone_failures)} repo(s) failed to clone")
     notes.extend(mount_warnings)
+    missing_env = [m.name for m in project.env_mount
+                   if m.kind == "env" and not m.error and m.name not in stored]
+    if missing_env:
+        notes.append(f"{len(missing_env)} env var(s) have no stored value (re-add with "
+                     f"`project env add {project.slug} env <NAME>`): {', '.join(missing_env)}")
     suffix = ("  [" + "; ".join(notes) + "]") if notes else ""
     return Result(True, f"created {project.container}{suffix}")
 
@@ -548,7 +558,8 @@ def _remove_state(slug: str, *, keep_workspace: bool) -> str:
         shutil.rmtree(state_dir, ignore_errors=True)
         return "removed state dir (workspace + claude-config + backups)"
     removed: list[str] = []
-    for path in (config.claude_config_dir(slug), config.backups_dir(slug), config.baseline_path(slug)):
+    for path in (config.claude_config_dir(slug), config.backups_dir(slug),
+                 config.baseline_path(slug), config.project_env_path(slug)):
         try:
             if path.is_dir() and not path.is_symlink():
                 shutil.rmtree(path, ignore_errors=True)
@@ -592,7 +603,11 @@ def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
 # needs `recreate` to take effect (surfaced in the Result, like the repos label drift).
 # ---------------------------------------------------------------------------
 def _mount_desc(m: EnvMount) -> str:
-    return "ssh (agent-forward)" if m.kind == "ssh" else f"{m.src} → {m.dst}"
+    if m.kind == "ssh":
+        return "ssh (agent-forward)"
+    if m.kind == "env":
+        return f"env {m.name} (value hidden)"
+    return f"{m.src} → {m.dst}"
 
 
 def add_mount(slug: str, mount: EnvMount) -> Result:
@@ -611,8 +626,39 @@ def add_mount(slug: str, mount: EnvMount) -> Result:
         return _lock_error(slug, exc)
 
 
+def add_env_var(slug: str, name: str, value: str) -> Result:
+    """Register a ``kind="env"`` mount and store its VALUE 0600 in the state tier (never config.toml).
+
+    The value is injected pass-through (``-e NAME``) at the next ``recreate``, like GH_TOKEN. The name
+    is validated (and forbidden names rejected) by ``EnvMount``'s ``__post_init__``; the registry write
+    + value store happen under the per-slug flock so they can't interleave with another mutator."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        mount = EnvMount(kind="env", name=name)  # validates the name (+ rejects forbidden ones)
+    except ValidationError as exc:
+        return Result(False, str(exc))
+    try:
+        with _slug_lock(slug):
+            try:
+                projects_registry.add_mount(slug, mount)  # cross-entry guard: no duplicate name
+            except ValidationError as exc:
+                return Result(False, str(exc))
+            try:
+                env_secrets.set(slug, mount.name, value)  # value to the 0600 state store, under the lock
+            except OSError as exc:
+                # Roll back the just-added mount so we never leave a value-less orphan (which would
+                # render a no-op `-e NAME` at recreate). Both writes succeed together or neither does.
+                with contextlib.suppress(Exception):
+                    projects_registry.remove_mount(slug, mount.name)
+                return Result(False, f"failed to store value for {mount.name}: {exc}")
+            return Result(True, f"set env var {mount.name} for {slug} — `recreate` to apply")
+    except OSError as exc:
+        return _lock_error(slug, exc)
+
+
 def remove_mount(slug: str, target: str) -> Result:
-    """Drop an env mount from the registry (matched by 'ssh' or a file's container dst)."""
+    """Drop an env mount from the registry (matched by 'ssh', a file's dst, or an env var's name)."""
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
     try:
@@ -620,6 +666,8 @@ def remove_mount(slug: str, target: str) -> Result:
             _, removed = projects_registry.remove_mount(slug, target)
             if removed is None:
                 return Result(True, f"no env mount matching {target!r} in {slug} (nothing to do)")
+            if removed.kind == "env":
+                env_secrets.remove(slug, removed.name)  # drop the stored value too (no orphan secret)
             return Result(True, f"removed {_mount_desc(removed)} from {slug} — `recreate` to apply")
     except OSError as exc:
         return _lock_error(slug, exc)

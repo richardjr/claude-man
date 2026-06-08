@@ -1,9 +1,9 @@
 """Add-env-mount modal (Phase 3.x TUI).
 
-Collects a new ``EnvMount`` (ssh or file) for a project. Mirrors ``AddRepoScreen``: inline validation
-that constructs + validates the ``EnvMount`` (so the dest-denylist + src-required guards fire in the
-modal), dismissing with the validated ``EnvMount`` or ``None``. The parent manager screen runs the
-registry mutation via ``lifecycle.add_mount``.
+Collects a new env mount (ssh / file / env var) for a project. Mirrors ``AddRepoScreen``: inline
+validation that constructs + validates the ``EnvMount`` (so the guards fire in the modal). Dismisses
+``(EnvMount, value)`` — ``value`` is the (masked) secret for a ``kind="env"`` var, else ``None`` — or
+``None`` on cancel. The parent runs ``lifecycle.add_mount`` (ssh/file) or ``add_env_var`` (env).
 """
 
 from __future__ import annotations
@@ -16,9 +16,12 @@ from textual.widgets import Button, Checkbox, Input, Label, Select
 
 from ...registry.schema import EnvMount, ValidationError
 
+# What the screen hands back: (mount, value) — value is the env-var secret for kind="env", else None.
+AddMountResult = "tuple[EnvMount, str | None]"
 
-class AddMountScreen(ModalScreen["EnvMount | None"]):
-    """Collect kind/src/dst/ro for a new env mount. ``src``/``dst``/``ro`` apply to ``file`` only."""
+
+class AddMountScreen(ModalScreen["tuple[EnvMount, str | None] | None"]):
+    """Collect a new env mount. file → src/dst/ro; env → name + (masked) value; ssh → nothing."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
     CSS = """
@@ -43,13 +46,17 @@ class AddMountScreen(ModalScreen["EnvMount | None"]):
         with Vertical(id="dialog"):
             yield Label(f"Add env mount to {self._slug}", classes="title")
             yield Label("Kind")
-            yield Select([("file", "file"), ("ssh", "ssh")], value="file",
+            yield Select([("file", "file"), ("ssh", "ssh"), ("env var", "env")], value="file",
                          allow_blank=False, id="kind")
             yield Label("Host source (file only — ~ and $VARS expanded)")
             yield Input(placeholder="~/.netrc", id="src")
             yield Label("Container dest (file only — absolute, outside the managed mounts)")
             yield Input(placeholder="/home/agent/.netrc", id="dst")
             yield Checkbox("read-only (file)", value=True, id="ro")
+            yield Label("Env var name (env only)")
+            yield Input(placeholder="MY_TOKEN", id="name")
+            yield Label("Env var value (env only — hidden; stored 0600, injected pass-through)")
+            yield Input(password=True, placeholder="value", id="value")
             yield Label("", id="mount-error")
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
@@ -77,7 +84,20 @@ class AddMountScreen(ModalScreen["EnvMount | None"]):
         err = self.query_one("#mount-error", Label)
         kind = self.query_one("#kind", Select).value
         if kind == "ssh":
-            self.dismiss(EnvMount(kind="ssh"))
+            self.dismiss((EnvMount(kind="ssh"), None))
+            return
+        if kind == "env":
+            name = self.query_one("#name", Input).value.strip()
+            value = self.query_one("#value", Input).value  # not stripped of internal chars; trim ends
+            try:
+                mount = EnvMount(kind="env", name=name)  # validates the name (+ rejects forbidden)
+            except ValidationError as exc:
+                err.update(str(exc))
+                return
+            if not value.strip():
+                err.update("env var needs a value")
+                return
+            self.dismiss((mount, value.strip()))
             return
         src = self.query_one("#src", Input).value.strip()
         dst = self.query_one("#dst", Input).value.strip()
@@ -90,4 +110,4 @@ class AddMountScreen(ModalScreen["EnvMount | None"]):
         except ValidationError as exc:
             err.update(str(exc))
             return
-        self.dismiss(mount)
+        self.dismiss((mount, None))

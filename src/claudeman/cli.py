@@ -413,6 +413,8 @@ def _print_mounts(mounts) -> None:
         elif m.kind == "ssh":
             print(f"{'ssh':<6} {'host agent + ~/.ssh config,known_hosts':<40} "
                   f"{config.CONTAINER_SSH_DIR:<26} agent-forward")
+        elif m.kind == "env":
+            print(f"{'env':<6} {'(value hidden — 0600 state tier)':<40} {m.name:<26} pass-through")
         else:
             print(f"{'file':<6} {m.src:<40} {m.dst:<26} {'ro' if m.ro else 'rw'}")
 
@@ -429,6 +431,22 @@ def cmd_project_env_add(args) -> int:
     from . import lifecycle
     from .registry.schema import EnvMount, ValidationError
 
+    if args.kind == "env":
+        name = (args.src or "").strip()
+        if not name:
+            print("env var needs a name: project env add <slug> env <NAME>", file=sys.stderr)
+            return 1
+        if args.stdin:
+            value = sys.stdin.read().strip()
+        else:
+            import getpass
+            value = getpass.getpass(f"value for {name} (input hidden): ").strip()
+        if not value:
+            print("no value entered; nothing changed", file=sys.stderr)
+            return 1
+        res = lifecycle.add_env_var(args.slug, name, value)  # value -> 0600 state tier, never argv
+        print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+        return 0 if res.ok else 1
     if args.kind == "ssh":
         mount = EnvMount(kind="ssh")
     else:
@@ -751,14 +769,16 @@ def build_parser() -> argparse.ArgumentParser:
     env = proj.add_parser("env", help="environment mounts (ssh + files)").add_subparsers(
         dest="envcmd", required=True
     )
-    eadd = env.add_parser("add", help="add an env mount (recreate to apply)")
+    eadd = env.add_parser("add", help="add an env mount (ssh / file / env var; recreate to apply)")
     eadd.add_argument("slug")
-    eadd.add_argument("kind", choices=("ssh", "file"))
-    eadd.add_argument("src", nargs="?", help="(file) host path; ~ and $VARS expanded")
+    eadd.add_argument("kind", choices=("ssh", "file", "env"))
+    eadd.add_argument("src", nargs="?", help="(file) host path ~/$VARS expanded; (env) the var NAME")
     eadd.add_argument("dst", nargs="?", help="(file) absolute container path")
     eadd.add_argument("--rw", action="store_true", help="(file) writable; default read-only")
+    eadd.add_argument("--stdin", action="store_true",
+                      help="(env) read the value from stdin instead of a hidden prompt")
     eadd.set_defaults(func=cmd_project_env_add)
-    erm = env.add_parser("rm", help="remove an env mount (by 'ssh' or a file's container dst)")
+    erm = env.add_parser("rm", help="remove an env mount (by 'ssh', a file's container dst, or env NAME)")
     erm.add_argument("slug")
     erm.add_argument("target")
     erm.set_defaults(func=cmd_project_env_rm)

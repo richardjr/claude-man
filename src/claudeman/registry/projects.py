@@ -83,7 +83,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
     )
     mounts = tuple(
         EnvMount.lenient(kind=m.get("kind", ""), src=m.get("src", ""), dst=m.get("dst", ""),
-                         ro=bool(m.get("ro", True)))
+                         ro=bool(m.get("ro", True)), name=m.get("name", ""))
         for m in proj.get("env_mount", [])
     )
     sync_tbl = proj.get("sync", {}) or {}
@@ -198,6 +198,8 @@ def save(project: Project) -> Path:
                 t["src"] = m.src
             if m.dst:
                 t["dst"] = m.dst
+            if m.name:
+                t["name"] = m.name
             if not m.ro:
                 t["ro"] = False
             marr.append(t)
@@ -267,6 +269,8 @@ def _rewrite_mounts(slug: str, mounts: tuple[EnvMount, ...]) -> None:
             row["src"] = m.src
         if m.dst:
             row["dst"] = m.dst
+        if m.name:
+            row["name"] = m.name
         if not m.ro:
             row["ro"] = False
         rows.append(row)
@@ -332,6 +336,8 @@ def add_mount(slug: str, mount: EnvMount) -> Project:
             raise ValidationError(f"project {slug!r} already has an ssh env mount")
         if mount.kind == "file" and existing.kind == "file" and existing.dst == mount.dst:
             raise ValidationError(f"a file mount already targets {mount.dst!r} in {slug!r}")
+        if mount.kind == "env" and existing.kind == "env" and existing.name == mount.name:
+            raise ValidationError(f"env var {mount.name!r} is already set in {slug!r}")
     updated = dataclasses.replace(project, env_mount=project.env_mount + (mount,))
     _rewrite_mounts(slug, updated.env_mount)
     return updated

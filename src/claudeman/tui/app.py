@@ -34,6 +34,7 @@ from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.quit_confirm import QuitConfirmScreen
+from .screens.shutdown import ShutdownScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
 
@@ -43,6 +44,8 @@ _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
 _USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", "5h", "Week")
 # Bar colour by utilization band (usage_api.level): green < 70% < yellow < 90% < red.
 _USAGE_LEVEL_STYLE = {"ok": "green", "warn": "yellow", "crit": "red", "none": "dim"}
+# Braille spinner frames for the header "work in progress" indicator (start/stop/recreate/… take time).
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class ClaudeManApp(App):
@@ -106,9 +109,15 @@ class ClaudeManApp(App):
         # Touched only on the UI thread (action handlers + `_after_action` via `call_from_thread`),
         # so the set needs no lock.
         self._busy: set[str] = set()
+        # slug -> human verb for the in-flight op (start/stop/recreate/…), shown by the header spinner.
+        # Read against `_busy` (the source of truth) so a stale entry for a no-longer-busy slug is ignored.
+        self._busy_verbs: dict[str, str] = {}
+        self._spin = 0  # header spinner frame index (animated by _tick_spinner while anything is busy)
+        self._last_rows: list[status.Row] = []  # last polled join; _running_slugs reads this (no docker ps)
         # True once a quit flow is active (confirm modal open, or stop-all-then-exit worker running),
         # so a second `q` doesn't stack another confirm or a second stop-all pass.
         self._quitting = False
+        self._shutdown_screen: ShutdownScreen | None = None  # the shutdown progress modal, while quitting
         # slug -> last git-state scan summary (UI-thread only). Host-FS state on a deliberate refresh
         # cadence — distinct from container liveness (never cached); see refresh_gitstate.
         self._gitstate: dict[str, gitstate.ProjectGitSummary] = {}
@@ -133,6 +142,7 @@ class ClaudeManApp(App):
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(8.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
+        self.set_interval(0.2, self._tick_spinner)  # animate the header spinner while any op is in flight
 
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
@@ -149,6 +159,7 @@ class ClaudeManApp(App):
         prev_slug = self._current_slug()
         table.clear()
         rows = self._rows()
+        self._last_rows = rows  # cache for _running_slugs so quit needn't block on a fresh docker ps
         for row in rows:
             table.add_row(
                 row.slug, row.kind, row.profile, row.egress,
@@ -336,7 +347,19 @@ class ClaudeManApp(App):
             self._log(f"[yellow]{slug}: {verb} skipped — an operation is already running[/]")
             return False
         self._busy.add(slug)
+        self._busy_verbs[slug] = verb  # for the header spinner
         return True
+
+    def _tick_spinner(self) -> None:
+        """Animate a header spinner listing in-flight lifecycle ops (start/stop/recreate/…); clear when
+        idle. Cheap: a no-op when nothing is busy. Reads ``_busy`` (the source of truth) for membership."""
+        if not self._busy:
+            if self.sub_title:
+                self.sub_title = ""
+            return
+        self._spin = (self._spin + 1) % len(_SPINNER)
+        ops = ", ".join(f"{self._busy_verbs.get(s, 'working')} {s}" for s in sorted(self._busy))
+        self.sub_title = f"{_SPINNER[self._spin]} {ops}"
 
     # -- actions ----------------------------------------------------------
     def action_open_shell(self) -> None:
@@ -423,12 +446,18 @@ class ClaudeManApp(App):
             self.exit()
             return
         self._quitting = True
+        # Feedback in the log too (in case the modal is missed): the confirm is keyboard-first.
+        self._log(f"quit: {len(running)} container(s) running — "
+                  f"[b]Enter[/]/[b]s[/] stop+sync · [b]l[/] leave running · [b]esc[/] cancel")
         self.push_screen(QuitConfirmScreen(running), self._on_quit_confirm)
 
     def _running_slugs(self) -> list[str]:
         """UP rows NOT mid-lifecycle — a `_busy` slug (create/recreate in flight) must not be stopped
-        out from under its worker (mirrors action_toggle_running's busy guard)."""
-        return [r.slug for r in self._rows() if r.kind == status.UP and r.slug not in self._busy]
+        out from under its worker (mirrors action_toggle_running's busy guard).
+
+        Reads the CACHED rows from the 2 s poll, not a fresh ``docker ps`` — so ``action_quit`` (a UI-
+        thread handler) never blocks on a subprocess while deciding whether to confirm."""
+        return [r.slug for r in self._last_rows if r.kind == status.UP and r.slug not in self._busy]
 
     def _on_quit_confirm(self, choice) -> None:
         if not choice:                       # cancelled (Escape / Cancel)
@@ -445,18 +474,29 @@ class ClaudeManApp(App):
             self._quitting = False
             self.exit()
             return
-        self._log(f"stopping {len(slugs)} container(s) and syncing assets out …")
+        # Show a spinner + live status (the old behaviour dropped to a frozen-looking main screen).
+        self._shutdown_screen = ShutdownScreen(len(slugs))
+        self.push_screen(self._shutdown_screen)
         self._stop_all_then_exit_worker(slugs)
 
     @work(thread=True, group="quit")
     def _stop_all_then_exit_worker(self, slugs: list[str]) -> None:
-        for slug in slugs:
+        total = len(slugs)
+        for i, slug in enumerate(slugs, 1):
+            self.call_from_thread(self._set_shutdown_status, f"stopping {slug}  ({i}/{total}) …")
             try:
                 res = lifecycle.stop(slug, on_progress=self._thread_log)
             except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
                 res = lifecycle.Result(False, f"stop failed for {slug!r}: {exc!r}")
             self.call_from_thread(self._log, f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
         self.call_from_thread(self.exit)
+
+    def _set_shutdown_status(self, text: str) -> None:
+        if self._shutdown_screen is not None:
+            try:
+                self._shutdown_screen.set_status(text)
+            except Exception:  # noqa: BLE001 - the screen may already be tearing down
+                pass
 
     def action_toggle_running(self) -> None:
         slug = self._current_slug()
@@ -465,16 +505,15 @@ class ClaudeManApp(App):
         row = next((r for r in self._rows() if r.slug == slug), None)
         if row is None:
             return
-        # Branch on the joined state: UP -> stop (fast, sync); STOPPED/DEFINED -> start. The start
-        # path can have to build the image first, so it runs in a worker — a one-time `docker build`
-        # must not freeze the UI thread. Surface the real result, not blind success (review TUI-1).
+        # Branch on the joined state: UP -> stop; STOPPED/DEFINED -> start. BOTH run in a worker — a
+        # `docker stop` waits the SIGTERM grace (the `sleep infinity` PID 1 ignores it) and now also
+        # syncs assets out, and a start can build the image; neither must block the UI thread (the old
+        # synchronous stop froze the TUI for ~10s). The header spinner shows the in-flight verb.
         if row.kind == status.UP:
-            if slug in self._busy:  # don't stop out from under an in-flight create/recreate
-                self._log(f"[yellow]{slug}: stop skipped — an operation is already running[/]")
+            if not self._reserve(slug, "stop"):  # also blocks stopping out from under a create/recreate
                 return
-            res = lifecycle.stop(slug)
-            self._log(f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
-            self.refresh_projects()
+            self._log(f"stopping {slug} …")
+            self._stop_worker(slug)
         elif projects.exists(slug):
             if not self._reserve(slug, "start"):
                 return
@@ -482,6 +521,15 @@ class ClaudeManApp(App):
             self._up_worker(slug)
         else:
             self._log(f"[red]{slug}: orphan container (no registry entry) — not managed[/]")
+
+    @work(thread=True, group="create")
+    def _stop_worker(self, slug: str) -> None:
+        """Stop (+ asset sync-out) off the UI thread; ``_after_action`` releases the slug + refreshes."""
+        try:
+            res = lifecycle.stop(slug, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"stop failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
 
     def action_focus_logs(self) -> None:
         slug = self._current_slug()
