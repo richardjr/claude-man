@@ -97,7 +97,7 @@ src/claudeman/
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via an 8s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, quit_confirm, logs, sync_review)
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via a 30s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, settings, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, quit_confirm, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install) + overlays/{python,rust,node}.Dockerfile
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)

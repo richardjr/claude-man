@@ -52,6 +52,13 @@ _BAKED_ENV = {
     # `git config --global` and `gh` writes land somewhere writable instead of erroring on EROFS.
     "GIT_CONFIG_GLOBAL": config.CONTAINER_GITCONFIG,
     "GH_CONFIG_DIR": config.CONTAINER_GH_CONFIG,
+    # Yarn (Berry/corepack) writes its global folder under HOME (~/.yarn) by default — EROFS under the
+    # read-only rootfs. Point the (small) global folder at the writable .cache tmpfs, and force the
+    # package cache project-local so the bulk lands in /workspace/<repo>/.yarn/cache (the disk-backed,
+    # persistent workspace bind) rather than the ephemeral/size-capped tmpfs. Same redirect philosophy
+    # as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface, so the hardened floor is unchanged.
+    "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
+    "YARN_ENABLE_GLOBAL_CACHE": "false",
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }

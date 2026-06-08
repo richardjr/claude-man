@@ -141,7 +141,7 @@ class ClaudeManApp(App):
         self.set_interval(2.0, self.refresh_projects)
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
-        self.set_interval(8.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
+        self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
         self.set_interval(0.2, self._tick_spinner)  # animate the header spinner while any op is in flight
 
     # -- data -------------------------------------------------------------
@@ -237,7 +237,7 @@ class ClaudeManApp(App):
 
         ``exclusive=True`` only cancels the *awaiting* wrapper — it can't preempt a thread worker that
         is already running its (possibly fetch-ful, multi-second) body. So a fetch-ful ``g`` and the
-        next fetch-less 8 s tick can run in parallel; the seq lets ``_apply_gitstate`` keep the
+        next fetch-less 30 s tick can run in parallel; the seq lets ``_apply_gitstate`` keep the
         latest-dispatched batch and drop a slower older one that finishes late.
         """
         self._gitstate_seq += 1
@@ -247,7 +247,7 @@ class ClaudeManApp(App):
     def refresh_gitstate(self, seq: int, fetch: bool = False) -> None:
         """Scan every project's repos host-side off the UI thread (mirrors refresh_usage).
 
-        The 8 s background tick runs **fetch-less** (all-local porcelain status, sub-ms per repo) so it
+        The 30 s background tick runs **fetch-less** (all-local porcelain status, sub-ms per repo) so it
         never blocks; the on-demand ``g`` action passes ``fetch=True`` so ahead/behind reflects the
         remote. ``live`` is returned alongside the results so ``_apply_gitstate`` can prune slugs gone
         from the registry. Container *liveness* (the Status column) stays fresh every 2 s and uncached —
@@ -560,7 +560,7 @@ class ClaudeManApp(App):
             self.call_from_thread(self._log, f"[{'green' if res.ok else 'yellow'}]{res.detail}[/]")
 
     def action_refresh_gitstate(self) -> None:
-        # On-demand: a *fetch-ful* rescan (the 8 s background tick is fetch-less).
+        # On-demand: a *fetch-ful* rescan (the 30 s background tick is fetch-less).
         self._dispatch_gitstate(fetch=True)
         self._log("fetching + rescanning repos …")
 

@@ -55,6 +55,10 @@ CONTAINER_SSH_AGENT_SOCK = "/ssh-agent"           # forwarded host ssh-agent soc
 # GIT_CONFIG_COUNT env (no file needed); these just make `git config --global` / `gh auth` work too.
 CONTAINER_GITCONFIG = CONTAINER_CACHE + "/gitconfig"   # GIT_CONFIG_GLOBAL
 CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
+# Yarn (Berry/corepack) defaults its global folder to ~/.yarn — EROFS under the read-only rootfs
+# (the `mkdir /home/agent/.yarn` failure). Redirect the small global folder (metadata/telemetry) to
+# the writable .cache tmpfs; the bulk package cache is forced project-local (see _BAKED_ENV).
+CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
