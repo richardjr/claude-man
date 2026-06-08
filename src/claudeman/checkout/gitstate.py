@@ -274,6 +274,48 @@ def pull_decision(s: RepoState) -> tuple[bool, str]:
     return True, f"↓{s.behind} → fast-forward{note}"
 
 
+def delete_risk(s: RepoState) -> tuple[bool, str]:
+    """Pure: would deleting this repo's on-disk checkout lose unsynced work? -> (risky?, reason).
+
+    The destructive-delete analogue of ``pull_decision``: ``project delete`` ``rm -rf``s the workspace,
+    so before it runs we flag every repo holding work that isn't safely on a remote. Deliberately errs
+    toward RISKY — a false positive only nags (the operator can still delete anyway / keep the
+    workspace), a false negative silently destroys work. Ordered most- to least-severe and the reason
+    lists every concurrent hazard so the operator sees the full picture, not just the first one:
+
+    * OWNERSHIP / ERROR  -> risky: the tree couldn't be read, so we can't promise it's synced.
+    * uncloned           -> safe: nothing on disk to lose.
+    * conflict / uncommitted / unpushed-ahead / stash -> risky: live work not on a remote.
+    * detached HEAD      -> risky: commits may sit on no branch.
+    * no upstream        -> risky: a local-only branch that was never pushed anywhere.
+    * otherwise (clean, on an upstream, nothing ahead) -> safe — even when *behind* (a peer pushed;
+      our work is all on the remote) or on a non-config branch (it still tracks its own upstream).
+    """
+    if s.kind == OWNERSHIP:
+        return True, "dubious ownership — can't verify it's synced"
+    if s.kind == ERROR or s.error:
+        return True, "git error — can't verify it's synced"
+    if not s.present:
+        return False, "not cloned (nothing on disk)"
+    bits: list[str] = []
+    if s.unmerged:
+        bits.append(f"{s.unmerged} unresolved conflict(s)")
+    changes = s.staged + s.unstaged + s.untracked
+    if changes:
+        bits.append(f"{changes} uncommitted change(s)")
+    if s.ahead:
+        bits.append(f"↑{s.ahead} unpushed commit(s)")
+    if s.stash:
+        bits.append(f"{s.stash} stash entr" + ("y" if s.stash == 1 else "ies"))
+    if s.detached:
+        bits.append("detached HEAD")
+    elif s.upstream is None:
+        bits.append("no upstream (local-only branch)")
+    if bits:
+        return True, ", ".join(bits)
+    return False, "clean (synced)"
+
+
 def host_uid_matches_container() -> bool:
     """Whether the host operator's uid equals the container's uid (1000).
 

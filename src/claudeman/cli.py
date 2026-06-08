@@ -206,14 +206,46 @@ def cmd_project_status(args) -> int:
     return 0
 
 
-def cmd_project_shell(args) -> int:
-    terminals.spawn_shell(args.slug)
+def _open_terminal(slug: str, program: str) -> int:
+    """Ensure ``slug``'s container is running, then spawn a detached ``program`` terminal into it.
+
+    A ``docker exec`` needs a RUNNING container, so a STOPPED/DEFINED project is started first
+    (synchronously — the start may build the image) and the terminal opened only once it's up;
+    previously this spawned a window whose ``docker exec`` failed against a dead container. An
+    already-running container (including an orphan) is exec'd straight into; a non-running container
+    with no registry entry can't be managed. Mirrors the TUI ``_open_terminal`` flow.
+    """
+    from . import lifecycle
+    from .docker import runner
+
+    if not runner.is_running(slug):
+        if not projects.exists(slug):
+            extra = (" (orphan container exists — reconcile it, or `docker start` it by hand)"
+                     if runner.exists(slug)
+                     else f"; create it with `claudemanctl project create {slug}`")
+            print(f"no managed project {slug!r}{extra}", file=sys.stderr)
+            return 1
+        print(f"{slug} not running — starting it first …", file=sys.stderr)
+        res = lifecycle.up(projects.load(slug))
+        print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+        if not res.ok:
+            return 1
+    label = "claude" if program == "claude" else "shell"
+    spawn = terminals.spawn_claude if program == "claude" else terminals.spawn_shell
+    try:
+        spawn(slug)
+    except (RuntimeError, OSError) as exc:
+        print(f"failed to open {label} for {slug!r}: {exc}", file=sys.stderr)
+        return 1
     return 0
+
+
+def cmd_project_shell(args) -> int:
+    return _open_terminal(args.slug, "bash")
 
 
 def cmd_project_claude(args) -> int:
-    terminals.spawn_claude(args.slug)
-    return 0
+    return _open_terminal(args.slug, "claude")
 
 
 def cmd_project_create(args) -> int:
@@ -431,7 +463,24 @@ def cmd_project_resync(args) -> int:
 
 
 def cmd_project_delete(args) -> int:
-    return _todo(3, f"delete project {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    # Sync-check first: print each repo's risk so the operator can't lose work unknowingly. A risky
+    # repo blocks the delete unless --force (the CLI analogue of the TUI's "delete anyway").
+    plan = lifecycle.delete_plan(args.slug)
+    for it in plan.items:
+        print(f"  {'⚠' if it.risky else '✓'} {it.dir}: {it.reason}")
+    if plan.risky and not args.force:
+        print(f"{args.slug}: unsynced work above — commit/push first, or re-run with --force to "
+              f"delete anyway (add --keep-workspace to preserve the /workspace checkout).",
+              file=sys.stderr)
+        return 1
+    res = lifecycle.delete_project(args.slug, keep_workspace=args.keep_workspace)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_lock(args) -> int:
@@ -602,13 +651,19 @@ def build_parser() -> argparse.ArgumentParser:
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
         ("claude", cmd_project_claude, "run claude in a new terminal"),
-        ("delete", cmd_project_delete, "tear down (idempotent)"),
         ("lock", cmd_project_lock, "switch to strict egress"),
         ("unlock", cmd_project_unlock, "return to open egress"),
     ]:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug")
         sp.set_defaults(func=func)
+    pdel = proj.add_parser("delete", help="tear down (container + state + registry; idempotent)")
+    pdel.add_argument("slug")
+    pdel.add_argument("--keep-workspace", action="store_true", dest="keep_workspace",
+                      help="preserve the /workspace checkout on disk (remove container + registry only)")
+    pdel.add_argument("--force", action="store_true",
+                      help="delete even when repos hold unsynced (uncommitted/unpushed) work")
+    pdel.set_defaults(func=cmd_project_delete)
     prc = proj.add_parser("recreate", help="rebuild the container (optionally switch profile)")
     prc.add_argument("slug")
     prc.add_argument("--profile", help="switch the project to this profile (account)")

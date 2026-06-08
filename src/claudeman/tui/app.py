@@ -29,6 +29,7 @@ from ..registry import schema
 from . import terminals
 from .screens.add_repo import AddRepoScreen
 from .screens.create import NewProject, NewProjectScreen
+from .screens.delete_project import DeleteProjectScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
 from .screens.pull_confirm import PullConfirmScreen
@@ -335,16 +336,74 @@ class ClaudeManApp(App):
 
     # -- actions ----------------------------------------------------------
     def action_open_shell(self) -> None:
-        slug = self._current_slug()
-        if slug:
-            terminals.spawn_shell(slug)
-            self._log(f"[green]shell[/] opened for {slug}")
+        self._open_terminal("bash")
 
     def action_open_claude(self) -> None:
+        self._open_terminal("claude")
+
+    def _open_terminal(self, program: str) -> None:
+        """Open a detached terminal running ``program`` (bash/claude) in the cursor's project.
+
+        A ``docker exec`` needs a RUNNING container, so a STOPPED/DEFINED project is started first —
+        in a worker, since the start may have to build the image — and the terminal is spawned only
+        once it's up. Previously this opened a window whose ``docker exec`` failed against a dead
+        container. An already-UP project takes the fast path (exec straight in); an orphan container
+        with no registry entry can't be started by us, so it's declined like action_toggle_running.
+        """
         slug = self._current_slug()
-        if slug:
-            terminals.spawn_claude(slug)
-            self._log(f"[green]claude[/] launched for {slug}")
+        if not slug:
+            return
+        # Refuse while any lifecycle op is mid-flight for this slug (mirrors action_toggle_running).
+        # Critical for the start path below: a press during an in-flight _up_then_spawn_worker must
+        # not take the UP fast path the 2 s poll has just exposed and spawn a duplicate window — the
+        # worker opens the terminal itself once the container is up.
+        if slug in self._busy:
+            verb = "claude" if program == "claude" else "shell"
+            self._log(f"[yellow]{slug}: {verb} skipped — an operation is already running[/]")
+            return
+        row = next((r for r in self._rows() if r.slug == slug), None)
+        if row is None:
+            return
+        if row.kind == status.UP:
+            self._spawn_terminal(slug, program)  # already running — exec straight in
+            return
+        if not projects.exists(slug):
+            self._log(f"[red]{slug}: orphan container (no registry entry) — not managed[/]")
+            return
+        if not self._reserve(slug, f"start+{program}"):
+            return
+        self._log(f"starting {slug} before opening {program} …")
+        self._up_then_spawn_worker(slug, program)
+
+    def _spawn_terminal(self, slug: str, program: str) -> None:
+        """Spawn the detached terminal window (UI thread). Wrapped so a missing terminal binary
+        (RuntimeError from build_argv) or a spawn failure logs instead of bubbling up."""
+        spawn, verb, past = (
+            (terminals.spawn_claude, "claude", "launched") if program == "claude"
+            else (terminals.spawn_shell, "shell", "opened")
+        )
+        try:
+            spawn(slug)
+        except (RuntimeError, OSError) as exc:
+            self._log(f"[red]{verb} for {slug} failed: {exc}[/]")
+            return
+        self._log(f"[green]{verb}[/] {past} for {slug}")
+
+    @work(thread=True, group="create")
+    def _up_then_spawn_worker(self, slug: str, program: str) -> None:
+        """Start (create-if-needed) off the UI thread, then spawn the terminal once it's running."""
+        try:
+            res = lifecycle.up(projects.load(slug), on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"start failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_up_then_spawn, slug, res, program)
+
+    def _after_up_then_spawn(self, slug: str, res: lifecycle.Result, program: str) -> None:
+        self._busy.discard(slug)
+        self._log(f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
+        self.refresh_projects()
+        if res.ok:
+            self._spawn_terminal(slug, program)  # container is up now — exec in
 
     def action_toggle_running(self) -> None:
         slug = self._current_slug()
@@ -634,8 +693,62 @@ class ClaudeManApp(App):
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")
 
+    # -- delete (sync-checked teardown) -----------------------------------
     def action_delete_project(self) -> None:
-        self._log("(phase 3) delete confirm modal — see ROADMAP.md")
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            self._log("[red]delete: select a defined project (orphan rows aren't managed)[/]")
+            return
+        # Reserve up-front (like pull): the plan phase scans every repo, and the confirm modal then
+        # sits open — claim the slug now so a second delete/recreate can't stack behind it. Released on
+        # the plan-error / cancel paths and at the end of the delete worker (_after_delete).
+        if not self._reserve(slug, "delete"):
+            return
+        self._log(f"assessing {slug} for unsynced work …")
+        self._delete_plan_worker(slug)
+
+    # NOT exclusive: the per-slug _busy reservation already blocks a second delete on this slug, and a
+    # cross-slug exclusive cancel could kill another slug's awaiting plan worker and leak its
+    # reservation. Different slugs may scan + confirm in parallel.
+    @work(thread=True, group="delete")
+    def _delete_plan_worker(self, slug: str) -> None:
+        """Scan each repo's sync risk off the UI thread (fetch-less git status), then raise the modal."""
+        try:
+            plan = lifecycle.delete_plan(slug)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            self.call_from_thread(self._delete_plan_failed, slug, exc)
+            return
+        self.call_from_thread(self._show_delete_confirm, plan)
+
+    def _delete_plan_failed(self, slug: str, exc: Exception) -> None:
+        self._busy.discard(slug)  # release the up-front reservation — the delete never reached confirm
+        self._log(f"[red]delete plan failed for {slug!r}: {exc!r}[/]")
+
+    def _show_delete_confirm(self, plan: lifecycle.DeletePlan) -> None:
+        self.push_screen(DeleteProjectScreen(plan), lambda res: self._on_delete_confirm(plan.slug, res))
+
+    def _on_delete_confirm(self, slug: str, res) -> None:
+        if res is None:  # cancelled (res is the keep_workspace bool on confirm — False is NOT a cancel)
+            self._busy.discard(slug)
+            self._log(f"{slug}: delete cancelled")
+            return
+        self._log(f"deleting {slug}{' (keeping workspace)' if res else ''} …")
+        self._delete_worker(slug, res)
+
+    @work(thread=True, group="delete")
+    def _delete_worker(self, slug: str, keep_workspace: bool) -> None:
+        try:
+            res = lifecycle.delete_project(slug, keep_workspace=keep_workspace)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"delete failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_delete, slug, res)
+
+    def _after_delete(self, slug: str, res: lifecycle.Result) -> None:
+        self._busy.discard(slug)
+        self._log(f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
+        self._gitstate.pop(slug, None)  # drop the deleted slug's cached repo state (don't render stale)
+        self.refresh_projects()
+        self._render_repo_detail()
 
     def action_recreate(self) -> None:
         slug = self._current_slug()

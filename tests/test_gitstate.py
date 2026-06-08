@@ -241,6 +241,92 @@ class PullDecisionTest(unittest.TestCase):
         self.assertIn("cfg:main", reason)
 
 
+class DeleteRiskTest(unittest.TestCase):
+    """The pure delete-time sync policy: a repo is RISKY when ``rm -rf``ing its checkout would lose
+    work not on a remote. Errs toward risky (a false positive only nags); behind-only / non-config
+    branch / clean are all safe."""
+
+    @staticmethod
+    def _state(**kw) -> RepoState:
+        base = dict(dir="r", kind=gitstate.OK, present=True, branch="main",
+                    upstream="origin/main", config_branch="main", branch_matches_config=True)
+        base.update(kw)
+        return RepoState(**base)
+
+    def test_clean_synced_is_safe(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state())
+        self.assertFalse(risky)
+        self.assertIn("clean", reason)
+
+    def test_clean_behind_is_safe(self) -> None:
+        # behind-only means a peer pushed; our work is all on the remote — no loss risk.
+        risky, _ = gitstate.delete_risk(self._state(behind=5))
+        self.assertFalse(risky)
+
+    def test_wrong_branch_alone_is_safe(self) -> None:
+        # On a non-config branch but otherwise clean+tracking: not a data-loss risk.
+        risky, _ = gitstate.delete_risk(self._state(
+            branch="feat/x", branch_matches_config=False, upstream="origin/feat/x"))
+        self.assertFalse(risky)
+
+    def test_uncommitted_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(staged=1, unstaged=2))
+        self.assertTrue(risky)
+        self.assertIn("uncommitted", reason)
+
+    def test_untracked_counts_as_uncommitted(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(untracked=3))
+        self.assertTrue(risky)
+        self.assertIn("uncommitted", reason)
+
+    def test_unpushed_ahead_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(ahead=2))
+        self.assertTrue(risky)
+        self.assertIn("unpushed", reason)
+
+    def test_stash_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(stash=1))
+        self.assertTrue(risky)
+        self.assertIn("stash", reason)
+
+    def test_conflict_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(unmerged=1))
+        self.assertTrue(risky)
+        self.assertIn("conflict", reason)
+
+    def test_detached_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(detached=True, branch="", upstream=None))
+        self.assertTrue(risky)
+        self.assertIn("detached", reason)
+
+    def test_no_upstream_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(upstream=None))
+        self.assertTrue(risky)
+        self.assertIn("upstream", reason)
+
+    def test_uncloned_is_safe(self) -> None:
+        risky, reason = gitstate.delete_risk(RepoState(dir="r", kind=gitstate.UNCLONED, present=False))
+        self.assertFalse(risky)
+        self.assertIn("not cloned", reason)
+
+    def test_ownership_cannot_verify_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(RepoState(dir="r", kind=gitstate.OWNERSHIP, present=False))
+        self.assertTrue(risky)
+        self.assertIn("verify", reason)
+
+    def test_error_cannot_verify_is_risky(self) -> None:
+        risky, reason = gitstate.delete_risk(
+            RepoState(dir="r", kind=gitstate.ERROR, present=False, error="boom"))
+        self.assertTrue(risky)
+        self.assertIn("verify", reason)
+
+    def test_reason_lists_every_concurrent_hazard(self) -> None:
+        risky, reason = gitstate.delete_risk(self._state(unstaged=1, ahead=2, stash=1, unmerged=1))
+        self.assertTrue(risky)
+        for needle in ("conflict", "uncommitted", "unpushed", "stash"):
+            self.assertIn(needle, reason)
+
+
 class RepoUrlShapeTest(unittest.TestCase):
     def test_accepts_scp_and_scheme_forms(self) -> None:
         for ok in ("git@github.com:org/repo.git", "https://github.com/org/repo",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -129,6 +130,61 @@ class PullApplyTest(unittest.TestCase):
         self.assertFalse(res.ok)
         self.assertIn("dubious ownership", res.detail)
         self.assertEqual(merged, [])              # nothing merged when the uid guard refuses
+
+
+class DeleteProjectTest(unittest.TestCase):
+    """Full teardown over real tmp config+state dirs (exercising the real flock + delete_definition),
+    with only ``runner.remove`` mocked so no docker daemon is touched."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        config.projects_config_dir().mkdir(parents=True, exist_ok=True)
+        config.project_toml_path("demo").write_text('[project]\nslug = "demo"\noverlay = "base"\n')
+        ws = config.workspace_dir("demo")
+        ws.mkdir(parents=True)
+        (ws / "work.txt").write_text("precious")          # unsynced agent work
+        cc = config.claude_config_dir("demo")
+        cc.mkdir(parents=True)
+        (cc / ".claude.json").write_text("{}")
+
+    def tearDown(self) -> None:
+        for k in ("CLAUDE_MAN_CONFIG_HOME", "CLAUDE_MAN_STATE_HOME"):
+            os.environ.pop(k, None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    def test_full_delete_removes_container_state_and_registry(self) -> None:
+        with mock.patch.object(lifecycle.runner, "remove") as rm:
+            res = lifecycle.delete_project("demo")
+        self.assertTrue(res.ok)
+        rm.assert_called_once_with("demo")
+        self.assertFalse(config.project_toml_path("demo").exists())   # registry gone
+        self.assertFalse(config.project_state_dir("demo").exists())   # workspace + claude-config gone
+
+    def test_keep_workspace_preserves_checkout_but_drops_the_rest(self) -> None:
+        with mock.patch.object(lifecycle.runner, "remove") as rm:
+            res = lifecycle.delete_project("demo", keep_workspace=True)
+        self.assertTrue(res.ok)
+        rm.assert_called_once_with("demo")
+        self.assertFalse(config.project_toml_path("demo").exists())             # registry gone
+        self.assertTrue((config.workspace_dir("demo") / "work.txt").exists())   # checkout kept
+        self.assertFalse(config.claude_config_dir("demo").exists())             # claude state gone
+
+    def test_missing_project_is_an_error_and_skips_docker(self) -> None:
+        with mock.patch.object(lifecycle.runner, "remove") as rm:
+            res = lifecycle.delete_project("nope")
+        self.assertFalse(res.ok)
+        rm.assert_not_called()
+
+    def test_idempotent_when_state_dir_already_absent(self) -> None:
+        shutil.rmtree(config.project_state_dir("demo"))   # simulate a never-created project
+        with mock.patch.object(lifecycle.runner, "remove"):
+            res = lifecycle.delete_project("demo")
+        self.assertTrue(res.ok)
+        self.assertFalse(config.project_toml_path("demo").exists())
 
 
 if __name__ == "__main__":

@@ -445,6 +445,103 @@ def remove_repo(slug: str, target: str, *, purge: bool = False) -> Result:
 
 
 # ---------------------------------------------------------------------------
+# Project delete (Phase 3) — full teardown: rm -f the container, rm -rf the state dir, rm the toml.
+# Two phases mirror the pull flow so the TUI can preview sync risk before the irreversible delete:
+# delete_plan (read-only: scan each repo for unsynced work) -> delete_project (flocked teardown).
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DeleteRiskItem:
+    """One repo's delete-time sync assessment: its dir, whether deleting risks losing work, and the
+    human reason (the string from ``gitstate.delete_risk``)."""
+    dir: str
+    risky: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class DeletePlan:
+    """The previewable outcome of a delete: per-repo sync risk + container liveness. ``risky`` is the
+    aggregate the confirm UI gates its loud 'delete anyway' warning on."""
+    slug: str
+    items: tuple[DeleteRiskItem, ...] = ()
+    running: bool = False
+
+    @property
+    def risky(self) -> bool:
+        return any(it.risky for it in self.items)
+
+
+def delete_plan(slug: str) -> DeletePlan:
+    """Scan every repo's live (fetch-less) git state and assess whether deleting would lose work.
+
+    Read-only — mutates nothing (the preview the TUI confirm modal renders before any teardown). Does
+    shell out though: per-repo ``git status`` (via ``gitstate.project_states``) plus one ``docker
+    inspect`` for liveness (``runner.is_running``). NOT flocked: the scan only reads. Fetch-less by
+    design — a teardown shouldn't block on the network, and
+    a stale remote-tracking ref only ever *over*-warns (flags as unpushed something a peer already has),
+    which is the safe direction for an irreversible op. The operator can `pull`/`sync-repos` first to
+    refresh ahead/behind if they want certainty.
+    """
+    project = projects_registry.load(slug)
+    items = tuple(
+        DeleteRiskItem(dir=s.dir, risky=risky, reason=reason)
+        for s in gitstate.project_states(project)
+        for risky, reason in (gitstate.delete_risk(s),)
+    )
+    return DeletePlan(slug=slug, items=items, running=runner.is_running(slug))
+
+
+def _remove_state(slug: str, *, keep_workspace: bool) -> str:
+    """Remove a project's state dir (``rm -rf``), or — with ``keep_workspace`` — only the claude-side
+    state (config dir, backups, baseline), leaving the ``/workspace`` checkout on disk. Best-effort and
+    idempotent (a missing path is fine); returns a human note for the Result detail."""
+    state_dir = config.project_state_dir(slug)
+    if not state_dir.exists():
+        return "no state dir to remove"
+    if not keep_workspace:
+        shutil.rmtree(state_dir, ignore_errors=True)
+        return "removed state dir (workspace + claude-config + backups)"
+    removed: list[str] = []
+    for path in (config.claude_config_dir(slug), config.backups_dir(slug), config.baseline_path(slug)):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(path.name)
+            elif path.exists():
+                path.unlink()
+                removed.append(path.name)
+        except OSError:
+            continue  # best-effort — never abort the delete on a single stubborn path
+    return (f"kept workspace checkout at {config.workspace_dir(slug)}; removed "
+            + (", ".join(removed) or "no other state"))
+
+
+def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
+    """Tear a project down: ``rm -f`` its container, remove its state dir, delete its registry toml.
+
+    Idempotent and recoverable-by-ordering: the container goes first, the state dir next, and the
+    registry toml LAST — so if any step fails the project is still listed and ``delete`` can be retried
+    (a leftover container then shows as an orphan row, never silently billed; invariant 4: the toml is
+    the source of truth — while it exists the project is "known"). With ``keep_workspace`` the on-disk
+    ``/workspace`` checkout is preserved (container + claude-config + backups + registry still go) — the
+    non-destructive exit for when the operator has unsynced work but wants the project out of
+    claude-man's management. Holds the per-slug flock so it can't interleave with
+    add_repo/remove_repo/recreate; the lock file lives under the state dir being removed, which is fine
+    on Linux (the open fd outlives the unlink — the documented target platform).
+    """
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            runner.remove(slug)  # docker rm -f; idempotent — a non-zero "No such container" is fine
+            state_note = _remove_state(slug, keep_workspace=keep_workspace)
+            projects_registry.delete_definition(slug)  # LAST: the source-of-truth removal
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    return Result(True, f"deleted {slug}: removed container + registry entry; {state_note}")
+
+
+# ---------------------------------------------------------------------------
 # Env mounts (ssh + files) — registry mutation; mounts are fixed at container create, so a change
 # needs `recreate` to take effect (surfaced in the Result, like the repos label drift).
 # ---------------------------------------------------------------------------

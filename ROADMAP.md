@@ -175,7 +175,7 @@ on label divergence (invariant 4); **BUG-6** concise `fetch_all` detail instead 
 **TUI-6** gate actions on orphan rows (container with no registry entry)._
 
 - [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (8 s fetch-less gitstate worker, `g` fetch-ful) + `a`/`R` Add/Remove-repo modal screens.
-- [ ] Idempotent `project delete` (`rm -f` container + `rm -rf` state dir + `rm` toml); start/stop/recreate verbs in TUI + ctl
+- [x] Idempotent `project delete` (`rm -f` container + `rm -rf` state dir + `rm` toml, registry removed LAST so a partial failure stays retry-able); start/stop/recreate verbs in TUI + ctl. **Sync-gated:** `lifecycle.delete_plan` scans each repo (fetch-less) via `gitstate.delete_risk` and the TUI `DeleteProjectScreen` / CLI surface the per-repo unsynced-work assessment before the irreversible delete — risky repos require an explicit "Delete anyway" (TUI) / `--force` (ctl), and `--keep-workspace` / the "keep workspace" toggle preserves the `/workspace` checkout as a non-destructive exit.
 - [ ] Version-bump-by-recreate flow + running-version status column; `backups/` convention
 - [ ] DEFINED/STOPPED/UP JOIN hardened; **BUG-2** second `docker inspect` per-label read for robust multi-label parsing (still latent — values are comma-free today)
 
