@@ -57,7 +57,8 @@ def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION
     """Pure renderer for the ``docker build`` argv (no daemon, no IO) — unit-testable.
 
     Uses absolute, package-relative paths for the Dockerfile and build context so the command is
-    CWD-independent. The Dockerfiles ``COPY`` nothing, so the context is unused beyond being valid.
+    CWD-independent. The base Dockerfile ``COPY``s ``images/nvim`` (the curated neovim config) from
+    the context (= the repo root), so the context must be the repo root — which it is.
     """
     return [
         "docker", "build",

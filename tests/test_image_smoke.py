@@ -49,5 +49,16 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(mark, "warn")
 
 
+class BaseProbesTest(unittest.TestCase):
+    """The base gate must keep exercising the baked neovim (TS+Markdown) under the hardened profile."""
+
+    def test_includes_nvim_gates(self) -> None:
+        from claudeman.docker.smoke import _base_probes
+        names = [p.name for p in _base_probes()]
+        self.assertIn("nvim --version", names)
+        self.assertTrue(any("LSP servers" in n for n in names), names)
+        self.assertTrue(any("treesitter" in n for n in names), names)
+
+
 if __name__ == "__main__":
     unittest.main()

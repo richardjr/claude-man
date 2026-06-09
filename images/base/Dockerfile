@@ -10,6 +10,9 @@
 #     channel's latest and offers a rebuild before `up`; see src/claudeman/updates.py + lifecycle.py).
 #     `claude update` INSIDE a container fails by design (EROFS on the read-only ~/.local).
 #   * ripgrep from apt + USE_BUILTIN_RIPGREP=0 so claude never extracts a binary to temp.
+#   * neovim baked with a curated, no-plugin-manager config (TS + Markdown + git-from-nvim): plugins
+#     are native packages + treesitter parsers/LSP servers are baked, so it runs read-only with no
+#     runtime network. See the "Neovim" section below + images/nvim/.
 #
 # Validate every build with `claudemanctl image smoke base` before trusting it.
 
@@ -17,6 +20,8 @@ FROM debian:trixie-slim
 
 ARG CLAUDE_VERSION=2.1.160
 ARG GH_VERSION=2.93.0
+ARG NVIM_VERSION=0.12.2
+ARG MARKSMAN_VERSION=2026-02-08
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
 # openssh-client provides `ssh` for in-container git-over-ssh when a project adds an `ssh` env-mount
@@ -71,6 +76,85 @@ RUN set -eux; \
 RUN set -eux; \
     ln -s /home/agent/.cache/yarnrc /home/agent/.yarnrc; \
     chown -h agent:agent /home/agent/.yarnrc
+
+# --- Neovim (baked curated config: TypeScript + Markdown + git-from-nvim) ------------------------
+# A reproducible, no-plugin-manager setup so it works under --read-only with NO runtime network:
+#   * nvim from the official release tarball -> /opt/nvim (on PATH).
+#   * LSP servers (ts_ls / marksman / jsonls) + prettier baked on PATH.
+#   * curated config -> ~/.config/nvim (see images/nvim/); plugins baked as native packages
+#     (pack/curated/start); treesitter parsers compiled into /opt/nvim-parsers (build-only gcc, purged).
+# Runtime writes (shada/state/cache) go to the .cache tmpfs (XDG_STATE_HOME/XDG_CACHE_HOME) — no new
+# writable surface, so the hardened floor (invariant 2) is unchanged.
+
+# nvim binary (arch-aware tarball).
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) na=x86_64 ;; arm64) na=arm64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
+    curl -fsSL -o /tmp/nvim.tar.gz \
+        "https://github.com/neovim/neovim/releases/download/v${NVIM_VERSION}/nvim-linux-${na}.tar.gz"; \
+    mkdir -p /opt/nvim; \
+    tar -xzf /tmp/nvim.tar.gz -C /opt/nvim --strip-components=1; \
+    ln -s /opt/nvim/bin/nvim /usr/local/bin/nvim; \
+    rm -f /tmp/nvim.tar.gz; \
+    nvim --version | head -1
+
+# LSP servers + formatter, baked on PATH (no runtime Mason/network): ts_ls, jsonls, prettier (npm) +
+# marksman (arch-aware prebuilt binary).
+RUN set -eux; \
+    npm install -g --no-fund --no-audit \
+        typescript@6.0.3 typescript-language-server@5.3.0 \
+        vscode-langservers-extracted@4.10.0 prettier@3.8.3; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) ma=x64 ;; arm64) ma=arm64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
+    curl -fsSL -o /usr/local/bin/marksman \
+        "https://github.com/artempyanykh/marksman/releases/download/${MARKSMAN_VERSION}/marksman-linux-${ma}"; \
+    chmod 0755 /usr/local/bin/marksman; \
+    typescript-language-server --version; \
+    marksman --version
+
+# Curated config + baked plugins (native packages, no plugin manager). Plugins are PINNED to exact
+# commit SHAs (resolved 2026-06-09) for a reproducible build — `pin` shallow-fetches just that commit.
+# To bump: `git ls-remote https://github.com/<repo> <branch>` and update the SHA here.
+COPY images/nvim /home/agent/.config/nvim
+RUN set -eux; \
+    pack="/home/agent/.config/nvim/pack/curated/start"; \
+    mkdir -p "$pack" /opt/nvim-parsers; \
+    pin() { d="$pack/$2"; mkdir -p "$d"; git -C "$d" init -q; \
+        git -C "$d" remote add origin "https://github.com/$1.git"; \
+        git -C "$d" fetch -q --depth 1 origin "$3"; \
+        git -C "$d" checkout -q --detach FETCH_HEAD; }; \
+    pin nvim-treesitter/nvim-treesitter            nvim-treesitter      cf12346a3414fa1b06af75c79faebe7f76df080a; \
+    pin neovim/nvim-lspconfig                      nvim-lspconfig       ed19590a3a9792901553c388d1aadafce012f80d; \
+    pin hrsh7th/nvim-cmp                            nvim-cmp             a1d504892f2bc56c2e79b65c6faded2fd21f3eca; \
+    pin hrsh7th/cmp-nvim-lsp                        cmp-nvim-lsp         cbc7b02bb99fae35cb42f514762b89b5126651ef; \
+    pin hrsh7th/cmp-buffer                          cmp-buffer           b74fab3656eea9de20a9b8116afa3cfc4ec09657; \
+    pin hrsh7th/cmp-path                            cmp-path             c642487086dbd9a93160e1679a1327be111cbc25; \
+    pin lewis6991/gitsigns.nvim                    gitsigns.nvim        25050e4ed39e628282831d4cbecb1850454ce915; \
+    pin tpope/vim-fugitive                          vim-fugitive         3b753cf8c6a4dcde6edee8827d464ba9b8c4a6f0; \
+    pin stevearc/conform.nvim                      conform.nvim         619363c30309d29ffa631e67c8183f2a72caa373; \
+    pin MeanderingProgrammer/render-markdown.nvim  render-markdown.nvim 5adf0895310c1904e5abfaad40a2baad7fe44a07; \
+    pin tahayvr/matteblack.nvim                    matteblack.nvim      a8a039f5d6189b28d76fa0221e64965efec7e996; \
+    find "$pack" -name .git -maxdepth 2 -type d -prune -exec rm -rf {} +; \
+    chown -R agent:agent /home/agent/.config
+
+# Compile treesitter parsers into /opt/nvim-parsers (build-only toolchain, then PURGED so no compiler
+# ships at runtime). Headless nvim loads the curated config, which sets parser_install_dir.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc g++ make; \
+    chmod 0777 /opt/nvim-parsers; \
+    runuser -u agent -- env HOME=/home/agent PATH=/usr/local/bin:/usr/bin:/bin \
+        nvim --headless \
+        -c "TSInstallSync! typescript tsx javascript json markdown markdown_inline bash yaml python sql dockerfile html css lua diff gitcommit" \
+        -c "qa" 2>&1 | tail -25 || true; \
+    test -f /opt/nvim-parsers/parser/typescript.so \
+        || { echo "FATAL: typescript treesitter parser not baked" >&2; exit 1; }; \
+    chown -R agent:agent /opt/nvim-parsers; \
+    chmod -R a+rX /opt/nvim-parsers; \
+    apt-get purge -y gcc g++ make; \
+    apt-get autoremove -y --purge; \
+    rm -rf /var/lib/apt/lists/*; \
+    echo "baked parsers:"; ls /opt/nvim-parsers/parser/ | tr '\n' ' '; echo
 
 # Baked environment (also set explicitly at run time by docker/runner.py).
 # XDG_STATE_HOME points at the writable .cache tmpfs so claude's version-lock dir
