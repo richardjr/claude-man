@@ -97,6 +97,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         profile=proj.get("profile"),
         overlay=proj.get("overlay", config.DEFAULT_OVERLAY),
         egress=egress_tbl.get("mode", config.DEFAULT_EGRESS),
+        claude_version=str(proj.get("claude_version", "") or ""),
         env={k: _env_str(v) for k, v in (proj.get("env", {}) or {}).items()},
         env_file=proj.get("env_file"),
         workdir=proj.get("workdir", ""),
@@ -159,6 +160,8 @@ def save(project: Project) -> Path:
     if project.profile:
         proj["profile"] = project.profile
     proj["overlay"] = project.overlay
+    if project.claude_version:
+        proj["claude_version"] = project.claude_version
     if project.workdir:
         proj["workdir"] = project.workdir
     if project.extra_apt:

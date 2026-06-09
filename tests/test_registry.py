@@ -100,6 +100,15 @@ class RegistryTest(unittest.TestCase):
         p = projects.load("typed")
         self.assertEqual(p.env, {"DEBUG": "true", "PORT": "3000", "RATIO": "1.5"})
 
+    def test_claude_version_pin_roundtrips(self) -> None:
+        projects.save(Project(slug="pinned", claude_version="2.1.169"))
+        self.assertEqual(projects.load("pinned").claude_version, "2.1.169")
+
+    def test_claude_version_omitted_when_unset(self) -> None:
+        path = projects.save(Project(slug="unpinned"))
+        self.assertNotIn("claude_version", path.read_text())
+        self.assertEqual(projects.load("unpinned").claude_version, "")  # absent -> default ""
+
     def test_sync_block_roundtrips(self) -> None:
         projects.save(Project(slug="synced", sync=Sync(
             enabled=False, workspace=("CLAUDE.md", "docs/"), claude=("skills",))))

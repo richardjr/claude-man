@@ -37,7 +37,14 @@ subscription usage bars** — `usage_api.py` reads `GET /api/oauth/usage` (5-hou
 `Week` columns, `u` refreshes) + `profile limits` CLI (see Phase 2). **In-container git identity + gh**
 — `gitconfig.py` injects the operator's git author identity via `GIT_CONFIG_*` env (no writable file
 needed under `--read-only`); the base image ships pinned `gh 2.93.0`; git/gh config redirected onto the
-writable `.cache` tmpfs (see Phases 0.5 + 1). 193 dependency-free
+writable `.cache` tmpfs (see Phases 0.5 + 1). **On-start claude-version update** — `updates.py` reads
+the tracked channel's latest version (token-less GET of `downloads.claude.ai/claude-code-releases/
+<channel>`, the same endpoint the native installer uses) and, before `up`, compares it to the image's
+baked `claude-man.claude-version` label; when a newer claude exists it offers (default: **prompt**) a
+host-side image rebuild + container recreate — `claude update` can't run in the read-only container, so
+the binary is bumped by rebuilding the image (invariant 2 byte-identical). Channel/pin/toggle via
+`config image` (default `latest`, check on) + a per-project `claude_version` pin; the check fails OPEN
+(offline -> start on the existing image). 321 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git probes).
 
@@ -45,8 +52,10 @@ tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` gree
 claude in hardened containers, switch a project's account, watch per-account token usage **and live
 5-hour/weekly subscription-limit bars**, add / remove / inspect a project's checked-out repos with live
 git state, mount ssh (agent-forward) + host files into a container (`project env` + `project resync`),
-and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity — all
-from both the CLI and the TUI.
+and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity, and
+**keep claude up to date** — on start, claude-man checks the tracked channel and offers to rebuild a
+project's image to the newer claude (host-side; `claude update` can't run in the read-only container) —
+all from both the CLI and the TUI.
 
 **Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
 table to an async `docker ps`/`docker events` worker (TUI-2); the one-claude-per-container guard

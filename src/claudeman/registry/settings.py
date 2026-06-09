@@ -28,11 +28,20 @@ def _parse(data: dict) -> Settings:
     if not isinstance(keys, list):
         raise ValidationError("config ssh.keys must be a list of host key paths")
     git = data.get("git", {}) or {}
+    image = data.get("image", {}) or {}
+    # Coerce an unknown/typo'd channel back to the default rather than raising — a bad value in a
+    # hand-edited config must not brick the TUI/CLI (the schema stays strict for programmatic writes).
+    channel = str(image.get("claude_channel", config.DEFAULT_CLAUDE_CHANNEL) or config.DEFAULT_CLAUDE_CHANNEL)
+    if channel not in config.CLAUDE_CHANNELS:
+        channel = config.DEFAULT_CLAUDE_CHANNEL
     return Settings(
         ssh_keys=tuple(str(k) for k in keys),
         ssh_auto_load=bool(ssh.get("auto_load", True)),
         git_user_name=str(git.get("user_name", "") or ""),
         git_user_email=str(git.get("user_email", "") or ""),
+        image_update_check=bool(image.get("update_check", True)),
+        claude_channel=channel,
+        claude_version_pin=str(image.get("claude_version_pin", "") or ""),
     )
 
 
@@ -61,6 +70,11 @@ def save(settings: Settings) -> Path:
     git["user_name"] = settings.git_user_name
     git["user_email"] = settings.git_user_email
     doc["git"] = git
+    image = tomlkit.table()
+    image["update_check"] = bool(settings.image_update_check)
+    image["claude_channel"] = settings.claude_channel
+    image["claude_version_pin"] = settings.claude_version_pin
+    doc["image"] = image
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +112,27 @@ def set_git_identity(name: str, email: str) -> Settings:
     """Set (or clear, with empty strings) the git author identity injected into containers."""
     updated = dataclasses.replace(
         load(), git_user_name=name.strip(), git_user_email=email.strip()
+    )
+    save(updated)
+    return updated
+
+
+def set_image_settings(
+    *,
+    update_check: bool | None = None,
+    claude_channel: str | None = None,
+    claude_version_pin: str | None = None,
+) -> Settings:
+    """Update the on-start claude-version settings (each ``None`` arg is left unchanged). Raises
+    ``ValidationError`` (via ``Settings.__post_init__``) for an unknown channel, so a bad
+    ``config image --channel`` fails loudly rather than silently writing junk."""
+    cur = load()
+    updated = dataclasses.replace(
+        cur,
+        image_update_check=cur.image_update_check if update_check is None else bool(update_check),
+        claude_channel=cur.claude_channel if claude_channel is None else claude_channel,
+        claude_version_pin=(cur.claude_version_pin if claude_version_pin is None
+                            else claude_version_pin.strip()),
     )
     save(updated)
     return updated

@@ -5,7 +5,10 @@
 #   * A REAL /etc/passwd entry + baked HOME for uid 1000 — without it, getpwuid()
 #     fails under `--read-only --user` and HOME resolves to "/".
 #   * `claude` baked to a read-only system path (NOT npm-installed at runtime) so the
-#     binary dir can stay read-only and auto-update is disabled.
+#     binary dir can stay read-only and auto-update is disabled. To UPDATE claude, rebuild this image
+#     with a newer CLAUDE_VERSION — claude-man does this for you on start (it checks the tracked
+#     channel's latest and offers a rebuild before `up`; see src/claudeman/updates.py + lifecycle.py).
+#     `claude update` INSIDE a container fails by design (EROFS on the read-only ~/.local).
 #   * ripgrep from apt + USE_BUILTIN_RIPGREP=0 so claude never extracts a binary to temp.
 #
 # Validate every build with `claudemanctl image smoke base` before trusting it.

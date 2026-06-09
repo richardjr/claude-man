@@ -100,6 +100,18 @@ OAUTH_USAGE_SCOPES = "user:profile user:inference"
 # The usage endpoint rate-limits a generic User-Agent aggressively; send the claude-code UA.
 CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
 
+# ---------------------------------------------------------------------------
+# Claude Code release channel (the on-start "is a newer claude available?" check)
+# ---------------------------------------------------------------------------
+# A plain-text version pointer per channel — the SAME endpoint claude's native installer reads
+# (``install.sh`` GETs ``…/latest`` to learn the version). A cheap, TOKEN-LESS GET that reads no quota.
+# claude-man compares the channel version to the image's baked ``claude-man.claude-version`` label and
+# offers a host-side image REBUILD before start (never an in-container write — the ``~/.local`` install
+# is on the read-only rootfs, which is why ``claude update`` fails inside a container). See updates.py.
+RELEASES_BASE_URL = "https://downloads.claude.ai/claude-code-releases"
+CLAUDE_CHANNELS = ("latest", "stable")
+DEFAULT_CLAUDE_CHANNEL = "latest"
+
 
 # ---------------------------------------------------------------------------
 # Path resolution

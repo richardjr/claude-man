@@ -270,6 +270,7 @@ class Project:
     profile: str | None = None          # None -> inherit the default profile
     overlay: str = config.DEFAULT_OVERLAY
     egress: str = config.DEFAULT_EGRESS  # "open" | "strict"
+    claude_version: str = ""             # per-project exact claude pin; "" -> the global channel/pin
     env: dict[str, str] = field(default_factory=dict)
     env_file: str | None = None
     workdir: str = ""                    # where claude/shell launch (else: lone repo's dir, else /workspace)
@@ -341,11 +342,21 @@ class Settings:
     ssh_auto_load: bool = True           # load them on TUI/CLI startup (and on add)
     git_user_name: str = ""              # git author identity injected into containers ("" -> inherit host)
     git_user_email: str = ""             # "" -> inherit the host's `git config --global user.email`
+    # On-start claude-version update: before `up`, GET the tracked channel's latest version and offer to
+    # rebuild the project's image to it when it's newer than the baked one (host-side image rebuild —
+    # never an in-container write; invariant 2 is untouched). A version pin overrides the channel.
+    image_update_check: bool = True      # run the on-start "newer claude available?" check
+    claude_channel: str = config.DEFAULT_CLAUDE_CHANNEL  # "latest" | "stable" — which channel to track
+    claude_version_pin: str = ""         # exact version pin; "" -> track the channel
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:
             if not k or not k.strip():
                 raise ValidationError("ssh key path must be a non-empty string")
+        if self.claude_channel not in config.CLAUDE_CHANNELS:
+            raise ValidationError(
+                f"claude_channel {self.claude_channel!r} must be one of {config.CLAUDE_CHANNELS}"
+            )
 
 
 @dataclass(frozen=True)

@@ -83,10 +83,11 @@ These are security- and correctness-critical. Every change must preserve them.
 src/claudeman/
   config.py            XDG paths + all shared constants (label prefix, container/image names, baked container paths)
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
-  lifecycle.py         create / up / stop / recreate / delete orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed, sync-checked delete_plan/delete_project teardown, asset sync-in on up / sync-out on stop)
+  lifecycle.py         create / up / stop / recreate / delete orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed, sync-checked delete_plan/delete_project teardown, asset sync-in on up / sync-out on stop, on-start claude-version check (`check_update`) -> operator-confirmed host-side image rebuild + recreate before start via `up(rebuild_to=...)`; stamps the container version from the image's real baked label)
   assets.py            per-project asset sync (host-side copy of CLAUDE.md + skills/agents between the synced config-tier source ~/.config/claude-man/assets/<slug>/ and the /workspace + ~/.claude binds): sync_in on start (asset wins), sync_out on stop (bind wins), backup-then-overwrite; claude side is a default-DENY allowlist (skills/agents/commands only) with a per-entry filtered recursive copy that drops denylisted-named nested entries + refuses escaping / denylist-targeting symlinks; workspace side is containment-checked; bootstraps a stub CLAUDE.md — distinct from the Phase-5 review-gated sync-back
   usage.py             per-profile token-usage parsed from project transcripts (read-only, separate from sync-back)
   usage_api.py         per-account subscription usage (5-hour + weekly bars) via GET /api/oauth/usage with a profile's OAuth token — no-redirect opener (no cross-host token leak); pure parse/render split from the network fetch
+  updates.py           resolve the latest/stable claude version (token-less GET of downloads.claude.ai/claude-code-releases/<channel> — same endpoint the native installer reads) so the on-start check can offer a host-side image rebuild before `up` when a newer claude exists; pure parse/compare split from the fetch, fails OPEN (offline -> start on the existing image). Never an in-container update (`~/.local` is read-only — invariant 2 holds)
   gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
   gh_token.py          optional GitHub token (state-tier 0600, NOT config.toml) injected pass-through as GH_TOKEN for in-container `gh` — opt-in via `config gh-token` (invariant 1)
   env_secrets.py       per-project `kind="env"` env-mount VALUES (state-tier 0600 env.json, NOT config.toml/synced) — names live in the registry; values injected `-e NAME` pass-through (invariant 1)
@@ -147,6 +148,8 @@ project env rm <slug> <ssh|dst|NAME> | env list     # remove (by ssh / file dst 
 config show                                         # global settings: resolved git identity + ssh keys/load status
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
 config gh-token [--clear | --stdin]                # set/clear the GitHub token injected as GH_TOKEN (hidden prompt; 0600 state-tier; recreate to apply)
+config image [--channel latest|stable] [--pin X | --no-pin] [--check on|off]   # claude release channel/pin + the on-start "newer claude?" check (default: latest, on)
+project up <slug> [--update-yes | --no-update]     # start; on-start it checks for a newer claude and (prompt, default) rebuilds the image to it. --update-yes skips the prompt; --no-update skips the check
 config ssh add|rm <path> | config ssh load         # ssh keys claude-man auto-loads into the host agent
 ```
 

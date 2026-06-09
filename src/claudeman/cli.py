@@ -258,6 +258,32 @@ def cmd_project_create(args) -> int:
     return 0 if res.ok else 1
 
 
+def _resolve_update(project, args) -> str:
+    """Decide the ``rebuild_to`` version for a CLI ``project up``: honour ``--no-update`` /
+    ``--update-yes``, silently build the tracked version for a fresh project, and prompt on a TTY when
+    an existing image is behind. Fails open (returns ``""`` = no rebuild) on any check failure."""
+    from . import lifecycle
+
+    if getattr(args, "no_update", False):
+        return ""
+    chk = lifecycle.check_update(project)
+    if chk.build_to:               # fresh project — build the tracked version, no prompt
+        return chk.build_to
+    if not chk.prompt:             # up to date / disabled / offline
+        if chk.note:
+            print(f"{project.slug}: {chk.note}", file=sys.stderr)
+        return ""
+    if getattr(args, "update_yes", False):
+        return chk.target
+    msg = f"newer claude {chk.target} available (image has {chk.current})"
+    if not sys.stdin.isatty():
+        print(f"{msg}; skipping rebuild (non-interactive — pass --update-yes to rebuild)",
+              file=sys.stderr)
+        return ""
+    ans = input(f"{msg}. Rebuild the image now? [y/N] ").strip().lower()
+    return chk.target if ans in ("y", "yes") else ""
+
+
 def cmd_project_up(args) -> int:
     from . import lifecycle
 
@@ -268,7 +294,10 @@ def cmd_project_up(args) -> int:
             file=sys.stderr,
         )
         return 1
-    res = lifecycle.up(projects.load(args.slug))
+    project = projects.load(args.slug)
+    rebuild_to = _resolve_update(project, args)
+    # Stream progress (image rebuild / build) to stdout, like `image build`.
+    res = lifecycle.up(project, on_progress=print, rebuild_to=rebuild_to)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
 
@@ -564,6 +593,9 @@ def cmd_config_show(args) -> int:
     src = "config" if (s.git_user_name or s.git_user_email) else ("host" if (name or email) else "unset")
     print(f"git identity: {name or '(unset)'} <{email or '(unset)'}>  [{src}]")
     print(f"gh token: {'set' if gh_token.is_set() else '(none — set with `config gh-token`)'}")
+    pin = f", pin {s.claude_version_pin}" if s.claude_version_pin else ""
+    print(f"claude image: channel {s.claude_channel}{pin}, "
+          f"on-start update check {'on' if s.image_update_check else 'off'}")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -640,6 +672,33 @@ def cmd_config_git(args) -> int:
     return 0
 
 
+def cmd_config_image(args) -> int:
+    from .registry import schema
+    from .registry import settings as settings_registry
+
+    no_pin = getattr(args, "no_pin", False)
+    if args.channel is None and args.pin is None and not no_pin and args.check is None:
+        s = settings_registry.load()
+        print(f"on-start update check: {'on' if s.image_update_check else 'off'}")
+        print(f"claude channel: {s.claude_channel}")
+        print(f"claude version pin: {s.claude_version_pin or '(none — track the channel)'}")
+        print("set with `config image [--channel latest|stable] [--pin X | --no-pin] [--check on|off]`")
+        return 0
+    update_check = None if args.check is None else (args.check == "on")
+    pin = "" if no_pin else args.pin  # --no-pin clears; --pin X sets; neither -> leave unchanged
+    try:
+        s = settings_registry.set_image_settings(
+            update_check=update_check, claude_channel=args.channel, claude_version_pin=pin,
+        )
+    except schema.ValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"image settings: update check {'on' if s.image_update_check else 'off'}, "
+          f"channel {s.claude_channel}, pin {s.claude_version_pin or '(none)'}. "
+          f"Start (or recreate) a project to apply.")
+    return 0
+
+
 def cmd_image_build(args) -> int:
     from .docker import images
 
@@ -713,8 +772,14 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--overlay", choices=config.OVERLAYS)
     pc.add_argument("--egress", choices=config.EGRESS_MODES)
     pc.set_defaults(func=cmd_project_create)
+    pup = proj.add_parser("up", help="create-if-needed + start (checks for a newer claude first)")
+    pup.add_argument("slug")
+    pup.add_argument("--update-yes", action="store_true", dest="update_yes",
+                     help="rebuild the image to the newer claude without prompting")
+    pup.add_argument("--no-update", action="store_true", dest="no_update",
+                     help="skip the on-start claude-version check entirely")
+    pup.set_defaults(func=cmd_project_up)
     for name, func, helptext in [
-        ("up", cmd_project_up, "create-if-needed + start"),
         ("stop", cmd_project_stop, "stop the container"),
         ("sync-repos", cmd_project_sync_repos, "git fetch each repo"),
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
@@ -836,6 +901,16 @@ def build_parser() -> argparse.ArgumentParser:
     cgt.add_argument("--stdin", action="store_true",
                      help="read the token from stdin instead of an interactive (hidden) prompt")
     cgt.set_defaults(func=cmd_config_gh_token)
+    cim = cfg.add_parser("image",
+                         help="claude version: channel/pin + the on-start update check")
+    cim.add_argument("--channel", choices=config.CLAUDE_CHANNELS,
+                     help="track this release channel (default: latest)")
+    cim.add_argument("--pin", help="pin an exact claude version (overrides the channel)")
+    cim.add_argument("--no-pin", action="store_true", dest="no_pin",
+                     help="clear the version pin (track the channel again)")
+    cim.add_argument("--check", choices=("on", "off"),
+                     help="enable/disable the on-start 'newer claude available?' check")
+    cim.set_defaults(func=cmd_config_image)
 
     # image
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)

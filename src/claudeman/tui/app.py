@@ -37,6 +37,7 @@ from .screens.quit_confirm import QuitConfirmScreen
 from .screens.shutdown import ShutdownScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
+from .screens.update_confirm import UpdateConfirmScreen
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
@@ -522,7 +523,9 @@ class ClaudeManApp(App):
             if not self._reserve(slug, "start"):
                 return
             self._log(f"starting {slug} …")
-            self._up_worker(slug)
+            # Check for a newer claude first (off-thread). If one exists, the modal asks before the
+            # rebuild; otherwise it goes straight to the up worker (the slug stays reserved throughout).
+            self._update_check_worker(slug)
         else:
             self._log(f"[red]{slug}: orphan container (no registry entry) — not managed[/]")
 
@@ -700,10 +703,52 @@ class ClaudeManApp(App):
         self.call_from_thread(self._after_action, slug, res)
 
     @work(thread=True, group="create")
-    def _up_worker(self, slug: str) -> None:
-        """Start (create-if-needed) off the UI thread; may build the image first (streamed)."""
+    def _update_check_worker(self, slug: str) -> None:
+        """Before start: check (host-side GET) whether a newer claude than the project's image exists.
+        If so, raise the confirm modal; otherwise go straight to start (``build_to`` set for a fresh
+        project so its first build tracks the channel). Fails open — any check fault just starts. The
+        slug stays reserved (claimed in ``action_toggle_running``) through to ``_up_worker``."""
         try:
-            res = lifecycle.up(projects.load(slug), on_progress=self._thread_log)
+            chk = lifecycle.check_update(projects.load(slug))
+        except Exception as exc:  # noqa: BLE001 - never tear down the app; fail open to a plain start
+            self.call_from_thread(self._log, f"[yellow]{slug}: update check failed ({exc!r}); starting[/]")
+            self.call_from_thread(self._start_after_check, slug, "")
+            return
+        if chk.prompt:
+            self.call_from_thread(self._show_update_confirm, slug, chk)
+        else:
+            if chk.note:
+                self.call_from_thread(self._log, f"{slug}: {chk.note}")
+            self.call_from_thread(self._start_after_check, slug, chk.build_to)
+
+    def _show_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck) -> None:
+        self.push_screen(
+            UpdateConfirmScreen(slug, chk.current, chk.target),
+            lambda decision: self._on_update_confirm(slug, chk, decision),
+        )
+
+    def _on_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck, decision) -> None:
+        if decision is None:  # Esc / Cancel — abandon the start entirely, release the reservation
+            self._busy.discard(slug)
+            self._log(f"{slug}: start cancelled")
+            return
+        if decision == "rebuild":
+            self._log(f"rebuilding {slug} → claude {chk.target}, then starting …")
+            self._start_after_check(slug, chk.target)
+        else:  # "skip" — start on the existing image
+            self._log(f"{slug}: skipping update; starting on claude {chk.current}")
+            self._start_after_check(slug, "")
+
+    def _start_after_check(self, slug: str, rebuild_to: str) -> None:
+        # slug already reserved in action_toggle_running — go straight to the up worker.
+        self._up_worker(slug, rebuild_to)
+
+    @work(thread=True, group="create")
+    def _up_worker(self, slug: str, rebuild_to: str = "") -> None:
+        """Start (create-if-needed) off the UI thread; may rebuild the image to a newer claude first,
+        then build/create (all streamed)."""
+        try:
+            res = lifecycle.up(projects.load(slug), on_progress=self._thread_log, rebuild_to=rebuild_to)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"start failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)

@@ -7,6 +7,8 @@ slug    = "landarna"
 profile = "work"            # optional; omit to inherit the default profile
 overlay = "node"            # image variant: base | python | rust | node
 extra_apt = ["jq"]          # optional: thin per-project apt layer baked at create time
+# claude_version = "2.1.169"  # optional: pin this project's claude to an exact version (overrides the
+#                             # global channel/pin from `config image`). Omit to track the global setting.
 # env_file = "~/Work/landarna_environment_local"   # alternative to [project.env]
 # workdir = "landarna-backend"   # where claude/shell launch (docker exec -w). Omit to use a lone
 #                                # repo's dir automatically; a multi-repo project defaults to /workspace.

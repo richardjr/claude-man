@@ -18,7 +18,9 @@ import subprocess  # noqa: E402
 from claudeman import assets, config, lifecycle  # noqa: E402
 from claudeman.checkout.gitstate import RepoState  # noqa: E402
 from claudeman.checkout.repos import RepoResult  # noqa: E402
-from claudeman.registry.schema import Project, Repo, Sync  # noqa: E402
+from claudeman.docker.images import BuildResult  # noqa: E402
+from claudeman.registry.schema import Project, Repo, Settings, Sync  # noqa: E402
+from claudeman.updates import ReleaseCheck  # noqa: E402
 
 
 class WorkspaceOwnedTest(unittest.TestCase):
@@ -319,6 +321,155 @@ class SyncHooksTest(unittest.TestCase):
             res = lifecycle.stop("orphan")
         self.assertTrue(res.ok)
         self.assertEqual(called, [])  # no registry entry -> no sync config -> skip
+
+
+class CheckUpdateTest(unittest.TestCase):
+    """The on-start claude-version decision matrix (read-only; no docker/network — all mocked)."""
+
+    def _check(self, *, settings, current, channel_version=None, project=None):
+        proj = project or Project(slug="p", overlay="base")
+        rc = ReleaseCheck(channel_version, "" if channel_version else "offline")
+        with mock.patch.object(lifecycle.settings_registry, "load", return_value=settings), \
+             mock.patch.object(lifecycle.images, "image_claude_version", return_value=current), \
+             mock.patch.object(lifecycle.updates, "resolve_channel", return_value=rc):
+            return lifecycle.check_update(proj)
+
+    def test_disabled_does_nothing(self) -> None:
+        chk = self._check(settings=Settings(image_update_check=False), current="2.1.160",
+                          channel_version="2.1.169")
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "")
+        self.assertIn("disabled", chk.note)
+
+    def test_channel_newer_prompts(self) -> None:
+        chk = self._check(settings=Settings(), current="2.1.160", channel_version="2.1.169")
+        self.assertTrue(chk.prompt)
+        self.assertEqual(chk.target, "2.1.169")
+        self.assertEqual(chk.current, "2.1.160")
+        self.assertEqual(chk.build_to, "")  # prompt-gated, not auto
+
+    def test_channel_up_to_date_no_prompt(self) -> None:
+        chk = self._check(settings=Settings(), current="2.1.169", channel_version="2.1.169")
+        self.assertFalse(chk.prompt)
+        self.assertIn("up to date", chk.note)
+
+    def test_channel_older_than_image_no_prompt(self) -> None:
+        # e.g. tracking stable (2.1.153) while the image is newer (2.1.160) — never downgrade.
+        chk = self._check(settings=Settings(claude_channel="stable"), current="2.1.160",
+                          channel_version="2.1.153")
+        self.assertFalse(chk.prompt)
+
+    def test_fresh_project_auto_builds_channel_no_prompt(self) -> None:
+        # No image yet (current None -> "") -> build_to set so the first build tracks the channel.
+        chk = self._check(settings=Settings(), current=None, channel_version="2.1.169")
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "2.1.169")
+
+    def test_offline_fails_open(self) -> None:
+        chk = self._check(settings=Settings(), current="2.1.160", channel_version=None)
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "")
+        self.assertEqual(chk.target, "")
+
+    def test_global_pin_drift_prompts(self) -> None:
+        chk = self._check(settings=Settings(claude_version_pin="2.1.150"), current="2.1.160",
+                          channel_version="2.1.169")
+        self.assertTrue(chk.prompt)
+        self.assertEqual(chk.target, "2.1.150")  # explicit pin wins, even as a downgrade
+
+    def test_global_pin_match_no_prompt(self) -> None:
+        chk = self._check(settings=Settings(claude_version_pin="2.1.150"), current="2.1.150")
+        self.assertFalse(chk.prompt)
+
+    def test_pin_fresh_project_auto_builds_to_pin(self) -> None:
+        chk = self._check(settings=Settings(claude_version_pin="2.1.150"), current=None)
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "2.1.150")
+
+    def test_per_project_pin_beats_channel(self) -> None:
+        proj = Project(slug="p", overlay="base", claude_version="2.1.155")
+        chk = self._check(settings=Settings(), current="2.1.160", channel_version="2.1.169",
+                          project=proj)
+        self.assertTrue(chk.prompt)
+        self.assertEqual(chk.target, "2.1.155")  # project pin, not the channel's 2.1.169
+
+    def test_malformed_config_fails_open_not_raises(self) -> None:
+        # check_update documents 'NEVER raises'. A hand-broken config.toml (real tomllib.load raising
+        # TOMLDecodeError) must fold into a no-action result so the CLI `project up` doesn't crash.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = tmp.name
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None))
+        (Path(tmp.name) / "config.toml").write_text("[image\nbroken = ")  # invalid TOML
+        chk = lifecycle.check_update(Project(slug="p", overlay="base"))  # must NOT raise
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "")
+        self.assertIn("config", chk.note)
+
+
+class MaybeRebuildForUpdateTest(unittest.TestCase):
+    """The rebuild+recreate helper: skip a running container, recreate a stopped one, fail open."""
+
+    @staticmethod
+    def _proj() -> Project:
+        return Project(slug="p", overlay="base")
+
+    def test_running_container_is_not_rebuilt(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=True), \
+             mock.patch.object(lifecycle.images, "rebuild_chain") as rb, \
+             mock.patch.object(lifecycle.runner, "remove") as rm:
+            lifecycle._maybe_rebuild_for_update(self._proj(), "2.1.169", on_progress=None)
+        rb.assert_not_called()
+        rm.assert_not_called()
+
+    def test_rebuild_ok_recreates_existing_container(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=False), \
+             mock.patch.object(lifecycle.images, "rebuild_chain",
+                               return_value=BuildResult(True, ["base"], "rebuilt")), \
+             mock.patch.object(lifecycle.runner, "exists", return_value=True), \
+             mock.patch.object(lifecycle.runner, "remove") as rm:
+            lifecycle._maybe_rebuild_for_update(self._proj(), "2.1.169", on_progress=None)
+        rm.assert_called_once()  # removed so ensure_created recreates on the fresh image
+
+    def test_rebuild_ok_no_container_no_remove(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=False), \
+             mock.patch.object(lifecycle.images, "rebuild_chain",
+                               return_value=BuildResult(True, ["base"], "rebuilt")), \
+             mock.patch.object(lifecycle.runner, "exists", return_value=False), \
+             mock.patch.object(lifecycle.runner, "remove") as rm:
+            lifecycle._maybe_rebuild_for_update(self._proj(), "2.1.169", on_progress=None)
+        rm.assert_not_called()
+
+    def test_rebuild_failure_fails_open(self) -> None:
+        # A failed rebuild leaves the existing container/image untouched — start proceeds on it.
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=False), \
+             mock.patch.object(lifecycle.images, "rebuild_chain",
+                               return_value=BuildResult(False, [], "boom")), \
+             mock.patch.object(lifecycle.runner, "exists", return_value=True), \
+             mock.patch.object(lifecycle.runner, "remove") as rm:
+            lifecycle._maybe_rebuild_for_update(self._proj(), "2.1.169", on_progress=None)
+        rm.assert_not_called()
+
+
+class UpRebuildToTest(unittest.TestCase):
+    """`up` invokes the rebuild helper iff rebuild_to is set; ensure_created short-circuits the rest."""
+
+    def test_rebuild_to_set_invokes_helper(self) -> None:
+        proj = Project(slug="p", overlay="base")
+        with mock.patch.object(lifecycle, "_maybe_rebuild_for_update") as mr, \
+             mock.patch.object(lifecycle, "ensure_created",
+                               return_value=lifecycle.Result(False, "stop here")):
+            res = lifecycle.up(proj, rebuild_to="2.1.169")
+        mr.assert_called_once()
+        self.assertFalse(res.ok)
+
+    def test_rebuild_to_empty_skips_helper(self) -> None:
+        proj = Project(slug="p", overlay="base")
+        with mock.patch.object(lifecycle, "_maybe_rebuild_for_update") as mr, \
+             mock.patch.object(lifecycle, "ensure_created",
+                               return_value=lifecycle.Result(False, "stop here")):
+            lifecycle.up(proj, rebuild_to="")
+        mr.assert_not_called()
 
 
 if __name__ == "__main__":
