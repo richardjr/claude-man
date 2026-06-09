@@ -33,6 +33,9 @@ class AddMountScreen(ModalScreen["tuple[EnvMount, str | None] | None"]):
     }
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #dialog Label { color: $text-muted; }
+    /* Per-kind field groups; toggled by the Kind selector (see _apply_kind). */
+    #file-fields, #env-fields { height: auto; }
+    #ssh-hint { padding-top: 1; }
     #mount-error { color: $error; height: auto; }
     #buttons { height: auto; padding-top: 1; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
@@ -48,28 +51,49 @@ class AddMountScreen(ModalScreen["tuple[EnvMount, str | None] | None"]):
             yield Label("Kind")
             yield Select([("file", "file"), ("ssh", "ssh"), ("env var", "env")], value="file",
                          allow_blank=False, id="kind")
-            yield Label("Host source (file only — ~ and $VARS expanded)")
-            yield Input(placeholder="~/.netrc", id="src")
-            yield Label("Container dest (file only — absolute, outside the managed mounts)")
-            yield Input(placeholder="/home/agent/.netrc", id="dst")
-            yield Checkbox("read-only (file)", value=True, id="ro")
-            yield Label("Env var name (env only)")
-            yield Input(placeholder="MY_TOKEN", id="name")
-            yield Label("Env var value (env only — hidden; stored 0600, injected pass-through)")
-            yield Input(password=True, placeholder="value", id="value")
+            # Per-kind field groups — only the selected kind's group is shown (see _apply_kind).
+            with Vertical(id="file-fields"):
+                yield Label("Host source (~ and $VARS expanded)")
+                yield Input(placeholder="~/.netrc", id="src")
+                yield Label("Container dest (absolute, outside the managed mounts)")
+                yield Input(placeholder="/home/agent/.netrc", id="dst")
+                yield Checkbox("read-only", value=True, id="ro")
+            with Vertical(id="env-fields"):
+                yield Label("Env var name")
+                yield Input(placeholder="MY_TOKEN", id="name")
+                yield Label("Env var value (hidden; stored 0600, injected pass-through)")
+                yield Input(password=True, placeholder="value", id="value")
+            yield Label(
+                "ssh forwards your host ssh-agent (keys stay on the host) and seeds "
+                "~/.ssh/{config,known_hosts}. No other input needed — just Add.",
+                id="ssh-hint",
+            )
             yield Label("", id="mount-error")
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Add", variant="success", id="add")
 
     def on_mount(self) -> None:
+        self._apply_kind(self.query_one("#kind", Select).value)  # show only the default kind's fields
         self.query_one("#kind", Select).focus()
+
+    def _apply_kind(self, kind: object) -> None:
+        """Show only the field group(s) relevant to the selected Kind (file → src/dst/ro,
+        env → name/value, ssh → just a hint). Hidden groups take no layout space, so the modal
+        shrinks to the chosen kind."""
+        self.query_one("#file-fields").display = kind == "file"
+        self.query_one("#env-fields").display = kind == "env"
+        self.query_one("#ssh-hint").display = kind == "ssh"
 
     # -- handlers ---------------------------------------------------------
     @on(Input.Changed)
-    @on(Select.Changed)
     def _clear_error(self) -> None:
         self.query_one("#mount-error", Label).update("")
+
+    @on(Select.Changed, "#kind")
+    def _kind_changed(self, event: Select.Changed) -> None:
+        self.query_one("#mount-error", Label).update("")
+        self._apply_kind(event.value)
 
     @on(Input.Submitted)
     @on(Button.Pressed, "#add")
