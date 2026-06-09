@@ -102,6 +102,22 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
     return args
 
 
+def _render_ports(project: Project) -> list[str]:
+    """Render ``-p <bind>:<host>:<container>/<proto>`` for each valid published port. PURELY ADDITIVE —
+    like ``_render_env_mounts``, never emits a ``_HARDENING`` flag, so the hardened floor is
+    byte-identical with or without ports (invariant 2; a unit test pins this). Skips load-time-invalid
+    (flagged) entries so a bad mapping never reaches docker. Port publishing is set up by the docker
+    DAEMON on the host, so it works under ``--cap-drop ALL`` (the container's dropped caps don't gate
+    the host-side ``-p`` mapping); the ≥1024 container-port rule (schema) keeps the in-container service
+    bindable. Ingress only — orthogonal to the egress firewall (invariant 3)."""
+    args: list[str] = []
+    for p in project.ports:
+        if p.error:  # a flagged (load-time-invalid) mapping never reaches docker
+            continue
+        args += ["-p", p.publish_arg()]
+    return args
+
+
 def build_create_argv(
     project: Project,
     *,
@@ -170,8 +186,9 @@ def build_create_argv(
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
     argv += ["-v", f"{ws_path}:{config.CONTAINER_WORKSPACE}"]
-    # Env-mounts (ssh + files) — additive only; the hardened floor above is untouched.
+    # Env-mounts (ssh + files) + published ports — additive only; the hardened floor above is untouched.
     argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
+    argv += _render_ports(project)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
     argv += [project.image, "sleep", "infinity"]

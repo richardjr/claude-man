@@ -44,7 +44,13 @@ baked `claude-man.claude-version` label; when a newer claude exists it offers (d
 host-side image rebuild + container recreate — `claude update` can't run in the read-only container, so
 the binary is bumped by rebuilding the image (invariant 2 byte-identical). Channel/pin/toggle via
 `config image` (default `latest`, check on) + a per-project `claude_version` pin; the check fails OPEN
-(offline -> start on the existing image). 321 dependency-free
+(offline -> start on the existing image). **Published ports** — a dedicated `[[project.ports]]` config
+(`schema.PortMapping`) + `project ports add/rm/list` CLI + a TUI manager (Project menu -> Ports), so a
+service running INSIDE a container (dev server / test endpoint) is reachable. Rendered additively as
+`-p <bind>:<host>:<container>/<proto>` (`runner._render_ports` — never a `_HARDENING` flag, floor
+byte-identical, unit-pinned); container port enforced ≥1024 (`--cap-drop ALL` drops NET_BIND_SERVICE),
+default bind 127.0.0.1 (host-only) with per-port `0.0.0.0` opt-in. Ingress — orthogonal to the egress
+firewall (invariant 3); fixed at create (recreate to apply). 340 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git probes).
 
@@ -54,8 +60,9 @@ claude in hardened containers, switch a project's account, watch per-account tok
 git state, mount ssh (agent-forward) + host files into a container (`project env` + `project resync`),
 and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity, and
 **keep claude up to date** — on start, claude-man checks the tracked channel and offers to rebuild a
-project's image to the newer claude (host-side; `claude update` can't run in the read-only container) —
-all from both the CLI and the TUI.
+project's image to the newer claude (host-side; `claude update` can't run in the read-only container),
+and **publish container service ports** (`project ports` / Project menu -> Ports) so a dev server or
+test endpoint inside a container is reachable on the host — all from both the CLI and the TUI.
 
 **Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
 table to an async `docker ps`/`docker events` worker (TUI-2); the one-claude-per-container guard

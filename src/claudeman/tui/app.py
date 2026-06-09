@@ -32,6 +32,7 @@ from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
+from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.quit_confirm import QuitConfirmScreen
 from .screens.shutdown import ShutdownScreen
@@ -84,6 +85,7 @@ class ClaudeManApp(App):
         ("p", "Pull all (ff-only)", "pull_all"),
     ]
     _PROJECT_MENU = [
+        ("o", "Ports", "ports"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -614,6 +616,7 @@ class ClaudeManApp(App):
             "remove_repo": self.action_remove_repo,
             "refresh_git": self.action_refresh_gitstate,
             "pull_all": self.action_pull_all,
+            "ports": self.action_ports,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -854,6 +857,15 @@ class ClaudeManApp(App):
             return
         self._log(f"managing env mounts for {slug} (add/remove need a recreate to apply)")
         self.push_screen(EnvMountsScreen(slug))
+
+    # -- published ports --------------------------------------------------
+    def action_ports(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]ports: select a defined project (orphan rows aren't managed)[/]")
+            return
+        self._log(f"managing published ports for {slug} (add/remove need a recreate to apply)")
+        self.push_screen(PortsScreen(slug))
 
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")

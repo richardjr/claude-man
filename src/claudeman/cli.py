@@ -203,6 +203,12 @@ def cmd_project_status(args) -> int:
     print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'REPOS':<5} VERSION")
     for r in rows:
         print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.repos:<5} {r.version or '-'}")
+    # For a single project, also show its published ports (config — registry-only, recreate to apply).
+    if args.slug and projects.exists(args.slug):
+        ports = projects.load(args.slug).ports
+        if ports:
+            print("\npublished ports:")
+            _print_ports(ports)
     return 0
 
 
@@ -505,6 +511,65 @@ def cmd_project_resync(args) -> int:
     from . import lifecycle
 
     res = lifecycle.resync(args.slug)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def _parse_port_spec(spec: str) -> tuple[int, int]:
+    """Parse ``<container>`` or ``<host>:<container>`` -> ``(host, container)``. host ``0`` -> defaults
+    to == container in PortMapping. Raises ``ValueError`` on a non-numeric part (caller surfaces it)."""
+    spec = spec.strip()
+    if ":" in spec:
+        host_s, _, container_s = spec.partition(":")
+        return int(host_s), int(container_s)
+    return 0, int(spec)
+
+
+def _print_ports(ports) -> None:
+    if not ports:
+        print("(no published ports)")
+        return
+    print(f"{'BIND':<16} {'HOST':<7} {'CONTAINER':<10} {'PROTO':<5} REACHABLE")
+    for p in ports:
+        if p.error:
+            print(f"{'?':<16} {'?':<7} {'?':<10} {'?':<5} ⚠ INVALID: {p.error}")
+            continue
+        reach = "host only (localhost)" if not p.exposed else f"LAN — anyone routing to {p.bind}"
+        print(f"{p.bind:<16} {p.host_eff:<7} {p.container:<10} {p.proto:<5} {reach}")
+
+
+def cmd_project_ports_list(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    _print_ports(projects.load(args.slug).ports)
+    return 0
+
+
+def cmd_project_ports_add(args) -> int:
+    from . import lifecycle
+    from .registry.schema import PortMapping, ValidationError
+
+    try:
+        host, container = _parse_port_spec(args.spec)
+    except ValueError:
+        print(f"bad port spec {args.spec!r}: use <container> or <host>:<container> "
+              f"(e.g. 5173 or 8080:5173)", file=sys.stderr)
+        return 1
+    try:
+        mapping = PortMapping(container=container, host=host, bind=args.bind, proto=args.proto)
+    except ValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    res = lifecycle.add_port(args.slug, mapping)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_ports_rm(args) -> int:
+    from . import lifecycle
+
+    res = lifecycle.remove_port(args.slug, args.target)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
 
@@ -850,6 +915,25 @@ def build_parser() -> argparse.ArgumentParser:
     els = env.add_parser("list", help="list a project's env mounts")
     els.add_argument("slug")
     els.set_defaults(func=cmd_project_env_list)
+
+    # project ports (add / rm / list) — publish container service ports (ingress; recreate to apply)
+    ports = proj.add_parser(
+        "ports", help="publish container service ports for testing (-p; recreate to apply)"
+    ).add_subparsers(dest="portscmd", required=True)
+    padd = ports.add_parser("add", help="publish a port (<container> or <host>:<container>; recreate to apply)")
+    padd.add_argument("slug")
+    padd.add_argument("spec", help="<container> (host=container) or <host>:<container> — container must be ≥1024")
+    padd.add_argument("--bind", default="127.0.0.1",
+                      help="host bind IP (default 127.0.0.1 = host-only; 0.0.0.0 = expose on the LAN)")
+    padd.add_argument("--proto", choices=("tcp", "udp"), default="tcp")
+    padd.set_defaults(func=cmd_project_ports_add)
+    prm = ports.add_parser("rm", help="unpublish a port (by host port, optionally <host>/<proto>)")
+    prm.add_argument("slug")
+    prm.add_argument("target")
+    prm.set_defaults(func=cmd_project_ports_rm)
+    pls = ports.add_parser("list", help="list a project's published ports")
+    pls.add_argument("slug")
+    pls.set_defaults(func=cmd_project_ports_list)
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
     prs.add_argument("slug")
     prs.set_defaults(func=cmd_project_resync)

@@ -55,3 +55,14 @@ dst  = "/home/agent/.netrc"       # absolute container path (a trailing "/" appe
 kind = "file"
 src  = "~/Work/CLAUDE.md"
 dst  = "/workspace/CLAUDE.md"
+
+# Published ports -> expose a service running INSIDE the container (a dev server / test endpoint) so
+# the host (or, opt-in, the LAN) can reach it. Rendered as `-p <bind>:<host>:<container>/<proto>`.
+# `container` must be >= 1024 (the hardened profile drops NET_BIND_SERVICE, so a service inside can't
+# bind a privileged port). Fixed at container create -> `project recreate` to apply. Manage with
+# `project ports add/rm/list`. NOTE: the in-container service must listen on 0.0.0.0 (not localhost).
+[[project.ports]]
+container = 5173                 # service inside the container
+# host    = 5173                 # host port (optional; defaults to the container port)
+# bind    = "127.0.0.1"          # default: host-only (reachable at http://localhost:5173). "0.0.0.0" = LAN
+# proto   = "tcp"                # "tcp" (default) | "udp"

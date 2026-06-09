@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from claudeman import config  # noqa: E402
 from claudeman.docker import runner  # noqa: E402
 from claudeman.docker.runner import GH_TOKEN_ENV, OAUTH_TOKEN_ENV  # noqa: E402
-from claudeman.registry.schema import EnvMount, Project, Repo  # noqa: E402
+from claudeman.registry.schema import EnvMount, PortMapping, Project, Repo  # noqa: E402
 
 
 def _contains_sublist(big: list, small: list) -> bool:
@@ -267,6 +267,44 @@ class EnvMountRenderTest(unittest.TestCase):
             "/run/ssh:/ssh-agent:ro",
             "SSH_AUTH_SOCK=/ssh-agent",
         })
+
+
+class PortRenderTest(unittest.TestCase):
+    """Published ports render `-p <bind>:<host>:<container>/<proto>` and NEVER alter the hardened floor."""
+
+    def _argv(self, *ports):
+        return runner.build_create_argv(
+            Project(slug="p", overlay="base", ports=tuple(ports)),
+            profile_name="work", created_iso="t",
+        )
+
+    def test_default_bind_loopback(self) -> None:
+        argv = self._argv(PortMapping(container=5173))   # host defaults to container, bind to 127.0.0.1
+        self.assertTrue(_contains_sublist(argv, ["-p", "127.0.0.1:5173:5173/tcp"]))
+
+    def test_explicit_host_proto_and_exposed_bind(self) -> None:
+        argv = self._argv(PortMapping(container=5173, host=8080, bind="0.0.0.0", proto="udp"))
+        self.assertTrue(_contains_sublist(argv, ["-p", "0.0.0.0:8080:5173/udp"]))
+
+    def test_multiple_ports(self) -> None:
+        argv = self._argv(PortMapping(container=5173), PortMapping(container=3000, host=3001))
+        self.assertTrue(_contains_sublist(argv, ["-p", "127.0.0.1:5173:5173/tcp"]))
+        self.assertTrue(_contains_sublist(argv, ["-p", "127.0.0.1:3001:3000/tcp"]))
+        self.assertEqual(argv.count("-p"), 2)
+
+    def test_flagged_port_is_not_rendered(self) -> None:
+        # A load-time-invalid (flagged) port must never reach docker — argv must equal no-port.
+        flagged = PortMapping.lenient(container=80)   # <1024 -> flagged
+        self.assertTrue(flagged.error)
+        self.assertEqual(self._argv(flagged), self._argv())
+
+    def test_floor_byte_identical_with_and_without_ports(self) -> None:
+        a0 = self._argv()
+        a1 = self._argv(PortMapping(container=5173), PortMapping(container=3000, host=3001, bind="0.0.0.0"))
+        self.assertTrue(_contains_sublist(a0, runner._HARDENING))
+        self.assertTrue(_contains_sublist(a1, runner._HARDENING))
+        # Ports only ADD `-p` + value tokens (a0 has no `-p` at all) — no floor token is removed/altered.
+        self.assertEqual(set(a1) - set(a0), {"-p", "127.0.0.1:5173:5173/tcp", "0.0.0.0:3001:3000/tcp"})
 
 
 class EnvFileScrubTest(unittest.TestCase):

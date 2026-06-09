@@ -26,7 +26,7 @@ from .profiles import seed as seed_mod
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
 from .registry import settings as settings_registry
-from .registry.schema import EnvMount, Profile, Project, Repo, ValidationError
+from .registry.schema import EnvMount, PortMapping, Profile, Project, Repo, ValidationError
 
 # A progress sink threaded through create/up/recreate so a long, one-time image build surfaces
 # live in the caller (the TUI log pane / the CLI). ``None`` means "no progress wanted".
@@ -751,6 +751,47 @@ def add_env_var(slug: str, name: str, value: str) -> Result:
                     projects_registry.remove_mount(slug, mount.name)
                 return Result(False, f"failed to store value for {mount.name}: {exc}")
             return Result(True, f"set env var {mount.name} for {slug} — `recreate` to apply")
+    except OSError as exc:
+        return _lock_error(slug, exc)
+
+
+def _port_desc(p: PortMapping) -> str:
+    where = "host-only (localhost)" if not p.exposed else f"EXPOSED on {p.bind}"
+    return f"{p.host_eff}->{p.container}/{p.proto} [{where}]"
+
+
+def add_port(slug: str, mapping: PortMapping) -> Result:
+    """Publish a container service port (the ``project ports add`` verb). Registry-only; ports are fixed
+    at container create, so the Result reminds to ``recreate``. The ``PortMapping`` is already validated
+    (container ≥1024, proto, bind IP) by its ``__post_init__``; the cross-entry host-port collision guard
+    fires in ``projects.add_port`` under the per-slug flock."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            try:
+                projects_registry.add_port(slug, mapping)
+            except ValidationError as exc:
+                return Result(False, str(exc))
+            return Result(True, f"published {_port_desc(mapping)} for {slug} — `recreate` to apply "
+                          f"(ports are fixed at container create)")
+    except OSError as exc:
+        return _lock_error(slug, exc)
+
+
+def remove_port(slug: str, target: str) -> Result:
+    """Unpublish a port from the registry (matched by ``<host>[/proto]``). `recreate` to apply."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            try:
+                _, removed = projects_registry.remove_port(slug, target)
+            except ValidationError as exc:
+                return Result(False, str(exc))
+            if removed is None:
+                return Result(True, f"no published port matching {target!r} in {slug} (nothing to do)")
+            return Result(True, f"unpublished {_port_desc(removed)} from {slug} — `recreate` to apply")
     except OSError as exc:
         return _lock_error(slug, exc)
 

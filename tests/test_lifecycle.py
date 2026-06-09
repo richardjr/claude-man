@@ -19,7 +19,7 @@ from claudeman import assets, config, lifecycle  # noqa: E402
 from claudeman.checkout.gitstate import RepoState  # noqa: E402
 from claudeman.checkout.repos import RepoResult  # noqa: E402
 from claudeman.docker.images import BuildResult  # noqa: E402
-from claudeman.registry.schema import Project, Repo, Settings, Sync  # noqa: E402
+from claudeman.registry.schema import PortMapping, Project, Repo, Settings, Sync  # noqa: E402
 from claudeman.updates import ReleaseCheck  # noqa: E402
 
 
@@ -470,6 +470,64 @@ class UpRebuildToTest(unittest.TestCase):
                                return_value=lifecycle.Result(False, "stop here")):
             lifecycle.up(proj, rebuild_to="")
         mr.assert_not_called()
+
+
+class LifecyclePortsTest(unittest.TestCase):
+    """add_port/remove_port: registry-only, flocked, recreate-reminder, collision -> error Result."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = str(Path(self.tmp.name) / "config")
+        os.environ["CLAUDE_MAN_STATE_HOME"] = str(Path(self.tmp.name) / "state")
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None))
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_STATE_HOME", None))
+        from claudeman.registry import projects as preg
+        preg.save(Project(slug="svc"))
+
+    @staticmethod
+    def _load(slug: str):
+        from claudeman.registry import projects as preg
+        return preg.load(slug)
+
+    def test_add_port_persists_and_reminds_recreate(self) -> None:
+        res = lifecycle.add_port("svc", PortMapping(container=5173))
+        self.assertTrue(res.ok)
+        self.assertIn("recreate", res.detail.lower())
+        self.assertEqual(self._load("svc").ports[0].publish_arg(), "127.0.0.1:5173:5173/tcp")
+
+    def test_exposed_port_noted_in_result(self) -> None:
+        res = lifecycle.add_port("svc", PortMapping(container=5173, bind="0.0.0.0"))
+        self.assertIn("EXPOSED", res.detail)  # operator sees the LAN-exposure in the confirmation
+
+    def test_add_port_collision_is_error_result(self) -> None:
+        lifecycle.add_port("svc", PortMapping(container=5173, host=8080))
+        res = lifecycle.add_port("svc", PortMapping(container=9999, host=8080))
+        self.assertFalse(res.ok)
+        self.assertIn("already published", res.detail)
+
+    def test_remove_port_and_idempotent(self) -> None:
+        lifecycle.add_port("svc", PortMapping(container=5173))
+        res = lifecycle.remove_port("svc", "5173")
+        self.assertTrue(res.ok)
+        self.assertIn("unpublished", res.detail)
+        again = lifecycle.remove_port("svc", "5173")
+        self.assertTrue(again.ok)
+        self.assertIn("nothing to do", again.detail)
+
+    def test_unknown_project(self) -> None:
+        res = lifecycle.add_port("nope", PortMapping(container=5173))
+        self.assertFalse(res.ok)
+        self.assertIn("no project", res.detail)
+
+    def test_flagged_port_removable_via_lifecycle(self) -> None:
+        # The "flagged entries stay removable" contract through the lifecycle layer (what the TUI calls).
+        from claudeman.registry import projects as preg
+        flagged = PortMapping.lenient(container=8080, host="not_a_number")
+        preg.save(Project(slug="svc", ports=(flagged,)))
+        res = lifecycle.remove_port("svc", preg.load("svc").ports[0].target)
+        self.assertTrue(res.ok)
+        self.assertEqual(preg.load("svc").ports, ())
 
 
 if __name__ == "__main__":

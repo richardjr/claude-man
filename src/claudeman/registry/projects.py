@@ -36,6 +36,7 @@ from .schema import (
     DEFAULT_SYNC_CLAUDE,
     DEFAULT_SYNC_WORKSPACE,
     EnvMount,
+    PortMapping,
     Project,
     Repo,
     Sync,
@@ -86,6 +87,11 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
                          ro=bool(m.get("ro", True)), name=m.get("name", ""))
         for m in proj.get("env_mount", [])
     )
+    ports = tuple(
+        PortMapping.lenient(container=p.get("container"), host=p.get("host", 0),
+                            bind=p.get("bind", "127.0.0.1"), proto=p.get("proto", "tcp"))
+        for p in proj.get("ports", [])
+    )
     sync_tbl = proj.get("sync", {}) or {}
     sync = Sync(
         enabled=bool(sync_tbl.get("enabled", True)),
@@ -104,6 +110,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         extra_apt=tuple(proj.get("extra_apt", []) or ()),
         repos=repos,
         env_mount=mounts,
+        ports=ports,
         allowlist=tuple(egress_tbl.get("allowlist", []) or ()),
         sync=sync,
     )
@@ -208,6 +215,15 @@ def save(project: Project) -> Path:
             marr.append(t)
         proj["env_mount"] = marr
 
+    if project.ports:
+        parr = tomlkit.aot()
+        for p in project.ports:
+            t = tomlkit.table()
+            for k, v in _port_row(p).items():
+                t[k] = v
+            parr.append(t)
+        proj["ports"] = parr
+
     # Emit [project.sync] only when it diverges from the defaults (keep copied templates clean).
     default_sync = Sync()
     if project.sync != default_sync:
@@ -278,6 +294,35 @@ def _rewrite_mounts(slug: str, mounts: tuple[EnvMount, ...]) -> None:
             row["ro"] = False
         rows.append(row)
     _rewrite_array(slug, "env_mount", rows)
+
+
+def _port_row(p: PortMapping) -> dict:
+    """The canonical TOML row for a port mapping — ``container`` always; ``host``/``bind``/``proto`` only
+    when they diverge from the defaults (host==container, 127.0.0.1, tcp) to keep the file terse."""
+    row: dict = {"container": p.container}
+    if p.host and p.host != p.container:
+        row["host"] = p.host
+    if p.bind and p.bind != "127.0.0.1":
+        row["bind"] = p.bind
+    if p.proto and p.proto != "tcp":
+        row["proto"] = p.proto
+    return row
+
+
+def _rewrite_ports(slug: str, ports: tuple[PortMapping, ...]) -> None:
+    _rewrite_array(slug, "ports", [_port_row(p) for p in ports])
+
+
+def _parse_port_target(target: str) -> tuple[int, str | None]:
+    """Parse a remove target ``<host>[/<proto>]`` -> ``(host_port, proto_or_None)``. A bare port matches
+    any proto; ``8080/udp`` pins the proto. Raises ``ValidationError`` on a non-numeric port."""
+    raw = target.strip()
+    port_s, _, proto = raw.partition("/")
+    try:
+        port = int(port_s)
+    except ValueError:
+        raise ValidationError(f"port target {target!r} must be <host>[/proto] (e.g. 8080 or 8080/udp)") from None
+    return port, (proto.strip().lower() or None)
 
 
 def add_repo(slug: str, url: str, *, branch: str = "main", dir: str = "") -> Project:
@@ -364,6 +409,56 @@ def remove_mount(slug: str, target: str) -> tuple[Project, EnvMount | None]:
         return project, None
     updated = dataclasses.replace(project, env_mount=tuple(kept))
     _rewrite_mounts(slug, updated.env_mount)
+    return updated, removed
+
+
+def add_port(slug: str, mapping: PortMapping) -> Project:
+    """Append a ``[[project.ports]]`` entry (comment-preserving). ``mapping`` is already validated by
+    ``PortMapping.__post_init__``; this adds the only cross-entry guard a single mapping can't see —
+    a host port + proto can be published once. Raises ``ValidationError`` on a collision."""
+    project = load(slug)
+    for existing in project.ports:
+        if existing.error:
+            continue
+        if existing.host_eff == mapping.host_eff and existing.proto == mapping.proto:
+            raise ValidationError(
+                f"host port {mapping.host_eff}/{mapping.proto} is already published in {slug!r}"
+            )
+    updated = dataclasses.replace(project, ports=project.ports + (mapping,))
+    _rewrite_ports(slug, updated.ports)
+    return updated
+
+
+def remove_port(slug: str, target: str) -> tuple[Project, PortMapping | None]:
+    """Drop a ``[[project.ports]]`` entry. Idempotent: returns ``(updated_project, removed|None)``.
+
+    Matches in two passes: (1) exact ``PortMapping.target`` STRING equality first — robust for a FLAGGED
+    entry whose raw host may be a non-int that can't be re-parsed (the lenient() 'stays removable'
+    contract), and for the TUI which passes the row's ``target`` verbatim (e.g. ``"8080/tcp"``); then
+    (2) numeric ``<host>[/proto]`` matching for the CLI's bare-``8080`` convenience (a proto-less target
+    matches any proto). Flagged entries are excluded from pass 2 (their ``host_eff`` may be non-int)."""
+    project = load(slug)
+    raw = target.strip()
+    kept: list[PortMapping] = []
+    removed: PortMapping | None = None
+    for p in project.ports:
+        if removed is None and p.target == raw:  # pass 1: exact string identity (flagged-safe, no int parse)
+            removed = p
+        else:
+            kept.append(p)
+    if removed is None:
+        want_port, want_proto = _parse_port_target(raw)  # pass 2 (raises on a non-numeric, non-matching target)
+        kept = []
+        for p in project.ports:
+            if (removed is None and not p.error and p.host_eff == want_port
+                    and (want_proto is None or p.proto == want_proto)):
+                removed = p
+            else:
+                kept.append(p)
+    if removed is None:
+        return project, None
+    updated = dataclasses.replace(project, ports=tuple(kept))
+    _rewrite_ports(slug, updated.ports)
     return updated, removed
 
 

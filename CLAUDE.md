@@ -94,6 +94,7 @@ src/claudeman/
   gitconfig.py         resolve the git author identity (config.toml [git] override, else inherited host git config) → GIT_CONFIG_* env injected at docker create (no writable file needed under --read-only)
   gh_token.py          optional GitHub token (state-tier 0600, NOT config.toml) injected pass-through as GH_TOKEN for in-container `gh` — opt-in via `config gh-token` (invariant 1)
   env_secrets.py       per-project `kind="env"` env-mount VALUES (state-tier 0600 env.json, NOT config.toml/synced) — names live in the registry; values injected `-e NAME` pass-through (invariant 1)
+  (ports)              published container ports (`[[project.ports]]` -> `schema.PortMapping`): INGRESS, rendered additively as `-p <bind>:<host>:<container>/<proto>` by `docker/runner._render_ports` (never a `_HARDENING` flag — floor byte-identical, unit-pinned). container port MUST be ≥1024 (`--cap-drop ALL` drops NET_BIND_SERVICE); default bind 127.0.0.1 (host-only) with per-port `0.0.0.0` opt-in. Orthogonal to the egress firewall (invariant 3 — ingress, not egress). Fixed at create -> recreate to apply
   __main__.py          `python -m claudeman` -> TUI;  argv dispatch
   registry/            projects.py, profiles.py (load/save/default/load_token/token_age), settings.py (global config.toml: ssh keys + git identity), schema.py  — TOML store
   docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed + git_env identity + baked GIT_CONFIG_GLOBAL/GH_CONFIG_DIR redirects), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
@@ -148,6 +149,8 @@ project assets <slug> [--bootstrap]                 # show the synced asset sour
 project sync <slug> [--in]                          # manually sync assets out (bind -> source); --in forces sync-in (source -> bind)
 project env add <slug> ssh|file|env [...]           # add an env mount; `env <NAME>` prompts (hidden) for a value -> 0600 state, injected -e NAME (recreate to apply)
 project env rm <slug> <ssh|dst|NAME> | env list     # remove (by ssh / file dst / env var name) or list a project's env mounts
+project ports add <slug> <container|host:container> [--bind IP] [--proto tcp|udp]   # publish a service port (-p; container ≥1024; default bind 127.0.0.1 host-only; recreate to apply)
+project ports rm <slug> <host[/proto]> | ports list # unpublish a port (by host port) or list a project's published ports
 config show                                         # global settings: resolved git identity + ssh keys/load status
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
 config gh-token [--clear | --stdin]                # set/clear the GitHub token injected as GH_TOKEN (hidden prompt; 0600 state-tier; recreate to apply)
