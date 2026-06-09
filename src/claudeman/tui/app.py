@@ -138,8 +138,10 @@ class ClaudeManApp(App):
         self._dispatch_gitstate(fetch=False)
         self._render_repo_detail()
         self._bootstrap_env()  # load configured ssh keys into the agent so containers can use them
-        # Phase 1: poll. Phase 2 upgrades this to a `docker events` worker.
-        self.set_interval(2.0, self.refresh_projects)
+        # Poll container liveness OFF the UI thread (refresh_projects is a thread worker). 10s is plenty
+        # for a status column — every lifecycle action triggers an immediate refresh too. Phase 2 would
+        # replace the poll with a `docker events` worker.
+        self.set_interval(10.0, self.refresh_projects)
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
@@ -153,14 +155,27 @@ class ClaudeManApp(App):
         ]
         return status.join(defined, status.query_containers())
 
+    @work(thread=True, exclusive=True, group="status")
     def refresh_projects(self) -> None:
+        """Query docker (`docker ps`) + the registry OFF the UI thread, then repaint on it.
+
+        The status query is a hundreds-of-ms `docker ps` subprocess; running it on the event loop
+        every poll froze all input (the lag that made the modals feel unresponsive — TUI-2). Mirrors
+        refresh_usage/refresh_gitstate: the thread worker computes the join, `call_from_thread` paints.
+        ``exclusive`` drops a still-pending poll if a fresh one (e.g. a post-action refresh) supersedes it.
+        """
+        rows = self._rows()
+        self.call_from_thread(self._render_projects, rows)
+
+    def _render_projects(self, rows: list[status.Row]) -> None:
+        """Paint the projects table from a freshly-polled join (UI thread only)."""
         table = self.query_one("#projects", DataTable)
         # Restore the cursor by SLUG, not integer index — rows are slug-sorted and the set can
         # change between polls, so an index restore could land on the wrong project (review TUI-7).
         prev_slug = self._current_slug()
         table.clear()
-        rows = self._rows()
-        self._last_rows = rows  # cache for _running_slugs so quit needn't block on a fresh docker ps
+        # Cache for _running_slugs (quit) AND the action handlers — so neither blocks on a fresh docker ps.
+        self._last_rows = rows
         for row in rows:
             # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
             kind = Text(row.kind, style=status.status_style(row.kind))
@@ -393,7 +408,7 @@ class ClaudeManApp(App):
             verb = "claude" if program == "claude" else "shell"
             self._log(f"[yellow]{slug}: {verb} skipped — an operation is already running[/]")
             return
-        row = next((r for r in self._rows() if r.slug == slug), None)
+        row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
         if row is None:
             return
         if row.kind == status.UP:
@@ -507,7 +522,7 @@ class ClaudeManApp(App):
         slug = self._current_slug()
         if not slug:
             return
-        row = next((r for r in self._rows() if r.slug == slug), None)
+        row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
         if row is None:
             return
         # Branch on the joined state: UP -> stop; STOPPED/DEFINED -> start. BOTH run in a worker — a
