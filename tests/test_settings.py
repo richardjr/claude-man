@@ -74,6 +74,55 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(s.ssh_keys, ("~/.ssh/a",))      # ssh keys preserved across a git write
         self.assertEqual(s.git_user_name, "X")
 
+    # -- image (on-start claude-version) settings ------------------------------
+    def test_image_defaults(self) -> None:
+        s = settings_registry.load()
+        self.assertTrue(s.image_update_check)
+        self.assertEqual(s.claude_channel, "latest")
+        self.assertEqual(s.claude_version_pin, "")
+
+    def test_image_roundtrip(self) -> None:
+        settings_registry.set_image_settings(update_check=False, claude_channel="stable",
+                                             claude_version_pin="2.1.150")
+        s = settings_registry.load()
+        self.assertFalse(s.image_update_check)
+        self.assertEqual(s.claude_channel, "stable")
+        self.assertEqual(s.claude_version_pin, "2.1.150")
+
+    def test_image_partial_update_leaves_others(self) -> None:
+        settings_registry.set_image_settings(claude_channel="stable")
+        settings_registry.set_image_settings(claude_version_pin="  2.1.140  ")  # stripped
+        s = settings_registry.load()
+        self.assertEqual(s.claude_channel, "stable")       # preserved across the second write
+        self.assertEqual(s.claude_version_pin, "2.1.140")
+
+    def test_image_no_pin_clears(self) -> None:
+        settings_registry.set_image_settings(claude_version_pin="2.1.150")
+        settings_registry.set_image_settings(claude_version_pin="")
+        self.assertEqual(settings_registry.load().claude_version_pin, "")
+
+    def test_image_coexists_with_ssh_and_git(self) -> None:
+        settings_registry.add_ssh_key("~/.ssh/a")
+        settings_registry.set_git_identity("X", "x@y.z")
+        settings_registry.set_image_settings(claude_channel="stable")
+        s = settings_registry.load()
+        self.assertEqual(s.ssh_keys, ("~/.ssh/a",))
+        self.assertEqual(s.git_user_name, "X")
+        self.assertEqual(s.claude_channel, "stable")
+
+    def test_schema_rejects_bad_channel(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(claude_channel="nightly")
+
+    def test_setter_rejects_bad_channel(self) -> None:
+        with self.assertRaises(ValidationError):
+            settings_registry.set_image_settings(claude_channel="nightly")
+
+    def test_parse_coerces_unknown_channel_to_default(self) -> None:
+        # A hand-edited bad channel must NOT brick load() — it coerces to the default.
+        s = settings_registry._parse({"image": {"claude_channel": "weekly"}})
+        self.assertEqual(s.claude_channel, "latest")
+
 
 if __name__ == "__main__":
     unittest.main()

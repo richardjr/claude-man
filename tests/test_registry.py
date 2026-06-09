@@ -100,6 +100,73 @@ class RegistryTest(unittest.TestCase):
         p = projects.load("typed")
         self.assertEqual(p.env, {"DEBUG": "true", "PORT": "3000", "RATIO": "1.5"})
 
+    def test_claude_version_pin_roundtrips(self) -> None:
+        projects.save(Project(slug="pinned", claude_version="2.1.169"))
+        self.assertEqual(projects.load("pinned").claude_version, "2.1.169")
+
+    def test_ports_roundtrip_and_terse_defaults(self) -> None:
+        from claudeman.registry.schema import PortMapping
+        projects.save(Project(slug="svc", ports=(
+            PortMapping(container=5173),                                  # all defaults
+            PortMapping(container=3000, host=3001, bind="0.0.0.0", proto="udp"),
+        )))
+        text = (Path(self.tmp.name) / "projects" / "svc.toml").read_text()
+        self.assertIn("[[project.ports]]", text)
+        self.assertNotIn("host = 5173", text)        # host==container omitted (terse)
+        self.assertNotIn("bind = \"127.0.0.1\"", text)  # default bind omitted
+        loaded = projects.load("svc").ports
+        self.assertEqual(loaded[0].publish_arg(), "127.0.0.1:5173:5173/tcp")
+        self.assertEqual(loaded[1].publish_arg(), "0.0.0.0:3001:3000/udp")
+
+    def test_ports_omitted_when_none(self) -> None:
+        path = projects.save(Project(slug="noports"))
+        self.assertNotIn("project.ports", path.read_text())
+        self.assertEqual(projects.load("noports").ports, ())
+
+    def test_add_port_collision_rejected(self) -> None:
+        from claudeman.registry.schema import PortMapping
+        projects.save(Project(slug="p"))
+        projects.add_port("p", PortMapping(container=5173, host=8080))
+        with self.assertRaises(ValidationError):
+            projects.add_port("p", PortMapping(container=9999, host=8080))  # same host port + proto
+        # A different proto on the same host port is allowed.
+        projects.add_port("p", PortMapping(container=9999, host=8080, proto="udp"))
+        self.assertEqual(len(projects.load("p").ports), 2)
+
+    def test_remove_port_by_host_and_proto(self) -> None:
+        from claudeman.registry.schema import PortMapping
+        projects.save(Project(slug="p"))
+        projects.add_port("p", PortMapping(container=5173, host=8080))
+        projects.add_port("p", PortMapping(container=9999, host=8080, proto="udp"))
+        _, removed = projects.remove_port("p", "8080/udp")   # proto-pinned
+        self.assertEqual(removed.proto, "udp")
+        self.assertEqual([x.proto for x in projects.load("p").ports], ["tcp"])
+        _, again = projects.remove_port("p", "8080")          # bare host matches the remaining tcp
+        self.assertEqual(again.proto, "tcp")
+        _, none = projects.remove_port("p", "8080")           # idempotent no-op
+        self.assertIsNone(none)
+
+    def test_flagged_port_with_string_host_roundtrips_and_is_removable(self) -> None:
+        # A flagged entry (raw non-int host, e.g. hand-edited/rule-tightened TOML) must round-trip AND
+        # stay removable by its target string — the lenient() contract. Regression: remove_port used to
+        # int()-parse the target and fail on a non-numeric host, leaving the entry unremovable.
+        from claudeman.registry.schema import PortMapping
+        flagged = PortMapping.lenient(container=8080, host="not_a_number")
+        self.assertTrue(flagged.error)
+        self.assertEqual(flagged.target, "not_a_number/tcp")
+        projects.save(Project(slug="p", ports=(flagged,)))
+        loaded = projects.load("p").ports
+        self.assertEqual(len(loaded), 1)
+        self.assertTrue(loaded[0].error)                       # round-trips as flagged
+        _, removed = projects.remove_port("p", loaded[0].target)  # the TUI removes by this key
+        self.assertIsNotNone(removed)
+        self.assertEqual(projects.load("p").ports, ())
+
+    def test_claude_version_omitted_when_unset(self) -> None:
+        path = projects.save(Project(slug="unpinned"))
+        self.assertNotIn("claude_version", path.read_text())
+        self.assertEqual(projects.load("unpinned").claude_version, "")  # absent -> default ""
+
     def test_sync_block_roundtrips(self) -> None:
         projects.save(Project(slug="synced", sync=Sync(
             enabled=False, workspace=("CLAUDE.md", "docs/"), claude=("skills",))))

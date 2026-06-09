@@ -52,13 +52,17 @@ _BAKED_ENV = {
     # `git config --global` and `gh` writes land somewhere writable instead of erroring on EROFS.
     "GIT_CONFIG_GLOBAL": config.CONTAINER_GITCONFIG,
     "GH_CONFIG_DIR": config.CONTAINER_GH_CONFIG,
-    # Yarn (Berry/corepack) writes its global folder under HOME (~/.yarn) by default — EROFS under the
-    # read-only rootfs. Point the (small) global folder at the writable .cache tmpfs, and force the
-    # package cache project-local so the bulk lands in /workspace/<repo>/.yarn/cache (the disk-backed,
-    # persistent workspace bind) rather than the ephemeral/size-capped tmpfs. Same redirect philosophy
-    # as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface, so the hardened floor is unchanged.
+    # Yarn caches/configs must land on a WRITABLE surface (the rootfs is read-only; the .cache tmpfs is
+    # size-capped). Berry: its small global folder -> the .cache tmpfs (YARN_GLOBAL_FOLDER), no shared
+    # global cache (YARN_ENABLE_GLOBAL_CACHE=false). The package CACHE (Berry AND Yarn Classic v1) ->
+    # the disk-backed, persistent /workspace bind via YARN_CACHE_FOLDER — a 256m tmpfs cache OOM'd a
+    # large install with ENOSPC. Yarn v1 ignores the two Berry vars but DOES honour YARN_CACHE_FOLDER;
+    # its ~/.yarnrc write (EROFS on the read-only rootfs) is handled by an image symlink onto the .cache
+    # tmpfs. Same redirect philosophy as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface (the
+    # cache rides the existing /workspace bind), so the hardened floor is unchanged.
     "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
     "YARN_ENABLE_GLOBAL_CACHE": "false",
+    "YARN_CACHE_FOLDER": config.CONTAINER_YARN_CACHE,
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }
@@ -95,6 +99,22 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
             if ssh_auth_sock:
                 args += ["-v", f"{ssh_auth_sock}:{config.CONTAINER_SSH_AGENT_SOCK}:ro"]
                 args += ["-e", f"SSH_AUTH_SOCK={config.CONTAINER_SSH_AGENT_SOCK}"]
+    return args
+
+
+def _render_ports(project: Project) -> list[str]:
+    """Render ``-p <bind>:<host>:<container>/<proto>`` for each valid published port. PURELY ADDITIVE —
+    like ``_render_env_mounts``, never emits a ``_HARDENING`` flag, so the hardened floor is
+    byte-identical with or without ports (invariant 2; a unit test pins this). Skips load-time-invalid
+    (flagged) entries so a bad mapping never reaches docker. Port publishing is set up by the docker
+    DAEMON on the host, so it works under ``--cap-drop ALL`` (the container's dropped caps don't gate
+    the host-side ``-p`` mapping); the ≥1024 container-port rule (schema) keeps the in-container service
+    bindable. Ingress only — orthogonal to the egress firewall (invariant 3)."""
+    args: list[str] = []
+    for p in project.ports:
+        if p.error:  # a flagged (load-time-invalid) mapping never reaches docker
+            continue
+        args += ["-p", p.publish_arg()]
     return args
 
 
@@ -166,8 +186,9 @@ def build_create_argv(
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
     argv += ["-v", f"{ws_path}:{config.CONTAINER_WORKSPACE}"]
-    # Env-mounts (ssh + files) — additive only; the hardened floor above is untouched.
+    # Env-mounts (ssh + files) + published ports — additive only; the hardened floor above is untouched.
     argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
+    argv += _render_ports(project)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
     argv += [project.image, "sleep", "infinity"]

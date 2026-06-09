@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .. import config
+from . import labels
 
 # A progress sink: each docker-output (or milestone) line is handed to it. The TUI forwards to its
 # RichLog via ``call_from_thread``; the CLI uses ``print``.
@@ -56,7 +57,8 @@ def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION
     """Pure renderer for the ``docker build`` argv (no daemon, no IO) — unit-testable.
 
     Uses absolute, package-relative paths for the Dockerfile and build context so the command is
-    CWD-independent. The Dockerfiles ``COPY`` nothing, so the context is unused beyond being valid.
+    CWD-independent. The base Dockerfile ``COPY``s ``images/nvim`` (the curated neovim config) from
+    the context (= the repo root), so the context must be the repo root — which it is.
     """
     return [
         "docker", "build",
@@ -79,6 +81,28 @@ def image_exists(overlay: str) -> bool:
         ["docker", "image", "inspect", config.image_tag(overlay)],
         capture_output=True, check=False,
     ).returncode == 0
+
+
+def image_claude_version(overlay: str) -> str | None:
+    """The claude version baked into ``claude-man:<overlay>`` (its ``claude-man.claude-version`` label),
+    or ``None`` if the image / label / docker is absent.
+
+    The label is the source of truth for "what claude a container created from this image runs".
+    Overlays inherit the label from their base (they don't re-declare it), so this works for any
+    overlay. Used by the lifecycle to stamp the container's version truthfully and to decide the
+    on-start update (compare against the channel's latest)."""
+    if shutil.which("docker") is None:
+        return None
+    cp = subprocess.run(
+        ["docker", "image", "inspect", config.image_tag(overlay),
+         "--format", '{{ index .Config.Labels "%s" }}' % labels.IMAGE_VERSION],
+        capture_output=True, text=True, check=False,
+    )
+    if cp.returncode != 0:
+        return None
+    v = cp.stdout.strip()
+    # Go's `index` prints "<no value>" for a missing key; treat that (and empty) as unknown.
+    return v if v and v != "<no value>" else None
 
 
 def build_one(
@@ -147,3 +171,36 @@ def ensure_chain(
         return BuildResult(True, built,
                            detail="built " + ", ".join(config.image_tag(b) for b in built))
     return BuildResult(True, built, detail="images already present")
+
+
+def rebuild_chain(
+    overlay: str,
+    *,
+    claude_version: str,
+    on_line: ProgressFn | None = None,
+) -> BuildResult:
+    """Force-rebuild the base→``overlay`` chain pinned to ``claude_version`` — even when the images
+    already exist (unlike ``ensure_chain``, which only builds *missing* ones).
+
+    The on-start update path: a newer claude lands by rebuilding the base (its ``CLAUDE_VERSION``
+    build-arg) then the overlay (so its ``FROM claude-man:base`` picks up the freshly-built base). Held
+    under ``_BUILD_LOCK`` so it can't race a concurrent create/up. ``docker build`` only repoints the
+    tag on SUCCESS, so a mid-chain failure leaves the prior image intact — the caller falls open and
+    starts on it. Returns ``ok=False`` with a clear detail when docker is absent or a build fails."""
+    if shutil.which("docker") is None:
+        return BuildResult(False, detail="docker not found on PATH — cannot rebuild image")
+    built: list[str] = []
+    with _BUILD_LOCK:
+        for ov in build_chain(overlay):
+            if on_line:
+                on_line(f"rebuilding {config.image_tag(ov)} → claude {claude_version} …")
+            rc = build_one(ov, claude_version=claude_version, on_line=on_line)
+            if rc != 0:
+                return BuildResult(
+                    False, built,
+                    detail=f"failed to rebuild {config.image_tag(ov)} (docker build exited {rc})",
+                )
+            built.append(ov)
+    return BuildResult(True, built,
+                       detail=f"rebuilt {', '.join(config.image_tag(b) for b in built)} "
+                       f"→ claude {claude_version}")

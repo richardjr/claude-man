@@ -57,8 +57,15 @@ CONTAINER_GITCONFIG = CONTAINER_CACHE + "/gitconfig"   # GIT_CONFIG_GLOBAL
 CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
 # Yarn (Berry/corepack) defaults its global folder to ~/.yarn — EROFS under the read-only rootfs
 # (the `mkdir /home/agent/.yarn` failure). Redirect the small global folder (metadata/telemetry) to
-# the writable .cache tmpfs; the bulk package cache is forced project-local (see _BAKED_ENV).
-CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER
+# the writable .cache tmpfs; the bulk package cache goes to the disk-backed workspace bind via
+# CONTAINER_YARN_CACHE below (was project-local; now a shared disk cache Yarn Classic v1 honours too).
+CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER (Berry)
+# Yarn Classic (v1) IGNORES the Berry vars above and uses its own defaults: it caches to ~/.cache/yarn
+# (the 256m .cache tmpfs -> ENOSPC on a large install) and writes ~/.yarnrc (read-only rootfs -> EROFS).
+# Point its cache at the disk-backed /workspace bind (hundreds of GB, persistent); the image symlinks
+# ~/.yarnrc onto the writable .cache tmpfs (see images/base/Dockerfile). Berry honours YARN_CACHE_FOLDER
+# too, so both yarns share this one disk-backed cache (still on the persistent workspace bind).
+CONTAINER_YARN_CACHE = CONTAINER_WORKSPACE + "/.yarn-cache"   # YARN_CACHE_FOLDER (Yarn v1 + Berry)
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
@@ -99,6 +106,18 @@ OAUTH_USAGE_BETA = "oauth-2025-04-20"
 OAUTH_USAGE_SCOPES = "user:profile user:inference"
 # The usage endpoint rate-limits a generic User-Agent aggressively; send the claude-code UA.
 CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
+
+# ---------------------------------------------------------------------------
+# Claude Code release channel (the on-start "is a newer claude available?" check)
+# ---------------------------------------------------------------------------
+# A plain-text version pointer per channel — the SAME endpoint claude's native installer reads
+# (``install.sh`` GETs ``…/latest`` to learn the version). A cheap, TOKEN-LESS GET that reads no quota.
+# claude-man compares the channel version to the image's baked ``claude-man.claude-version`` label and
+# offers a host-side image REBUILD before start (never an in-container write — the ``~/.local`` install
+# is on the read-only rootfs, which is why ``claude update`` fails inside a container). See updates.py.
+RELEASES_BASE_URL = "https://downloads.claude.ai/claude-code-releases"
+CLAUDE_CHANNELS = ("latest", "stable")
+DEFAULT_CLAUDE_CHANNEL = "latest"
 
 
 # ---------------------------------------------------------------------------

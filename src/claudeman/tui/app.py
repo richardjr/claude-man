@@ -32,11 +32,13 @@ from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
+from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.quit_confirm import QuitConfirmScreen
 from .screens.shutdown import ShutdownScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
+from .screens.update_confirm import UpdateConfirmScreen
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
@@ -69,6 +71,7 @@ class ClaudeManApp(App):
         Binding("v", "view_menu", "View…"),
         Binding("enter", "open_shell", "Shell"),
         Binding("c", "open_claude", "Claude"),
+        Binding("b", "browse", "Browse"),
         Binding("s", "toggle_running", "Start/Stop"),
         Binding("y", "sync_review", "Sync-back"),
         Binding("comma", "settings", "Settings", key_display=","),
@@ -83,6 +86,7 @@ class ClaudeManApp(App):
         ("p", "Pull all (ff-only)", "pull_all"),
     ]
     _PROJECT_MENU = [
+        ("o", "Ports", "ports"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -137,8 +141,10 @@ class ClaudeManApp(App):
         self._dispatch_gitstate(fetch=False)
         self._render_repo_detail()
         self._bootstrap_env()  # load configured ssh keys into the agent so containers can use them
-        # Phase 1: poll. Phase 2 upgrades this to a `docker events` worker.
-        self.set_interval(2.0, self.refresh_projects)
+        # Poll container liveness OFF the UI thread (refresh_projects is a thread worker). 10s is plenty
+        # for a status column — every lifecycle action triggers an immediate refresh too. Phase 2 would
+        # replace the poll with a `docker events` worker.
+        self.set_interval(10.0, self.refresh_projects)
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
@@ -152,14 +158,27 @@ class ClaudeManApp(App):
         ]
         return status.join(defined, status.query_containers())
 
+    @work(thread=True, exclusive=True, group="status")
     def refresh_projects(self) -> None:
+        """Query docker (`docker ps`) + the registry OFF the UI thread, then repaint on it.
+
+        The status query is a hundreds-of-ms `docker ps` subprocess; running it on the event loop
+        every poll froze all input (the lag that made the modals feel unresponsive — TUI-2). Mirrors
+        refresh_usage/refresh_gitstate: the thread worker computes the join, `call_from_thread` paints.
+        ``exclusive`` drops a still-pending poll if a fresh one (e.g. a post-action refresh) supersedes it.
+        """
+        rows = self._rows()
+        self.call_from_thread(self._render_projects, rows)
+
+    def _render_projects(self, rows: list[status.Row]) -> None:
+        """Paint the projects table from a freshly-polled join (UI thread only)."""
         table = self.query_one("#projects", DataTable)
         # Restore the cursor by SLUG, not integer index — rows are slug-sorted and the set can
         # change between polls, so an index restore could land on the wrong project (review TUI-7).
         prev_slug = self._current_slug()
         table.clear()
-        rows = self._rows()
-        self._last_rows = rows  # cache for _running_slugs so quit needn't block on a fresh docker ps
+        # Cache for _running_slugs (quit) AND the action handlers — so neither blocks on a fresh docker ps.
+        self._last_rows = rows
         for row in rows:
             # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
             kind = Text(row.kind, style=status.status_style(row.kind))
@@ -372,6 +391,27 @@ class ClaudeManApp(App):
     def action_open_claude(self) -> None:
         self._open_terminal("claude")
 
+    def action_browse(self) -> None:
+        """Open the project's workspace mount (the host-side `/workspace` bind dir) in the system file
+        manager. Works regardless of container state — the workspace is a host dir that exists once the
+        project is created (pre-made here if absent; it's operator-owned, which the create flow expects)."""
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]browse: select a defined project (orphan rows aren't managed)[/]")
+            return
+        ws = config.workspace_dir(slug)
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._log(f"[red]browse: cannot access {ws}: {exc}[/]")
+            return
+        try:
+            terminals.spawn_path(str(ws))
+        except (RuntimeError, OSError) as exc:
+            self._log(f"[red]browse failed: {exc}[/]")
+            return
+        self._log(f"[green]browsing[/] {ws}")
+
     def _open_terminal(self, program: str) -> None:
         """Open a detached terminal running ``program`` (bash/claude) in the cursor's project.
 
@@ -392,7 +432,7 @@ class ClaudeManApp(App):
             verb = "claude" if program == "claude" else "shell"
             self._log(f"[yellow]{slug}: {verb} skipped — an operation is already running[/]")
             return
-        row = next((r for r in self._rows() if r.slug == slug), None)
+        row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
         if row is None:
             return
         if row.kind == status.UP:
@@ -506,7 +546,7 @@ class ClaudeManApp(App):
         slug = self._current_slug()
         if not slug:
             return
-        row = next((r for r in self._rows() if r.slug == slug), None)
+        row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
         if row is None:
             return
         # Branch on the joined state: UP -> stop; STOPPED/DEFINED -> start. BOTH run in a worker — a
@@ -522,7 +562,9 @@ class ClaudeManApp(App):
             if not self._reserve(slug, "start"):
                 return
             self._log(f"starting {slug} …")
-            self._up_worker(slug)
+            # Check for a newer claude first (off-thread). If one exists, the modal asks before the
+            # rebuild; otherwise it goes straight to the up worker (the slug stays reserved throughout).
+            self._update_check_worker(slug)
         else:
             self._log(f"[red]{slug}: orphan container (no registry entry) — not managed[/]")
 
@@ -596,6 +638,7 @@ class ClaudeManApp(App):
             "remove_repo": self.action_remove_repo,
             "refresh_git": self.action_refresh_gitstate,
             "pull_all": self.action_pull_all,
+            "ports": self.action_ports,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -700,10 +743,52 @@ class ClaudeManApp(App):
         self.call_from_thread(self._after_action, slug, res)
 
     @work(thread=True, group="create")
-    def _up_worker(self, slug: str) -> None:
-        """Start (create-if-needed) off the UI thread; may build the image first (streamed)."""
+    def _update_check_worker(self, slug: str) -> None:
+        """Before start: check (host-side GET) whether a newer claude than the project's image exists.
+        If so, raise the confirm modal; otherwise go straight to start (``build_to`` set for a fresh
+        project so its first build tracks the channel). Fails open — any check fault just starts. The
+        slug stays reserved (claimed in ``action_toggle_running``) through to ``_up_worker``."""
         try:
-            res = lifecycle.up(projects.load(slug), on_progress=self._thread_log)
+            chk = lifecycle.check_update(projects.load(slug))
+        except Exception as exc:  # noqa: BLE001 - never tear down the app; fail open to a plain start
+            self.call_from_thread(self._log, f"[yellow]{slug}: update check failed ({exc!r}); starting[/]")
+            self.call_from_thread(self._start_after_check, slug, "")
+            return
+        if chk.prompt:
+            self.call_from_thread(self._show_update_confirm, slug, chk)
+        else:
+            if chk.note:
+                self.call_from_thread(self._log, f"{slug}: {chk.note}")
+            self.call_from_thread(self._start_after_check, slug, chk.build_to)
+
+    def _show_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck) -> None:
+        self.push_screen(
+            UpdateConfirmScreen(slug, chk.current, chk.target),
+            lambda decision: self._on_update_confirm(slug, chk, decision),
+        )
+
+    def _on_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck, decision) -> None:
+        if decision is None:  # Esc / Cancel — abandon the start entirely, release the reservation
+            self._busy.discard(slug)
+            self._log(f"{slug}: start cancelled")
+            return
+        if decision == "rebuild":
+            self._log(f"rebuilding {slug} → claude {chk.target}, then starting …")
+            self._start_after_check(slug, chk.target)
+        else:  # "skip" — start on the existing image
+            self._log(f"{slug}: skipping update; starting on claude {chk.current}")
+            self._start_after_check(slug, "")
+
+    def _start_after_check(self, slug: str, rebuild_to: str) -> None:
+        # slug already reserved in action_toggle_running — go straight to the up worker.
+        self._up_worker(slug, rebuild_to)
+
+    @work(thread=True, group="create")
+    def _up_worker(self, slug: str, rebuild_to: str = "") -> None:
+        """Start (create-if-needed) off the UI thread; may rebuild the image to a newer claude first,
+        then build/create (all streamed)."""
+        try:
+            res = lifecycle.up(projects.load(slug), on_progress=self._thread_log, rebuild_to=rebuild_to)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"start failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
@@ -794,6 +879,15 @@ class ClaudeManApp(App):
             return
         self._log(f"managing env mounts for {slug} (add/remove need a recreate to apply)")
         self.push_screen(EnvMountsScreen(slug))
+
+    # -- published ports --------------------------------------------------
+    def action_ports(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]ports: select a defined project (orphan rows aren't managed)[/]")
+            return
+        self._log(f"managing published ports for {slug} (add/remove need a recreate to apply)")
+        self.push_screen(PortsScreen(slug))
 
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")

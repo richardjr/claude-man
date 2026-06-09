@@ -7,6 +7,7 @@ These are plain in-memory representations. Reading is done with stdlib ``tomllib
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -216,6 +217,102 @@ class EnvMount:
         return "ssh"
 
 
+_PORT_PROTOS = ("tcp", "udp")
+# Bind addresses that keep a published port HOST-ONLY (loopback) — not reachable off this machine.
+_LOOPBACK_BINDS = ("127.0.0.1", "::1")
+
+
+@dataclass(frozen=True)
+class PortMapping:
+    """A published container port — rendered as ``-p <bind>:<host>:<container>/<proto>`` at docker create.
+
+    INGRESS (distinct from ``EnvMount``'s material-IN): exposes a service running INSIDE the container
+    so the host (or, opt-in, the LAN) can reach it for testing. Constraints from the hardened profile:
+
+      * ``container`` MUST be ≥ 1024 — ``--cap-drop ALL`` strips ``NET_BIND_SERVICE``, so a service in
+        the container can't bind a privileged port (the mapping would forward to nothing).
+      * ``bind`` defaults to loopback (``127.0.0.1``, host-only) so a test service isn't exposed to the
+        network by accident; set ``0.0.0.0`` to publish on all interfaces.
+
+    Purely additive: it never relaxes the hardened floor (invariant 2 — ``docker/runner._render_ports``
+    emits only ``-p``) and is orthogonal to the egress firewall (invariant 3 — ingress, not egress).
+    NOTE: the service inside must listen on ``0.0.0.0`` (not container-localhost) for docker to forward.
+    """
+
+    container: int
+    host: int = 0                # 0 -> defaults to == container (resolved in __post_init__)
+    bind: str = "127.0.0.1"
+    proto: str = "tcp"
+    error: str = ""              # set ONLY by lenient() for a load-time-invalid entry (skipped at render)
+
+    @classmethod
+    def lenient(cls, *, container, host=0, bind="127.0.0.1", proto="tcp") -> PortMapping:
+        """Construct from stored TOML WITHOUT raising — a row that fails validation is returned flagged
+        (``error`` set) instead, mirroring ``EnvMount.lenient`` (a rule tightened after a save must not
+        crash ``projects.load``). A flagged port stays visible/removable and round-trips, but the render
+        + lifecycle SKIP it so an invalid mapping never reaches docker."""
+        try:
+            return cls(container=container, host=host, bind=bind, proto=proto)
+        except ValidationError as exc:
+            obj = cls(container=1024)  # guaranteed-valid placeholder; override without re-validating
+            for fld, val in (("container", container), ("host", host), ("bind", bind),
+                             ("proto", proto), ("error", str(exc))):
+                object.__setattr__(obj, fld, val)
+            return obj
+
+    def __post_init__(self) -> None:
+        proto = str(self.proto).strip().lower()
+        if proto not in _PORT_PROTOS:
+            raise ValidationError(f"port proto {self.proto!r} must be one of {_PORT_PROTOS}")
+        object.__setattr__(self, "proto", proto)
+        c = self._int(self.container, "container")
+        if c < 1024 or c > 65535:
+            raise ValidationError(
+                f"container port {c} must be 1024–65535 — the hardened profile drops NET_BIND_SERVICE, "
+                f"so a service inside the container can't bind a port below 1024"
+            )
+        object.__setattr__(self, "container", c)
+        h = self._int(self.host, "host") if self.host else 0
+        if h and not (1 <= h <= 65535):
+            raise ValidationError(f"host port {h} must be 1–65535")
+        object.__setattr__(self, "host", h)
+        bind = str(self.bind).strip() or "127.0.0.1"
+        try:
+            ipaddress.ip_address(bind)
+        except ValueError:
+            raise ValidationError(
+                f"port bind {bind!r} must be an IP address (127.0.0.1 host-only, or 0.0.0.0 to expose "
+                f"on the LAN), not a hostname"
+            ) from None
+        object.__setattr__(self, "bind", bind)
+
+    @staticmethod
+    def _int(value, label: str) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValidationError(f"{label} port {value!r} must be an integer") from None
+
+    @property
+    def host_eff(self) -> int:
+        """The host port actually published — the explicit ``host`` if set, else ``container``."""
+        return self.host or self.container
+
+    @property
+    def exposed(self) -> bool:
+        """True if bound beyond loopback (reachable off-host) — drives the UI's exposure warning."""
+        return self.bind not in _LOOPBACK_BINDS
+
+    @property
+    def target(self) -> str:
+        """Identity for list/remove matching: ``<host>/<proto>`` (a host port + proto is unique)."""
+        return f"{self.host_eff}/{self.proto}"
+
+    def publish_arg(self) -> str:
+        """The docker ``-p`` value: ``<bind>:<host>:<container>/<proto>``."""
+        return f"{self.bind}:{self.host_eff}:{self.container}/{self.proto}"
+
+
 # Default per-project asset-sync allowlists. CLAUDE.md at the workspace root; skills/agents/commands
 # at USER scope (~/.claude). settings.json is intentionally NOT here (machine-local perms/hooks risk)
 # and is refused even if hand-added (see assets._assert_claude_allowlist_safe).
@@ -270,12 +367,14 @@ class Project:
     profile: str | None = None          # None -> inherit the default profile
     overlay: str = config.DEFAULT_OVERLAY
     egress: str = config.DEFAULT_EGRESS  # "open" | "strict"
+    claude_version: str = ""             # per-project exact claude pin; "" -> the global channel/pin
     env: dict[str, str] = field(default_factory=dict)
     env_file: str | None = None
     workdir: str = ""                    # where claude/shell launch (else: lone repo's dir, else /workspace)
     extra_apt: tuple[str, ...] = ()
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
+    ports: tuple[PortMapping, ...] = ()   # published container service ports (ingress -p; recreate to apply)
     allowlist: tuple[str, ...] = ()      # extra egress dstdomains (strict mode only)
     sync: Sync = field(default_factory=Sync)  # per-project asset sync (CLAUDE.md + skills/agents)
 
@@ -341,11 +440,21 @@ class Settings:
     ssh_auto_load: bool = True           # load them on TUI/CLI startup (and on add)
     git_user_name: str = ""              # git author identity injected into containers ("" -> inherit host)
     git_user_email: str = ""             # "" -> inherit the host's `git config --global user.email`
+    # On-start claude-version update: before `up`, GET the tracked channel's latest version and offer to
+    # rebuild the project's image to it when it's newer than the baked one (host-side image rebuild —
+    # never an in-container write; invariant 2 is untouched). A version pin overrides the channel.
+    image_update_check: bool = True      # run the on-start "newer claude available?" check
+    claude_channel: str = config.DEFAULT_CLAUDE_CHANNEL  # "latest" | "stable" — which channel to track
+    claude_version_pin: str = ""         # exact version pin; "" -> track the channel
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:
             if not k or not k.strip():
                 raise ValidationError("ssh key path must be a non-empty string")
+        if self.claude_channel not in config.CLAUDE_CHANNELS:
+            raise ValidationError(
+                f"claude_channel {self.claude_channel!r} must be one of {config.CLAUDE_CHANNELS}"
+            )
 
 
 @dataclass(frozen=True)

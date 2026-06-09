@@ -74,6 +74,25 @@ def _base_probes() -> list[Probe]:
         Probe("git config --global writable",
               ["sh", "-lc", "git config --global user.email smoke@example.com && echo ok"],
               required=True, expect="ok"),
+        # Yarn Classic (v1) writes ~/.yarnrc; the image symlinks it onto the writable .cache tmpfs so
+        # that write doesn't EROFS the read-only rootfs (the bug that broke `yarn install` for a v1
+        # project). This exercises the symlink as uid 1000 under --read-only.
+        Probe("yarnrc redirect writable",
+              ["sh", "-lc", "echo '# smoke' > ~/.yarnrc && echo ok"],
+              required=True, expect="ok"),
+        # neovim must run as uid 1000 under --read-only (baked curated config + plugins + parsers).
+        Probe("nvim --version", ["nvim", "--version"], required=True, expect="NVIM v"),
+        # The baked LSP servers must be on PATH (TS + Markdown) — no runtime Mason/download.
+        Probe("nvim LSP servers baked", ["sh", "-lc", "command -v typescript-language-server && command -v marksman"],
+              required=True, expect="/usr/local/bin/marksman"),
+        # The curated config must load, the typescript treesitter parser must resolve from the baked
+        # /opt/nvim-parsers, and nvim's shada write must hit the .cache tmpfs (a forbidden EROFS marker
+        # here would fail the smoke). Exercises nvim end-to-end under the read-only rootfs.
+        Probe("nvim config + treesitter + shada (read-only)",
+              ["nvim", "--headless",
+               "-c", "lua io.write(pcall(vim.treesitter.language.add, 'typescript') and 'ts-ok' or 'ts-fail')",
+               "-c", "wshada!", "-c", "qa"],
+              required=True, expect="ts-ok", timeout=20),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]

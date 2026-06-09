@@ -19,14 +19,14 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import assets, config, env_secrets, gh_token, gitconfig, ssh_agent
+from . import assets, config, env_secrets, gh_token, gitconfig, ssh_agent, updates
 from .checkout import gitstate, repos
 from .docker import images, runner
 from .profiles import seed as seed_mod
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
 from .registry import settings as settings_registry
-from .registry.schema import EnvMount, Profile, Project, Repo, ValidationError
+from .registry.schema import EnvMount, PortMapping, Profile, Project, Repo, ValidationError
 
 # A progress sink threaded through create/up/recreate so a long, one-time image build surfaces
 # live in the caller (the TUI log pane / the CLI). ``None`` means "no progress wanted".
@@ -208,11 +208,14 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
     stored = env_secrets.load(project.slug)
     env_vars = {m.name: stored[m.name] for m in project.env_mount
                 if m.kind == "env" and not m.error and m.name in stored}
+    # Stamp the container's version label with the image's ACTUAL baked claude (the source of truth),
+    # not the build-time DEFAULT — so the Version column stays truthful after an on-start image rebuild.
+    version = images.image_claude_version(project.overlay) or config.DEFAULT_CLAUDE_VERSION
     # Git author identity (config.toml [git] override, else inherited from the host git config),
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
     cp = runner.create(project, profile_name=profile_name, token=token,
                        gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
-                       git_env=gitconfig.container_env())
+                       git_env=gitconfig.container_env(), version=version)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
@@ -234,8 +237,103 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
     return Result(True, f"created {project.container}{suffix}")
 
 
-def up(project: Project, *, on_progress: ProgressFn | None = None) -> Result:
-    """Create-if-needed, then start (syncing per-project assets IN before start)."""
+# ---------------------------------------------------------------------------
+# On-start claude-version update — "run update before start" (CLAUDE.md / ROADMAP). claude update
+# can't run inside the read-only container (its ~/.local install can't be written), so claude-man
+# checks the tracked channel's latest version host-side and, on the operator's confirmation, REBUILDS
+# the project's image to it and recreates the container on it. Purely additive: the hardened floor
+# (invariant 2) is unchanged — the rebuilt image is the same Dockerfile with a newer CLAUDE_VERSION.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class UpdateCheck:
+    """The on-start claude-version decision for a project (read-only; computed before ``up``).
+
+    ``current`` is the version baked into the project's image (``""`` if it isn't built yet); ``target``
+    is the resolved channel/pin version (``""`` if unresolved — offline/disabled). ``prompt`` is True
+    only when an EXISTING image is behind ``target`` (so the operator is asked before the
+    potentially-minutes-long rebuild). ``build_to`` is a version to (re)build WITHOUT asking — set for a
+    fresh project (no image yet) so its first build tracks the channel directly; ``""`` otherwise.
+    ``note`` is a short human reason for the log."""
+
+    current: str = ""
+    target: str = ""
+    prompt: bool = False
+    build_to: str = ""
+    note: str = ""
+
+
+def check_update(project: Project) -> UpdateCheck:
+    """Decide whether a newer claude than the project's image is available and whether ``up`` should
+    prompt-then-rebuild, silently build, or do nothing. A host-side GET; NEVER raises and never blocks
+    meaningfully (a GET failure, docker-absence, OR an unreadable/malformed ``config.toml`` folds into
+    a no-action result — fail open: start on the existing image). The actual rebuild is gated on the
+    operator's confirmation in the caller (``prompt``), per the chosen 'prompt before rebuild'
+    behaviour."""
+    try:
+        settings = settings_registry.load()
+    except (OSError, ValueError):
+        # A malformed/unreadable config.toml must not turn a routine start into a crash — the update
+        # check fails OPEN (other commands still surface the broken config to the operator). Both
+        # tomllib.TOMLDecodeError and our ValidationError are ValueError subclasses; OSError covers a
+        # read fault. Honours the 'NEVER raises' contract for EVERY caller — the CLI's `project up`
+        # path doesn't wrap this call (only the TUI worker did).
+        return UpdateCheck(note="config unreadable — skipping update check")
+    if not settings.image_update_check:
+        return UpdateCheck(note="update check disabled")
+    current = images.image_claude_version(project.overlay) or ""
+    # Resolve the target: a per-project pin wins, then the global pin, else the tracked channel.
+    pin = (project.claude_version or settings.claude_version_pin or "").strip()
+    if pin:
+        if not current:
+            return UpdateCheck(target=pin, build_to=pin, note=f"pinned {pin} (first build)")
+        if current == pin:
+            return UpdateCheck(current=current, target=pin, note=f"pinned {pin} (image current)")
+        # Image drifted off the pin — offer to rebuild to it (an explicit pin wins, up or down).
+        return UpdateCheck(current=current, target=pin, prompt=True, note=f"pinned {pin}")
+    rc = updates.resolve_channel(settings.claude_channel)
+    if not rc.version:
+        return UpdateCheck(current=current, note=rc.note or "offline")  # fail open
+    target = rc.version
+    if not current:
+        return UpdateCheck(target=target, build_to=target,
+                           note=f"{settings.claude_channel} {target} (first build)")
+    if updates.is_newer(target, current):
+        return UpdateCheck(current=current, target=target, prompt=True,
+                           note=f"{settings.claude_channel} {target} > image {current}")
+    return UpdateCheck(current=current, target=target, note=f"image {current} up to date")
+
+
+def _maybe_rebuild_for_update(project: Project, version: str, *, on_progress: ProgressFn | None) -> None:
+    """Force-rebuild the project's image to ``version`` and remove the existing (stopped) container so
+    ``ensure_created`` recreates it on the fresh image. Best-effort + fail-open: a RUNNING container or
+    a FAILED rebuild leaves the existing image/container in place (start then proceeds on it). Never
+    raises — the update must not turn a routine start into a hard failure."""
+    if runner.is_running(project.slug):
+        if on_progress:
+            on_progress(f"[update] {project.slug} is running — not rebuilding "
+                        f"(stop it, then start to update to claude {version})")
+        return
+    rb = images.rebuild_chain(project.overlay, claude_version=version, on_line=on_progress)
+    if not rb.ok:
+        if on_progress:
+            on_progress(f"[update] rebuild failed: {rb.detail}; starting on the existing image")
+        return
+    if runner.exists(project.slug):
+        runner.remove(project.slug)  # recreate on the freshly-built image (ensure_created rebuilds it)
+        if on_progress:
+            on_progress(f"[update] recreating {project.container} on the rebuilt image")
+
+
+def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: str = "") -> Result:
+    """Create-if-needed, then start (syncing per-project assets IN before start).
+
+    ``rebuild_to`` (set by the caller after ``check_update`` + the operator's confirmation) force-
+    rebuilds the project's image to that claude version and recreates the container on it BEFORE the
+    normal create/start — the 'run update before start' path. Empty ``rebuild_to`` is the unchanged
+    flow. The rebuild is skipped for a running container and fails open (see
+    ``_maybe_rebuild_for_update``)."""
+    if rebuild_to:
+        _maybe_rebuild_for_update(project, rebuild_to, on_progress=on_progress)
     created = ensure_created(project, on_progress=on_progress)
     if not created.ok:
         return created
@@ -653,6 +751,47 @@ def add_env_var(slug: str, name: str, value: str) -> Result:
                     projects_registry.remove_mount(slug, mount.name)
                 return Result(False, f"failed to store value for {mount.name}: {exc}")
             return Result(True, f"set env var {mount.name} for {slug} — `recreate` to apply")
+    except OSError as exc:
+        return _lock_error(slug, exc)
+
+
+def _port_desc(p: PortMapping) -> str:
+    where = "host-only (localhost)" if not p.exposed else f"EXPOSED on {p.bind}"
+    return f"{p.host_eff}->{p.container}/{p.proto} [{where}]"
+
+
+def add_port(slug: str, mapping: PortMapping) -> Result:
+    """Publish a container service port (the ``project ports add`` verb). Registry-only; ports are fixed
+    at container create, so the Result reminds to ``recreate``. The ``PortMapping`` is already validated
+    (container ≥1024, proto, bind IP) by its ``__post_init__``; the cross-entry host-port collision guard
+    fires in ``projects.add_port`` under the per-slug flock."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            try:
+                projects_registry.add_port(slug, mapping)
+            except ValidationError as exc:
+                return Result(False, str(exc))
+            return Result(True, f"published {_port_desc(mapping)} for {slug} — `recreate` to apply "
+                          f"(ports are fixed at container create)")
+    except OSError as exc:
+        return _lock_error(slug, exc)
+
+
+def remove_port(slug: str, target: str) -> Result:
+    """Unpublish a port from the registry (matched by ``<host>[/proto]``). `recreate` to apply."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            try:
+                _, removed = projects_registry.remove_port(slug, target)
+            except ValidationError as exc:
+                return Result(False, str(exc))
+            if removed is None:
+                return Result(True, f"no published port matching {target!r} in {slug} (nothing to do)")
+            return Result(True, f"unpublished {_port_desc(removed)} from {slug} — `recreate` to apply")
     except OSError as exc:
         return _lock_error(slug, exc)
 

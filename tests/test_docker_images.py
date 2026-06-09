@@ -142,6 +142,66 @@ class EnsureChainSkipsExistingTest(unittest.TestCase):
         self.assertIn("failed to build claude-man:node", res.detail)
 
 
+class ImageClaudeVersionTest(unittest.TestCase):
+    """Reading the baked claude-man.claude-version label off an image."""
+
+    def test_none_without_docker(self) -> None:
+        with mock.patch.object(images.shutil, "which", return_value=None):
+            self.assertIsNone(images.image_claude_version("base"))
+
+    def test_parses_label(self) -> None:
+        cp = SimpleNamespace(returncode=0, stdout="2.1.169\n", stderr="")
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images.subprocess, "run", return_value=cp):
+            self.assertEqual(images.image_claude_version("node"), "2.1.169")
+
+    def test_missing_label_no_value(self) -> None:
+        # Go's `index` prints "<no value>" for a missing key -> treated as unknown.
+        cp = SimpleNamespace(returncode=0, stdout="<no value>\n", stderr="")
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images.subprocess, "run", return_value=cp):
+            self.assertIsNone(images.image_claude_version("base"))
+
+    def test_missing_image_nonzero(self) -> None:
+        cp = SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images.subprocess, "run", return_value=cp):
+            self.assertIsNone(images.image_claude_version("base"))
+
+
+class RebuildChainTest(unittest.TestCase):
+    """rebuild_chain force-rebuilds the WHOLE chain (unlike ensure_chain) at the target version."""
+
+    def test_force_rebuilds_present_images_base_first(self) -> None:
+        calls: list[tuple[str, str]] = []
+        # image_exists would say True for both, but rebuild_chain must NOT consult it — it rebuilds
+        # regardless, base before overlay, pinned to the target version.
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images, "build_one",
+                               side_effect=lambda ov, *, claude_version, **_:
+                                   calls.append((ov, claude_version)) or 0):
+            res = images.rebuild_chain("node", claude_version="2.1.169")
+        self.assertTrue(res.ok)
+        self.assertEqual(calls, [("base", "2.1.169"), ("node", "2.1.169")])
+        self.assertEqual(res.built, ["base", "node"])
+        self.assertIn("2.1.169", res.detail)
+
+    def test_failure_aborts_and_reports(self) -> None:
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images, "build_one",
+                               side_effect=lambda ov, **_: 0 if ov == "base" else 2):
+            res = images.rebuild_chain("python", claude_version="2.1.169")
+        self.assertFalse(res.ok)
+        self.assertEqual(res.built, ["base"])  # base succeeded, overlay failed
+        self.assertIn("failed to rebuild claude-man:python", res.detail)
+
+    def test_no_docker(self) -> None:
+        with mock.patch.object(images.shutil, "which", return_value=None):
+            res = images.rebuild_chain("base", claude_version="2.1.169")
+        self.assertFalse(res.ok)
+        self.assertIn("docker not found", res.detail)
+
+
 class CliImageBuildTest(unittest.TestCase):
     """cmd_image_build orchestration: force the requested image, auto-build base for an overlay."""
 

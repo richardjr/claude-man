@@ -19,6 +19,11 @@ REPOS = f"{config.LABEL_PREFIX}.repos"
 VERSION = f"{config.LABEL_PREFIX}.version"
 CREATED = f"{config.LABEL_PREFIX}.created"
 
+# IMAGE (not container) label: the claude version baked at build time (set by images/base/Dockerfile;
+# overlays inherit it from their base). Distinct from VERSION above, which is STAMPED on a container at
+# create time. Read off `docker image inspect` to decide the on-start update (images.image_claude_version).
+IMAGE_VERSION = f"{config.LABEL_PREFIX}.claude-version"
+
 # Filter that selects every claude-man container regardless of slug.
 SELECTOR = f"label={SLUG}"
 

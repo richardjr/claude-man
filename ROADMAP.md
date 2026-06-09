@@ -37,16 +37,38 @@ subscription usage bars** — `usage_api.py` reads `GET /api/oauth/usage` (5-hou
 `Week` columns, `u` refreshes) + `profile limits` CLI (see Phase 2). **In-container git identity + gh**
 — `gitconfig.py` injects the operator's git author identity via `GIT_CONFIG_*` env (no writable file
 needed under `--read-only`); the base image ships pinned `gh 2.93.0`; git/gh config redirected onto the
-writable `.cache` tmpfs (see Phases 0.5 + 1). 193 dependency-free
+writable `.cache` tmpfs (see Phases 0.5 + 1). **On-start claude-version update** — `updates.py` reads
+the tracked channel's latest version (token-less GET of `downloads.claude.ai/claude-code-releases/
+<channel>`, the same endpoint the native installer uses) and, before `up`, compares it to the image's
+baked `claude-man.claude-version` label; when a newer claude exists it offers (default: **prompt**) a
+host-side image rebuild + container recreate — `claude update` can't run in the read-only container, so
+the binary is bumped by rebuilding the image (invariant 2 byte-identical). Channel/pin/toggle via
+`config image` (default `latest`, check on) + a per-project `claude_version` pin; the check fails OPEN
+(offline -> start on the existing image). **Published ports** — a dedicated `[[project.ports]]` config
+(`schema.PortMapping`) + `project ports add/rm/list` CLI + a TUI manager (Project menu -> Ports), so a
+service running INSIDE a container (dev server / test endpoint) is reachable. Rendered additively as
+`-p <bind>:<host>:<container>/<proto>` (`runner._render_ports` — never a `_HARDENING` flag, floor
+byte-identical, unit-pinned); container port enforced ≥1024 (`--cap-drop ALL` drops NET_BIND_SERVICE),
+default bind 127.0.0.1 (host-only) with per-port `0.0.0.0` opt-in. Ingress — orthogonal to the egress
+firewall (invariant 3); fixed at create (recreate to apply). **Baked neovim** — the base image ships
+neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeScript + Markdown +
+git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
+LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
+network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
+Commits from fugitive/gitsigns carry the injected git identity. 341 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
-`.cache`/`gh`/git probes).
+`.cache`/`gh`/git + nvim probes).
 
 **You can today:** mint work/home profiles, create projects on either account, start/stop/shell/run
 claude in hardened containers, switch a project's account, watch per-account token usage **and live
 5-hour/weekly subscription-limit bars**, add / remove / inspect a project's checked-out repos with live
 git state, mount ssh (agent-forward) + host files into a container (`project env` + `project resync`),
-and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity — all
-from both the CLI and the TUI.
+and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity, and
+**keep claude up to date** — on start, claude-man checks the tracked channel and offers to rebuild a
+project's image to the newer claude (host-side; `claude update` can't run in the read-only container),
+and **publish container service ports** (`project ports` / Project menu -> Ports) so a dev server or
+test endpoint inside a container is reachable on the host, and **edit/commit in a baked neovim**
+(TypeScript + Markdown LSP, treesitter, git-from-nvim) — all from both the CLI and the TUI.
 
 **Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
 table to an async `docker ps`/`docker events` worker (TUI-2); the one-claude-per-container guard
@@ -70,6 +92,9 @@ features on existing setups:
 - **`gh`:** the pinned `gh 2.93.0` is baked into the base image, so it needs an **image rebuild** —
   `claudemanctl image build base` then `image build node` (or the relevant overlay) + a
   `project recreate <slug>`. `gh auth` stays the operator's job (no token is injected).
+- **neovim:** baked into the base image, so it needs an **image rebuild** (`image build base` +
+  `image build <overlay>`) + a `project recreate <slug>`. It does NOT bump the claude version, so the
+  on-start update check won't prompt for it — rebuild + recreate explicitly.
 
 ## Phase 0 — Repo scaffold + image
 **Goal:** a buildable repo and a smoke-tested hardened image, no app logic yet.
