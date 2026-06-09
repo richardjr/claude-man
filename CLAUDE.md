@@ -46,8 +46,11 @@ These are security- and correctness-critical. Every change must preserve them.
    `known_hosts`/`config`; keys never enter — the host agent socket is forwarded). The
    `/home/agent/.cache` tmpfs **must be pinned agent-owned** (`uid=1000,gid=1000,mode=0700` in
    `_HARDENING`): a bare tmpfs defaults to `root:root` mode 755 and the agent (uid 1000) can't write
-   it, so node/corepack (`mkdir ~/.cache/node`), claude's `XDG_STATE_HOME` (`~/.cache/state`), and the
-   git/gh config redirects (below) all fail `EACCES`. Pinning the owner is *not* a floor relaxation —
+   it, so node/corepack (`mkdir ~/.cache/node`), claude's `XDG_STATE_HOME` (`~/.cache/state`), the
+   git/gh config redirects (below), and the yarn home-config redirect (`~/.yarnrc` is symlinked onto
+   the `.cache` tmpfs in the image, for Yarn Classic v1's `saveHomeConfig` write) all fail `EACCES`.
+   (Yarn's package CACHE rides the disk-backed `/workspace` bind via `YARN_CACHE_FOLDER`, NOT the
+   size-capped tmpfs — a 256m cache OOM'd a large v1 install with ENOSPC.) Pinning the owner is *not* a floor relaxation —
    it makes a declared-writable surface actually writable, as this invariant intends (`/tmp` needs no
    pin: Docker special-cases it to sticky 1777). The image bakes a
    real `/etc/passwd` entry + `HOME` for uid 1000 (without it, `getpwuid` fails under `--read-only

@@ -52,13 +52,17 @@ _BAKED_ENV = {
     # `git config --global` and `gh` writes land somewhere writable instead of erroring on EROFS.
     "GIT_CONFIG_GLOBAL": config.CONTAINER_GITCONFIG,
     "GH_CONFIG_DIR": config.CONTAINER_GH_CONFIG,
-    # Yarn (Berry/corepack) writes its global folder under HOME (~/.yarn) by default — EROFS under the
-    # read-only rootfs. Point the (small) global folder at the writable .cache tmpfs, and force the
-    # package cache project-local so the bulk lands in /workspace/<repo>/.yarn/cache (the disk-backed,
-    # persistent workspace bind) rather than the ephemeral/size-capped tmpfs. Same redirect philosophy
-    # as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface, so the hardened floor is unchanged.
+    # Yarn caches/configs must land on a WRITABLE surface (the rootfs is read-only; the .cache tmpfs is
+    # size-capped). Berry: its small global folder -> the .cache tmpfs (YARN_GLOBAL_FOLDER), no shared
+    # global cache (YARN_ENABLE_GLOBAL_CACHE=false). The package CACHE (Berry AND Yarn Classic v1) ->
+    # the disk-backed, persistent /workspace bind via YARN_CACHE_FOLDER — a 256m tmpfs cache OOM'd a
+    # large install with ENOSPC. Yarn v1 ignores the two Berry vars but DOES honour YARN_CACHE_FOLDER;
+    # its ~/.yarnrc write (EROFS on the read-only rootfs) is handled by an image symlink onto the .cache
+    # tmpfs. Same redirect philosophy as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface (the
+    # cache rides the existing /workspace bind), so the hardened floor is unchanged.
     "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
     "YARN_ENABLE_GLOBAL_CACHE": "false",
+    "YARN_CACHE_FOLDER": config.CONTAINER_YARN_CACHE,
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }

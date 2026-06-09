@@ -59,10 +59,14 @@ class HardenedArgvTest(unittest.TestCase):
         joined = " ".join(self.argv)
         self.assertIn("GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig", joined)
         self.assertIn("GH_CONFIG_DIR=/home/agent/.cache/gh", joined)
-        # Yarn (Berry) writes ~/.yarn by default — EROFS under --read-only; redirect to the writable
-        # .cache tmpfs (small global folder) + force the package cache project-local (not the tmpfs).
+        # Yarn (Berry) writes ~/.yarn by default — EROFS under --read-only; redirect the small global
+        # folder to the writable .cache tmpfs.
         self.assertIn("YARN_GLOBAL_FOLDER=/home/agent/.cache/yarn", joined)
         self.assertIn("YARN_ENABLE_GLOBAL_CACHE=false", joined)
+        # The package cache (Berry + Yarn Classic v1) -> the disk-backed /workspace bind, not the
+        # size-capped .cache tmpfs (a v1 install OOM'd the 256m tmpfs with ENOSPC). v1 ignores the two
+        # Berry vars above but honours YARN_CACHE_FOLDER.
+        self.assertIn("YARN_CACHE_FOLDER=/workspace/.yarn-cache", joined)
 
     def test_git_identity_env_rendered_as_values(self) -> None:
         argv = runner.build_create_argv(

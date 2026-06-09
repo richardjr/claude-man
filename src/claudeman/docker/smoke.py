@@ -74,6 +74,12 @@ def _base_probes() -> list[Probe]:
         Probe("git config --global writable",
               ["sh", "-lc", "git config --global user.email smoke@example.com && echo ok"],
               required=True, expect="ok"),
+        # Yarn Classic (v1) writes ~/.yarnrc; the image symlinks it onto the writable .cache tmpfs so
+        # that write doesn't EROFS the read-only rootfs (the bug that broke `yarn install` for a v1
+        # project). This exercises the symlink as uid 1000 under --read-only.
+        Probe("yarnrc redirect writable",
+              ["sh", "-lc", "echo '# smoke' > ~/.yarnrc && echo ok"],
+              required=True, expect="ok"),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]

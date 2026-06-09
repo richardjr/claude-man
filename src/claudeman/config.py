@@ -57,8 +57,15 @@ CONTAINER_GITCONFIG = CONTAINER_CACHE + "/gitconfig"   # GIT_CONFIG_GLOBAL
 CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
 # Yarn (Berry/corepack) defaults its global folder to ~/.yarn — EROFS under the read-only rootfs
 # (the `mkdir /home/agent/.yarn` failure). Redirect the small global folder (metadata/telemetry) to
-# the writable .cache tmpfs; the bulk package cache is forced project-local (see _BAKED_ENV).
-CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER
+# the writable .cache tmpfs; the bulk package cache goes to the disk-backed workspace bind via
+# CONTAINER_YARN_CACHE below (was project-local; now a shared disk cache Yarn Classic v1 honours too).
+CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER (Berry)
+# Yarn Classic (v1) IGNORES the Berry vars above and uses its own defaults: it caches to ~/.cache/yarn
+# (the 256m .cache tmpfs -> ENOSPC on a large install) and writes ~/.yarnrc (read-only rootfs -> EROFS).
+# Point its cache at the disk-backed /workspace bind (hundreds of GB, persistent); the image symlinks
+# ~/.yarnrc onto the writable .cache tmpfs (see images/base/Dockerfile). Berry honours YARN_CACHE_FOLDER
+# too, so both yarns share this one disk-backed cache (still on the persistent workspace bind).
+CONTAINER_YARN_CACHE = CONTAINER_WORKSPACE + "/.yarn-cache"   # YARN_CACHE_FOLDER (Yarn v1 + Berry)
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).

@@ -63,6 +63,15 @@ RUN set -eux; \
     case "${ver}" in "${CLAUDE_VERSION}"*) : ;; \
         *) echo "FATAL: resolved claude ${ver} != pinned ${CLAUDE_VERSION}" >&2; exit 1 ;; esac
 
+# Yarn Classic (v1) writes its home config to ~/.yarnrc, which is on the read-only rootfs at runtime
+# (EROFS — e.g. its post-install update-check `saveHomeConfig`, or `yarn config set`). Symlink it onto
+# the writable .cache tmpfs so those writes land somewhere writable. Berry uses .yarnrc.yml, unaffected.
+# The target is created on first write at runtime; a dangling symlink at build is fine. (The package
+# CACHE is redirected to the disk-backed /workspace bind via YARN_CACHE_FOLDER below — see runner.py.)
+RUN set -eux; \
+    ln -s /home/agent/.cache/yarnrc /home/agent/.yarnrc; \
+    chown -h agent:agent /home/agent/.yarnrc
+
 # Baked environment (also set explicitly at run time by docker/runner.py).
 # XDG_STATE_HOME points at the writable .cache tmpfs so claude's version-lock dir
 # (state/claude/locks) doesn't land on the read-only rootfs (review IMG-2). Non-persistent
@@ -75,6 +84,7 @@ ENV HOME=/home/agent \
     GH_CONFIG_DIR=/home/agent/.cache/gh \
     YARN_GLOBAL_FOLDER=/home/agent/.cache/yarn \
     YARN_ENABLE_GLOBAL_CACHE=false \
+    YARN_CACHE_FOLDER=/workspace/.yarn-cache \
     PATH=/home/agent/.local/bin:$PATH \
     USE_BUILTIN_RIPGREP=0 \
     DISABLE_AUTOUPDATER=1
