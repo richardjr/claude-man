@@ -71,6 +71,7 @@ class ClaudeManApp(App):
         Binding("v", "view_menu", "View…"),
         Binding("enter", "open_shell", "Shell"),
         Binding("c", "open_claude", "Claude"),
+        Binding("b", "browse", "Browse"),
         Binding("s", "toggle_running", "Start/Stop"),
         Binding("y", "sync_review", "Sync-back"),
         Binding("comma", "settings", "Settings", key_display=","),
@@ -389,6 +390,27 @@ class ClaudeManApp(App):
 
     def action_open_claude(self) -> None:
         self._open_terminal("claude")
+
+    def action_browse(self) -> None:
+        """Open the project's workspace mount (the host-side `/workspace` bind dir) in the system file
+        manager. Works regardless of container state — the workspace is a host dir that exists once the
+        project is created (pre-made here if absent; it's operator-owned, which the create flow expects)."""
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]browse: select a defined project (orphan rows aren't managed)[/]")
+            return
+        ws = config.workspace_dir(slug)
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._log(f"[red]browse: cannot access {ws}: {exc}[/]")
+            return
+        try:
+            terminals.spawn_path(str(ws))
+        except (RuntimeError, OSError) as exc:
+            self._log(f"[red]browse failed: {exc}[/]")
+            return
+        self._log(f"[green]browsing[/] {ws}")
 
     def _open_terminal(self, program: str) -> None:
         """Open a detached terminal running ``program`` (bash/claude) in the cursor's project.

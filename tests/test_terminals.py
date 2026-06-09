@@ -31,5 +31,25 @@ class TerminalWorkdirTest(unittest.TestCase):
         self.assertIn("-w /workspace/api", " ".join(argv))
 
 
+class OpenPathArgvTest(unittest.TestCase):
+    """`build_open_path_argv` — the system file-manager 'open this dir' launcher (browse action)."""
+
+    def test_prefers_xdg_open(self) -> None:
+        from unittest import mock
+        with mock.patch.object(terminals.shutil, "which", lambda b: "/usr/bin/" + b if b == "xdg-open" else None):
+            self.assertEqual(terminals.build_open_path_argv("/some/ws"), ["xdg-open", "/some/ws"])
+
+    def test_falls_back_to_gio(self) -> None:
+        from unittest import mock
+        with mock.patch.object(terminals.shutil, "which", lambda b: "/usr/bin/gio" if b == "gio" else None):
+            self.assertEqual(terminals.build_open_path_argv("/some/ws"), ["gio", "open", "/some/ws"])
+
+    def test_raises_when_no_opener(self) -> None:
+        from unittest import mock
+        with mock.patch.object(terminals.shutil, "which", lambda _b: None):
+            with self.assertRaises(RuntimeError):
+                terminals.build_open_path_argv("/some/ws")
+
+
 if __name__ == "__main__":
     unittest.main()

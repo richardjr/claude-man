@@ -1,4 +1,5 @@
-"""Spawn a detached terminal window running a command inside a project's container.
+"""Spawn detached desktop windows for a project: a terminal running a command inside the container,
+or the system file manager on the project's host-side workspace mount.
 
 A SEPARATE OS window (not Textual ``suspend()``), launched detached via
 ``Popen(..., start_new_session=True)`` so it outlives the TUI and never writes into the
@@ -7,7 +8,8 @@ TUI's tty. ``ghostty`` is preferred, ``alacritty`` is the fallback. ``--class`` 
 windows (e.g. ``windowrulev2 = float, class:^(claude-man-.*)$``).
 
 ``build_*_argv`` are pure (no process spawn) so they can be unit-tested. ``claude``/shell open in the
-project's ``launch_workdir`` (a lone repo's dir by default) via ``docker exec -w``.
+project's ``launch_workdir`` (a lone repo's dir by default) via ``docker exec -w``. ``spawn_path`` opens
+a HOST directory (the workspace bind source) in the system file manager via ``xdg-open`` / ``gio open``.
 """
 
 from __future__ import annotations
@@ -98,3 +100,32 @@ def spawn_shell(slug: str) -> subprocess.Popen:
 
 def spawn_claude(slug: str) -> subprocess.Popen:
     return spawn(slug, "claude", workdir=launch_workdir(slug))
+
+
+# ---------------------------------------------------------------------------
+# System file manager — open a HOST directory (the workspace bind source) in the desktop file manager.
+# ---------------------------------------------------------------------------
+def _pick_opener() -> list[str] | None:
+    """The system 'open this path' launcher: ``xdg-open`` (freedesktop default), else ``gio open``."""
+    for argv in (["xdg-open"], ["gio", "open"]):
+        if shutil.which(argv[0]):
+            return argv
+    return None
+
+
+def build_open_path_argv(path: str) -> list[str]:
+    """Pure: argv to open ``path`` in the system file manager. Raises if no opener is on PATH."""
+    opener = _pick_opener()
+    if opener is None:
+        raise RuntimeError("no file-manager opener found (need xdg-open or gio on PATH)")
+    return [*opener, path]
+
+
+def spawn_path(path: str) -> subprocess.Popen:
+    """Open ``path`` (a host directory) in the system file manager, detached (mirrors ``spawn``)."""
+    return subprocess.Popen(
+        build_open_path_argv(path),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
