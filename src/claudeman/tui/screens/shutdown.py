@@ -1,9 +1,11 @@
-"""Shutdown progress modal — shown while quitting stops + syncs every running container.
+"""Stop-all progress modal — shown while the ``S`` (stop-all) command stops + syncs every running
+container, then either stays in the app or quits.
 
-Replaces the "frozen-looking main screen" the operator saw while the off-thread stop-all worker ran:
-an animated ``LoadingIndicator`` plus a live status line the app updates per container, then the app
-exits. No bindings — it's a terminal state (the bounded ``docker stop -t`` + subprocess timeout in
-``runner.stop`` guarantee it can't hang forever).
+An animated ``LoadingIndicator`` plus a live status line the app updates per container, instead of a
+"frozen-looking main screen" while the off-thread stop-all worker runs. No bindings — it's a transient
+progress state (the bounded ``docker stop -t`` + subprocess timeout in ``runner.stop`` guarantee it
+can't hang forever; quitting via ``q`` never reaches here — that exits immediately and leaves
+containers running).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from textual.widgets import Label, LoadingIndicator
 
 
 class ShutdownScreen(ModalScreen[None]):
-    """A spinner + live status while the quit worker stops + syncs each running container."""
+    """A spinner + live status while the stop-all worker stops + syncs each running container."""
 
     CSS = """
     ShutdownScreen { align: center middle; }

@@ -34,8 +34,8 @@ from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
-from .screens.quit_confirm import QuitConfirmScreen
 from .screens.shutdown import ShutdownScreen
+from .screens.stop_all_confirm import StopAllConfirmScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
 from .screens.update_confirm import UpdateConfirmScreen
@@ -73,6 +73,7 @@ class ClaudeManApp(App):
         Binding("c", "open_claude", "Claude"),
         Binding("b", "browse", "Browse"),
         Binding("s", "toggle_running", "Start/Stop"),
+        Binding("S", "stop_all", "Stop all", key_display="S"),
         Binding("y", "sync_review", "Sync-back"),
         Binding("comma", "settings", "Settings", key_display=","),
         Binding("q", "quit", "Quit"),
@@ -118,10 +119,10 @@ class ClaudeManApp(App):
         self._busy_verbs: dict[str, str] = {}
         self._spin = 0  # header spinner frame index (animated by _tick_spinner while anything is busy)
         self._last_rows: list[status.Row] = []  # last polled join; _running_slugs reads this (no docker ps)
-        # True once a quit flow is active (confirm modal open, or stop-all-then-exit worker running),
-        # so a second `q` doesn't stack another confirm or a second stop-all pass.
-        self._quitting = False
-        self._shutdown_screen: ShutdownScreen | None = None  # the shutdown progress modal, while quitting
+        # True once a stop-all pass is active (confirm modal open, or the stop-all worker running), so a
+        # second `S` doesn't stack another confirm or a second concurrent stop-all pass.
+        self._stopping_all = False
+        self._shutdown_screen: ShutdownScreen | None = None  # the stop-all progress modal, while running
         # slug -> last git-state scan summary (UI-thread only). Host-FS state on a deliberate refresh
         # cadence — distinct from container liveness (never cached); see refresh_gitstate.
         self._gitstate: dict[str, gitstate.ProjectGitSummary] = {}
@@ -476,64 +477,83 @@ class ClaudeManApp(App):
         if res.ok:
             self._spawn_terminal(slug, program)  # container is up now — exec in
 
-    # -- quit (stop + sync-out all on close) ------------------------------
+    # -- quit / stop-all --------------------------------------------------
     def action_quit(self) -> None:
-        """Override the default quit: if containers are running, confirm before stopping them all.
+        """Quit immediately, leaving any running containers up (they persist — a later `up` reattaches).
 
-        Stopping each container runs its asset sync-out (the per-project asset-sync model), so a clean
-        close persists CLAUDE.md + skills/agents back to the synced config tier. With nothing running,
-        quit immediately."""
-        if self._quitting:
-            return  # a quit flow is already active — ignore a second `q`
-        running = self._running_slugs()
-        if not running:
-            self.exit()
-            return
-        self._quitting = True
-        # Feedback in the log too (in case the modal is missed): the confirm is keyboard-first.
-        self._log(f"quit: {len(running)} container(s) running — "
-                  f"[b]Enter[/]/[b]s[/] stop+sync · [b]l[/] leave running · [b]esc[/] cancel")
-        self.push_screen(QuitConfirmScreen(running), self._on_quit_confirm)
+        Quitting never stops containers or syncs assets: that used to block the close behind a serial,
+        unabortable `docker stop` of every container, which made `q` feel like it locked the app. The
+        end-of-day "stop + sync everything" is now the separate `S` (stop-all) command."""
+        self.exit()
 
     def _running_slugs(self) -> list[str]:
         """UP rows NOT mid-lifecycle — a `_busy` slug (create/recreate in flight) must not be stopped
         out from under its worker (mirrors action_toggle_running's busy guard).
 
-        Reads the CACHED rows from the 2 s poll, not a fresh ``docker ps`` — so ``action_quit`` (a UI-
-        thread handler) never blocks on a subprocess while deciding whether to confirm."""
+        Reads the CACHED rows from the 2 s poll, not a fresh ``docker ps`` — so ``action_stop_all`` (a
+        UI-thread handler) never blocks on a subprocess while deciding what to stop."""
         return [r.slug for r in self._last_rows if r.kind == status.UP and r.slug not in self._busy]
 
-    def _on_quit_confirm(self, choice) -> None:
-        if not choice:                       # cancelled (Escape / Cancel)
-            self._quitting = False           # allow quitting again later
+    def action_stop_all(self) -> None:
+        """End-of-day command: stop + sync-out every running container, then optionally quit. Confirms
+        first (it closes detached claude/shell windows), then runs off-thread behind a progress modal."""
+        if self._stopping_all:
+            return  # a stop-all pass is already active — ignore a second `S`
+        running = self._running_slugs()
+        if not running:
+            self._log("stop-all: no running containers")
             return
-        if choice == "leave":
-            self._quitting = False           # defensive: reset before exit in case exit is deferred
-            self.exit()                      # leave containers running — no stop, no sync-out
+        self.push_screen(StopAllConfirmScreen(running), self._on_stop_all_confirm)
+
+    def _on_stop_all_confirm(self, choice) -> None:
+        if not choice:  # cancelled (Escape / Cancel)
             return
-        # "stop_all": stop each off-thread (docker stop + a shutil sync-out would freeze the UI
-        # thread), then exit. Re-snapshot — the modal sat open, so liveness/busy may have moved.
+        then_exit = choice == "stop_quit"
+        # Re-snapshot — the modal sat open, so liveness/busy may have moved.
         slugs = self._running_slugs()
         if not slugs:
-            self._quitting = False
-            self.exit()
+            if then_exit:
+                self.exit()
+            else:
+                self._log("stop-all: nothing left running")
             return
-        # Show a spinner + live status (the old behaviour dropped to a frozen-looking main screen).
+        self._stopping_all = True
+        # Spinner + live status off-thread (docker stop + a shutil sync-out would freeze the UI thread).
         self._shutdown_screen = ShutdownScreen(len(slugs))
         self.push_screen(self._shutdown_screen)
-        self._stop_all_then_exit_worker(slugs)
+        self._stop_all_worker(slugs, then_exit=then_exit)
 
-    @work(thread=True, group="quit")
-    def _stop_all_then_exit_worker(self, slugs: list[str]) -> None:
+    @work(thread=True, group="stop_all")
+    def _stop_all_worker(self, slugs: list[str], *, then_exit: bool) -> None:
         total = len(slugs)
-        for i, slug in enumerate(slugs, 1):
-            self.call_from_thread(self._set_shutdown_status, f"stopping {slug}  ({i}/{total}) …")
+        # `finally` so the terminal step (exit, or drop-the-modal + clear `_stopping_all`) always runs
+        # even if a mid-loop `call_from_thread` raises — otherwise the stay path could wedge the modal
+        # up with `_stopping_all` stuck True, leaving `S` permanently dead.
+        try:
+            for i, slug in enumerate(slugs, 1):
+                self.call_from_thread(self._set_shutdown_status, f"stopping {slug}  ({i}/{total}) …")
+                try:
+                    res = lifecycle.stop(slug, on_progress=self._thread_log)
+                except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+                    res = lifecycle.Result(False, f"stop failed for {slug!r}: {exc!r}")
+                self.call_from_thread(self._log, f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
+        finally:
+            if then_exit:
+                self.call_from_thread(self.exit)
+            else:
+                self.call_from_thread(self._after_stop_all, total)
+
+    def _after_stop_all(self, total: int) -> None:
+        """Stop-all finished and we're staying in the app: drop the progress modal, refresh, log."""
+        if self._shutdown_screen is not None:
             try:
-                res = lifecycle.stop(slug, on_progress=self._thread_log)
-            except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
-                res = lifecycle.Result(False, f"stop failed for {slug!r}: {exc!r}")
-            self.call_from_thread(self._log, f"[{'green' if res.ok else 'red'}]{res.detail}[/]")
-        self.call_from_thread(self.exit)
+                self._shutdown_screen.dismiss()
+            except Exception:  # noqa: BLE001 - the screen may already be gone
+                pass
+            self._shutdown_screen = None
+        self._stopping_all = False
+        self.refresh_projects()
+        self._log(f"[green]stop-all: {total} container(s) stopped + assets synced out[/]")
 
     def _set_shutdown_status(self, text: str) -> None:
         if self._shutdown_screen is not None:

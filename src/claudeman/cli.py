@@ -316,6 +316,22 @@ def cmd_project_stop(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_project_stop_all(args) -> int:
+    """Stop + sync-out every running container (the end-of-day batch). Best-effort: one failure
+    doesn't abort the rest."""
+    from . import lifecycle
+
+    results = lifecycle.stop_all(on_each=lambda slug, res: print(
+        res.detail, file=sys.stderr if not res.ok else sys.stdout))
+    if not results:
+        print("no running containers", file=sys.stderr)
+        return 0
+    failed = sum(1 for _, res in results if not res.ok)
+    print(f"stop-all: {len(results) - failed}/{len(results)} container(s) stopped + synced",
+          file=sys.stderr if failed else sys.stdout)
+    return 0 if failed == 0 else 1
+
+
 def cmd_project_recreate(args) -> int:
     from . import lifecycle
 
@@ -856,6 +872,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug")
         sp.set_defaults(func=func)
+    proj.add_parser(
+        "stop-all", help="stop + sync-out every running container (end-of-day batch)"
+    ).set_defaults(func=cmd_project_stop_all)
     pdel = proj.add_parser("delete", help="tear down (container + state + registry; idempotent)")
     pdel.add_argument("slug")
     pdel.add_argument("--keep-workspace", action="store_true", dest="keep_workspace",

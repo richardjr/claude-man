@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from . import assets, config, env_secrets, gh_token, gitconfig, ssh_agent, updates
 from .checkout import gitstate, repos
-from .docker import images, runner
+from .docker import images, runner, status
 from .profiles import seed as seed_mod
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
@@ -356,6 +356,31 @@ def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
     sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
     return Result(True, f"stopped {config.container_name(slug)}{sync_note}")
+
+
+def stop_all(
+    *, on_progress: ProgressFn | None = None,
+    on_each: Callable[[str, Result], None] | None = None,
+) -> list[tuple[str, Result]]:
+    """Stop + sync-out every RUNNING claude-man container (the end-of-day batch). Best-effort: a
+    single failure never aborts the batch. Running set is read fresh from ``docker ps`` (the registry
+    is the project source of truth, but liveness is never cached — invariant 4); this is "stop
+    everything claude-man", so orphan containers (no registry entry) are stopped too — their inner
+    ``_sync_out`` no-ops. ``on_each(slug, res)`` fires after each stop (for streaming progress).
+    Returns ``[(slug, Result), …]`` in stop order."""
+    running = sorted(
+        slug for slug, cs in status.query_containers().items() if cs.state == "running"
+    )
+    results: list[tuple[str, Result]] = []
+    for slug in running:
+        try:
+            res = stop(slug, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 - one bad container must not abort the batch
+            res = Result(False, f"stop failed for {slug!r}: {exc!r}")
+        results.append((slug, res))
+        if on_each:
+            on_each(slug, res)
+    return results
 
 
 def _sync_in(project: Project, *, on_progress: ProgressFn | None) -> str:
