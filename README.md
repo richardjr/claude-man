@@ -107,6 +107,11 @@ uv run claudemanctl project shell demo             # open a shell inside (or `pr
 uv run claudemanctl profile usage                  # per-account token usage
 ```
 
+Prefer the TUI? [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) is the detailed walkthrough of
+building the same environment from `uv run claudeman` — minting a profile, creating a
+project, adding repos, git identity + GitHub CLI setup, and ssh-agent pass-through, with
+every keybinding and screen.
+
 ## Setting up accounts (profiles)
 
 A **profile** is one Claude account identity, minted once on the host with `claude setup-token`
@@ -296,10 +301,11 @@ uv run claudemanctl image build base --dry-run        # print the docker build a
 uv run claudemanctl image smoke base                  # gate an image against the hardened run profile
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) for the invariants any contributor (human or Claude) must keep,
-[`ROADMAP.md`](ROADMAP.md) for the phase plan, [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-for the full design, and [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and
-hardening rationale.
+See [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) for the TUI walkthrough (profile → project →
+GitHub → ssh), [`CLAUDE.md`](CLAUDE.md) for the invariants any contributor (human or Claude)
+must keep, [`ROADMAP.md`](ROADMAP.md) for the phase plan,
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
+[`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and hardening rationale.
 
 ## Host requirements
 
