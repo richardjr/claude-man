@@ -691,6 +691,7 @@ def cmd_config_show(args) -> int:
           f"on-start update check {'on' if s.image_update_check else 'off'}")
     print(f"terminal: {_terminal_summary(s)}")
     print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
+    print(f"tui splash: {'on' if s.ui_splash else 'off'}")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -823,6 +824,17 @@ def cmd_config_opener(args) -> int:
     s = settings_registry.load()
     print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
     print("set with `config opener --command 'nautilus'`, or `--auto` for the platform default")
+    return 0
+
+
+def cmd_config_splash(args) -> int:
+    from .registry import settings as settings_registry
+
+    if args.state is None:
+        print(f"tui splash: {'on' if settings_registry.load().ui_splash else 'off'}")
+        return 0
+    s = settings_registry.set_splash(args.state == "on")
+    print(f"tui splash: {'on' if s.ui_splash else 'off'}")
     return 0
 
 
@@ -1101,6 +1113,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="opener argv, e.g. 'nautilus' or 'gio open' (the path is appended)")
     cop.add_argument("--auto", action="store_true", help="clear (use the platform default)")
     cop.set_defaults(func=cmd_config_opener)
+    csp = cfg.add_parser("splash", help="the TUI boot splash (any key skips it)")
+    csp.add_argument("state", nargs="?", choices=("on", "off"))
+    csp.set_defaults(func=cmd_config_splash)
     cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
     cg.add_argument("--name", help="set git user.name (overrides host inherit)")
     cg.add_argument("--email", help="set git user.email")

@@ -43,6 +43,7 @@ def _parse(data: dict) -> Settings:
         channel = config.DEFAULT_CLAUDE_CHANNEL
     terminal = data.get("terminal", {}) or {}
     opener = data.get("opener", {}) or {}
+    ui = data.get("ui", {}) or {}
     program = str(terminal.get("program", "") or "")
     command = _argv_list(terminal, "command", "terminal.command")
     # Same coercion philosophy as the channel: a hand-edited custom template missing its '{argv}'
@@ -60,6 +61,7 @@ def _parse(data: dict) -> Settings:
         terminal_program=program,
         terminal_command=command,
         opener_command=_argv_list(opener, "command", "opener.command"),
+        ui_splash=bool(ui.get("splash", True)),
     )
 
 
@@ -100,6 +102,9 @@ def save(settings: Settings) -> Path:
     opener = tomlkit.table()
     opener["command"] = list(settings.opener_command)
     doc["opener"] = opener
+    ui = tomlkit.table()
+    ui["splash"] = bool(settings.ui_splash)
+    doc["ui"] = ui
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +165,13 @@ def set_terminal(*, program: str | None = None,
 def set_opener(command: list[str] | tuple[str, ...]) -> Settings:
     """Set (or clear, with ``[]``) the custom file-manager opener argv used by Browse."""
     updated = dataclasses.replace(load(), opener_command=tuple(command))
+    save(updated)
+    return updated
+
+
+def set_splash(enabled: bool) -> Settings:
+    """Enable/disable the TUI boot splash."""
+    updated = dataclasses.replace(load(), ui_splash=bool(enabled))
     save(updated)
     return updated
 

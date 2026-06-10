@@ -282,6 +282,10 @@ Auto-detection prefers `ghostty` → `alacritty` → the rest, so existing setup
 In the TUI, Settings (`,`) → `e` opens the picker. The preference lives in
 `~/.config/claude-man/config.toml` under `[terminal]` / `[opener]`.
 
+The TUI also opens with a short **boot splash** (the logo sweeps in, then scrolls up to reveal
+the live table — about a second, any key skips it). Turn it off with
+`claudemanctl config splash off` (`[ui] splash = false`).
+
 ## Building images
 
 ```bash

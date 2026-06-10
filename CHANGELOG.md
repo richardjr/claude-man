@@ -6,6 +6,9 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **TUI boot splash**: a terracotta block-letter logo with a reveal + highlight sweep that
+  scrolls up to reveal the live projects table (~1s, any key skips). Disable with
+  `config splash off`. Frame generation is pure and unit-tested (`tui/splash.py`).
 - **Open-source release hygiene**: MIT `LICENSE`, root `SECURITY.md` (private disclosure policy),
   `CONTRIBUTING.md`, CI (unit tests + ruff on Linux/macOS × Python 3.11/3.12; gitleaks history
   scan), generic config templates.

@@ -465,6 +465,7 @@ class Settings:
     terminal_program: str = ""           # "" -> auto; a launcher name (`config terminal` lists); "custom"
     terminal_command: tuple[str, ...] = ()  # program="custom": argv template ({title}/{class}/"{argv}")
     opener_command: tuple[str, ...] = ()    # custom 'open this path' argv (path appended); () -> auto
+    ui_splash: bool = True               # show the TUI boot splash (any key skips; `config splash off`)
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:

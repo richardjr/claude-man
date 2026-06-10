@@ -38,7 +38,10 @@ from .screens.shutdown import ShutdownScreen
 from .screens.stop_all_confirm import StopAllConfirmScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
+from .screens.splash import SplashScreen
 from .screens.update_confirm import UpdateConfirmScreen
+from ..registry import settings as settings_registry
+from . import splash as splash_mod
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
@@ -150,6 +153,16 @@ class ClaudeManApp(App):
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
         self.set_interval(0.2, self._tick_spinner)  # animate the header spinner while any op is in flight
+        # Boot splash, pushed LAST: everything above is already scheduled, so the table fills
+        # underneath while the logo plays and the scroll-off reveals live data, not an empty shell.
+        # Skipped when disabled (`config splash off`) or the terminal can't fit the logo.
+        try:
+            show_splash = settings_registry.load().ui_splash
+        except Exception:  # noqa: BLE001 - a bad config must not block startup
+            show_splash = True
+        if show_splash and self.size.width > len(splash_mod.LOGO[0]) + 2 \
+                and self.size.height > len(splash_mod.LOGO) + 5:
+            self.push_screen(SplashScreen())
 
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
