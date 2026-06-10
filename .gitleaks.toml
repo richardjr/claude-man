@@ -1,0 +1,10 @@
+# gitleaks config — default rules plus an allowlist for the unit-test fixtures, which use
+# deliberately fake placeholder tokens (e.g. ghp_abc123, sk-ant-oat-xyz) to pin scrub/denylist
+# behaviour. Never put a REAL credential in a test: the allowlist is path-scoped, not magic.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''tests/.*''',
+]

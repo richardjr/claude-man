@@ -4,8 +4,8 @@
 
 [profile]
 name          = "work"
-display_name  = "Work (3ADAPT)"
-account_email = "richard@3adapt.example"   # used for the switch-time mismatch guard + TUI
+display_name  = "Work (Your Org)"
+account_email = "you@example.com"          # used for the switch-time mismatch guard + TUI
 default       = false                       # set true on the profile new projects inherit
 
 [profile.seed]

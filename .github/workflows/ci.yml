@@ -1,0 +1,35 @@
+# CI: unit tests (dependency-free by design — no docker/network/textual needed) across the
+# supported host platforms, plus lint and a TUI import smoke. The hardened-image gate
+# (`claudemanctl image smoke`) needs a docker daemon and stays a manual/operator step.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Pure-stdlib suite: the tests put src/ on sys.path themselves, so no install step.
+      - run: python -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check src tests
+      # The TUI must import cleanly with textual installed (the CLI/tests never need it).
+      - run: uv sync
+      - run: uv run python -c "import claudeman.tui.app, claudeman.cli"

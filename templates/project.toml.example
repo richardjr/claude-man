@@ -1,16 +1,16 @@
 # Project definition  ->  ~/.config/claude-man/projects/<slug>.toml
 # A project EXISTS iff this file exists. Durable, secret-free, git-versionable.
-# Copy to ~/.config/claude-man/projects/landarna.toml and edit.
+# Copy to ~/.config/claude-man/projects/my-project.toml and edit.
 
 [project]
-slug    = "landarna"
+slug    = "my-project"
 profile = "work"            # optional; omit to inherit the default profile
 overlay = "node"            # image variant: base | python | rust | node
 extra_apt = ["jq"]          # optional: thin per-project apt layer baked at create time
 # claude_version = "2.1.169"  # optional: pin this project's claude to an exact version (overrides the
 #                             # global channel/pin from `config image`). Omit to track the global setting.
-# env_file = "~/Work/landarna_environment_local"   # alternative to [project.env]
-# workdir = "landarna-backend"   # where claude/shell launch (docker exec -w). Omit to use a lone
+# env_file = "~/projects/my-project.env"   # alternative to [project.env]
+# workdir = "my-app-backend"     # where claude/shell launch (docker exec -w). Omit to use a lone
 #                                # repo's dir automatically; a multi-repo project defaults to /workspace.
 
 [project.egress]
@@ -24,14 +24,14 @@ NODE_ENV = "development"
 ENV      = "local"
 
 [[project.repos]]
-url    = "git@github.com:3ADAPT/landarna-backend.git"
+url    = "git@github.com:your-org/my-app-backend.git"
 branch = "main"
-dir    = "landarna-backend"     # relative path under workspace/ -> /workspace/landarna-backend
+dir    = "my-app-backend"       # relative path under workspace/ -> /workspace/my-app-backend
 
 [[project.repos]]
-url    = "git@github.com:3ADAPT/landarna-client.git"
+url    = "git@github.com:your-org/my-app-client.git"
 branch = "main"
-dir    = "landarna-client"
+dir    = "my-app-client"
 
 # Environment mounts -> host material made available INSIDE the container for the agent's own
 # runtime / git-over-ssh. PATHS ONLY (never a secret value). Mounts are fixed at container create,
@@ -53,7 +53,7 @@ dst  = "/home/agent/.netrc"       # absolute container path (a trailing "/" appe
 # /home/agent/.ssh, /home/agent/.local are reserved.)
 [[project.env_mount]]
 kind = "file"
-src  = "~/Work/CLAUDE.md"
+src  = "~/projects/CLAUDE.md"
 dst  = "/workspace/CLAUDE.md"
 
 # Published ports -> expose a service running INSIDE the container (a dev server / test endpoint) so

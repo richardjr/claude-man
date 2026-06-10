@@ -5,11 +5,28 @@ description = "A Textual TUI + CLI that provisions and manages hardened Docker c
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "richard" }]
+authors = [{ name = "Richard Reynolds", email = "xrouter@gmail.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "textual>=0.80",
     "tomlkit>=0.13",   # comment-preserving TOML writes; reads use stdlib tomllib
 ]
+
+[project.urls]
+Repository = "https://github.com/richardjr/claude-man"
+Issues = "https://github.com/richardjr/claude-man/issues"
+Documentation = "https://github.com/richardjr/claude-man/blob/main/docs/ARCHITECTURE.md"
 
 [project.optional-dependencies]
 dev = [

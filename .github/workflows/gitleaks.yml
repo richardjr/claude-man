@@ -1,0 +1,20 @@
+# Secret scan over the full history on every push/PR — a regression guard for the repo's
+# "nothing secret is ever committed" posture (see SECURITY.md). Test fixtures use obvious
+# placeholder tokens; .gitleaks.toml allowlists them by path.
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
