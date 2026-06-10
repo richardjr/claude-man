@@ -21,7 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      # Pure-stdlib suite: the tests put src/ on sys.path themselves, so no install step.
+      # The suite needs no docker/network/textual, but TOML *writes* go through tomlkit
+      # (reads are stdlib tomllib) — it's the one package to install. src/ goes on
+      # sys.path inside the tests themselves.
+      - run: pip install tomlkit
       - run: python -m unittest discover -s tests -v
 
   lint:

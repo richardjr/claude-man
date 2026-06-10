@@ -120,8 +120,9 @@ Runtime state lives **outside the repo** under `~/.config/claude-man` (definitio
 
 - **Python ≥ 3.11**, managed by **`uv`** (no pip/poetry). Read TOML with stdlib `tomllib`; write
   with `tomlkit` to preserve operator comments.
-- **Tests must stay dependency-free** (`python -m unittest`): pure-stdlib, no docker/network/textual
-  needed. Keep `textual` imports inside `tui/` so the CLI and tests import without it installed.
+- **Tests must stay dependency-free** (`python -m unittest`): stdlib + `tomlkit` (the TOML
+  writer) only — no docker/network/textual. Keep `textual` imports inside `tui/` so the CLI and
+  tests import without it installed.
 - **Shelling out to docker/git/claude** is done via `subprocess` with explicit argv lists (never
   `shell=True`). The hardened argv is rendered by one pure function (`docker/runner.py::build_create_argv`)
   so it can be unit-tested without a daemon.

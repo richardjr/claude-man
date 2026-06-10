@@ -35,7 +35,8 @@ uv run claudemanctl image smoke base   # the hardened-profile gate — run it af
 
 ## Conventions (enforced in review)
 
-- **Tests stay dependency-free**: pure stdlib `unittest`, no docker, no network, no `textual`.
+- **Tests stay dependency-free**: stdlib `unittest` (plus `tomlkit`, which the TOML-writing
+  paths use), no docker, no network, no `textual`.
   Tests isolate state via `CLAUDE_MAN_CONFIG_HOME` / `CLAUDE_MAN_STATE_HOME` tmpdirs and pin the
   host platform explicitly (mock `hostplatform` predicates) so the suite passes identically on the
   Linux and macOS CI legs.
