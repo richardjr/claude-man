@@ -60,9 +60,16 @@ These are security- and correctness-critical. Every change must preserve them.
    "make something work" — fix the writable-mount set or the image instead, and re-run
    `claudemanctl image smoke`.
 3. **The firewall lives at the network layer, never in-container iptables.** `--cap-drop ALL`
-   forbids `NET_ADMIN`, so strict egress is a squid+dnsmasq **sidecar** on an `internal: true`
-   network, not `iptables` inside the agent container. The base allowlist must always include
-   `claude.ai` (the OAuth subscription refresh path) or token refresh fails opaquely.
+   forbids `NET_ADMIN`, so strict egress is a squid **sidecar** (`network/egress.py`) on a
+   per-project `--internal` network (no gateway → no direct route out), with the agent attached to
+   that network only and `HTTP(S)_PROXY` pointing at the sidecar — not `iptables` inside the agent
+   container. The sidecar is also on the default bridge (its sole egress path); it enforces a
+   `dstdomain` allowlist over CONNECT tunnels (no MITM). The agent's strict flags are ADDITIVE in
+   `runner._render_egress` (floor byte-identical, invariant 2); `up` is **fail-closed** (a locked
+   project never starts if the sidecar can't come up). The base allowlist must always include
+   `claude.ai` (the OAuth subscription refresh path) or token refresh fails opaquely. (`dnsmasq`
+   direct-DNS forwarding + an in-container `iptables` default-DROP layer are deferred defence-in-depth
+   — today's lock covers proxy-aware traffic only; see ROADMAP Phase 4.)
 4. **Registry is the source of truth; docker labels are a projection.** A project exists iff its
    `~/.config/claude-man/projects/<slug>.toml` exists. Live status is read fresh from
    `docker ps`/`inspect` and **never** cached. On any divergence, reconcile *toward* the registry by
@@ -103,12 +110,13 @@ src/claudeman/
   docker/              labels.py, runner.py (hardened `docker create` argv + env_file scrub + additive env-mount render + exec-stdin ssh seed + git_env identity + baked GIT_CONFIG_GLOBAL/GH_CONFIG_DIR redirects), status.py (live ps JOIN), images.py (build/exists + base→overlay auto-build chain), smoke.py (hardened-profile image gate)
   profiles/            setup_token.py (mint/renew/verify via `claude setup-token`+`auth status`), identity.py (scrubbed stub), seed.py (claude-config seeding + host ~/.claude capture)
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
-  network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
+  network/             allowlist.py (base egress set + project extras), squid.py (PURE squid.conf renderer — CONNECT allowlist, no MITM), egress.py (Phase 4 strict-egress orchestration: pure `*_argv` renderers for the per-project `--internal` net + `claude-man:proxy` squid sidecar + the bridge-connect; `parse_denied`/`smoke_verdict` pure, daemon wrappers `ensure_network`/`ensure_proxy`/`teardown`/`denied_requests`/`smoke`). The agent's own strict flags (`--network` + `HTTP(S)_PROXY`) are additive in `runner._render_egress` — floor byte-identical (invariant 2, unit-pinned)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
   tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via a 30s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached terminal spawn via a settings-driven per-platform launcher table — ghostty/alacritty/kitty/wezterm/foot/gnome-terminal/konsole/xterm, Terminal.app+iTerm2 on macOS, wt on WSL2, or a custom '{argv}' template; the one-claude-per-container guard (SEC-3) in spawn_claude; + `spawn_path` opening the workspace mount in the system file manager via xdg-open/gio / `open` / wslview — the `b` Browse action), splash.py (PURE boot-splash frame generation — logo/gradient/sweep markup, no textual/rich imports, unit-tested), screens/ (splash — the boot animation screen: transparent-bg modal whose fill scrolls up to reveal the UI, any key skips, off via `config splash off`; create, add_repo, remove_repo, env_mounts, add_mount, add_port, ports, update_confirm, settings, terminal_select, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, stop_all_confirm, shutdown, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install + baked neovim) + overlays/{python,rust,node}.Dockerfile
 images/nvim/           curated, no-plugin-manager neovim config baked into the base image (init.lua + after/plugin/curated.lua): TS + Markdown + git-from-nvim. Plugins are native packages (pack/curated/start), treesitter parsers compiled to /opt/nvim-parsers, LSP servers (ts_ls/marksman/jsonls) + prettier on PATH — all baked read-only; nvim writes only shada/state to the .cache tmpfs. No runtime network/Mason. git identity is the injected GIT_CONFIG_* (commits from fugitive/gitsigns carry the right author). Floor unchanged (invariant 2)
-templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
+templates/             project.toml.example, profile.toml.example, claude-json-stub.json (the strict-egress squid.conf is rendered in pure Python by network/squid.py — no jinja template, since jinja2 is not a dep)
+images/proxy/          strict-egress squid sidecar image (`claude-man:proxy`, debian-slim + squid) — standalone, NOT FROM claude-man:base; rendered config bind-mounted read-only at run
 tests/                 dependency-free unittest suite (argv renderer, env-file scrub, denylist, registry, seed, usage, smoke verdict)
 ```
 
@@ -149,7 +157,7 @@ profile list | verify <name> | usage | seed <name> # accounts: status, account c
 profile limits [name]                              # per-account 5h/weekly subscription bars + resets (GET /api/oauth/usage)
 project create <slug> [--profile X] ; project up|stop|status <slug>
 project stop-all                                   # end-of-day: stop + sync-out EVERY running container (best-effort batch); TUI: top-level `S`
-project recreate <slug> [--profile X] [--force]    # rebuild / switch account (mismatch-guarded; also applies a changed git identity)
+project recreate <slug> [--profile X] [--force] [--update-yes|--no-update]   # rebuild / switch account (mismatch-guarded; applies a changed git identity); offers the on-start claude update like `up` does (prompt, default) — the container is pre-removed so the rebuild always applies
 project shell|claude <slug>                         # auto-start the container if needed, then open a detached terminal into it
 project assets <slug> [--bootstrap]                 # show the synced asset source dirs (CLAUDE.md + skills/agents); --bootstrap a stub CLAUDE.md
 project sync <slug> [--in]                          # manually sync assets out (bind -> source); --in forces sync-in (source -> bind)
@@ -157,6 +165,10 @@ project env add <slug> ssh|file|env [...]           # add an env mount; `env <NA
 project env rm <slug> <ssh|dst|NAME> | env list     # remove (by ssh / file dst / env var name) or list a project's env mounts
 project ports add <slug> <container|host:container> [--bind IP] [--proto tcp|udp]   # publish a service port (-p; container ≥1024; default bind 127.0.0.1 host-only; recreate to apply)
 project ports rm <slug> <host[/proto]> | ports list # unpublish a port (by host port) or list a project's published ports
+project lock <slug> | unlock <slug>                 # strict egress on/off (squid allowlist proxy on a no-route net; recreate-to-apply; unlock tears the sidecar+net down)
+project egress-log <slug>                           # destinations a locked project tried to reach but the allowlist BLOCKED (from `docker logs` of the sidecar; TUI: Project menu -> Egress log)
+project egress-smoke <slug>                          # daemon-gated end-to-end check: an allowlisted host reaches + a non-allowlisted host is blocked
+image build proxy                                   # (re)build the claude-man:proxy squid sidecar image (standalone; auto-built on first lock)
 config show                                         # global settings: resolved git identity + terminal/opener + ssh keys/load status
 config terminal [--program X | --custom '…' | --auto]   # terminal for shell/claude windows (built-in launcher table per platform, or an '{argv}' template; TUI: Settings -> e)
 config opener [--command '…' | --auto]             # file-manager command for Browse (b)

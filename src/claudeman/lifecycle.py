@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from . import assets, config, env_secrets, gh_token, gitconfig, hostplatform, ssh_agent, updates
 from .checkout import gitstate, repos
 from .docker import images, runner, status
+from .network import egress
 from .profiles import seed as seed_mod
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
@@ -337,9 +338,23 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     ``_maybe_rebuild_for_update``)."""
     if rebuild_to:
         _maybe_rebuild_for_update(project, rebuild_to, on_progress=on_progress)
+    # Strict egress: the per-project --internal network must exist BEFORE `docker create --network`
+    # (which ensure_created renders). The sidecar is started after create, before start (below).
+    strict = project.egress == "strict"
+    if strict:
+        net = egress.ensure_network(project.slug)
+        if not net.ok:
+            return Result(False, net.detail)
     created = ensure_created(project, on_progress=on_progress)
     if not created.ok:
         return created
+    # Bring up the squid sidecar BEFORE starting the agent so its proxy/DNS is reachable the moment the
+    # agent runs. A sidecar failure ABORTS the start (unlike a best-effort asset sync) — a locked
+    # project must never start with broken/absent egress enforcement (fail closed, invariant 3).
+    if strict:
+        px = egress.ensure_proxy(project, on_progress=on_progress)
+        if not px.ok:
+            return Result(False, px.detail)
     # Sync assets IN after ensure_created (which seeds profile defaults) so per-project assets layer
     # on top, and BEFORE start so the container sees them. Best-effort — a sync fault never blocks start.
     sync_note = _sync_in(project, on_progress=on_progress)
@@ -357,6 +372,7 @@ def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
     cp = runner.stop(slug)
     if cp.returncode != 0:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
+    egress.stop_proxy(slug)  # remove the squid sidecar (best-effort; no-op for an open project)
     sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
     return Result(True, f"stopped {config.container_name(slug)}{sync_note}")
 
@@ -446,6 +462,7 @@ def recreate(
     *,
     profile_name: str | None = None,
     force: bool = False,
+    rebuild_to: str = "",
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Tear down + rebuild a project's container (keeping workspace + config binds).
@@ -453,6 +470,12 @@ def recreate(
     With ``profile_name`` the project is switched to that profile (persisted). If the config dir
     already belongs to a different account, the guard refuses unless ``force`` — which re-seeds the
     identity for the new account (note: the old account's session history stays in the config dir).
+
+    ``rebuild_to`` (set by the caller after ``check_update`` + the operator's confirmation, exactly
+    like ``up``) force-rebuilds the project's image to that claude version as part of the recreate —
+    so recreate offers the same on-start claude update that start does. Empty = recreate on the
+    existing image. Because recreate removes the container up-front, the rebuild always applies (the
+    'skip a running container' guard in ``_maybe_rebuild_for_update`` never trips here).
     """
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
@@ -487,11 +510,47 @@ def recreate(
     seed_mod.seed_project_config(
         project, profile, overwrite_identity=bool(switching or conflict or force)
     )
-    result = up(project, on_progress=on_progress)
+    result = up(project, on_progress=on_progress, rebuild_to=rebuild_to)
     if not result.ok:
         return result
     return Result(True, f"recreated {project.container}"
                   + (f" on profile {profile_name!r}" if profile_name else ""))
+
+
+def set_egress(slug: str, mode: str, *, on_progress: ProgressFn | None = None) -> Result:
+    """Set a project's egress mode (``open``|``strict``) and recreate so it applies.
+
+    Egress is fixed at ``docker create`` (the agent's ``--network`` + proxy env are rendered there),
+    exactly like ports and env-mounts — so a change needs a recreate. Re-applying the SAME mode is
+    allowed (e.g. after editing ``egress.allowlist``): it re-renders squid.conf and recreates. Switching
+    to ``open`` also tears down the now-unused strict sidecar + per-project network."""
+    if mode not in config.EGRESS_MODES:
+        return Result(False, f"invalid egress {mode!r}: one of {config.EGRESS_MODES}")
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    project = dataclasses.replace(projects_registry.load(slug), egress=mode)
+    try:
+        with _slug_lock(slug):
+            projects_registry.save(project)
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    result = recreate(slug, on_progress=on_progress)  # loads the just-saved mode; up() wires egress
+    if mode == "open":
+        egress.teardown(slug)  # drop the now-unused sidecar + internal network
+    verb = "locked (strict egress)" if mode == "strict" else "unlocked (open egress)"
+    if not result.ok:
+        return result
+    return Result(True, f"{slug} {verb}; {result.detail}")
+
+
+def lock(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
+    """Lock a project to strict egress (allowlist proxy) and recreate it. See ``set_egress``."""
+    return set_egress(slug, "strict", on_progress=on_progress)
+
+
+def unlock(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
+    """Unlock a project back to open egress and recreate it (tears down the sidecar). See ``set_egress``."""
+    return set_egress(slug, "open", on_progress=on_progress)
 
 
 def create_project(
@@ -717,6 +776,7 @@ def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
     try:
         with _slug_lock(slug):
             runner.remove(slug)  # docker rm -f; idempotent — a non-zero "No such container" is fine
+            egress.teardown(slug)  # remove any strict-egress sidecar + per-project network (best-effort)
             state_note = _remove_state(slug, keep_workspace=keep_workspace)
             projects_registry.delete_definition(slug)  # LAST: the source-of-truth removal
     except OSError as exc:

@@ -118,6 +118,34 @@ def _render_ports(project: Project) -> list[str]:
     return args
 
 
+def _render_egress(project: Project) -> list[str]:
+    """Render the strict-egress agent flags. PURELY ADDITIVE — like ``_render_ports`` it never emits a
+    ``_HARDENING`` flag, so the hardened floor is byte-identical whether a project is open or strict
+    (invariant 2; a unit test pins this). For an ``open`` project this is empty and the container keeps
+    docker's default bridge (open egress) — unchanged from before Phase 4.
+
+    For a ``strict`` project: attach the agent to its per-project ``--internal`` network (no direct
+    route out) and point ``HTTP(S)_PROXY`` at the squid sidecar by its in-network DNS name. That is the
+    whole agent side of the firewall — the network has no gateway, so the only path out is the proxy,
+    which enforces the allowlist (CLAUDE.md invariant 3). The network + sidecar themselves are created
+    by ``network/egress.py`` before the agent starts.
+    """
+    if project.egress != "strict":
+        return []
+    proxy = config.proxy_container_name(project.slug)
+    proxy_url = f"http://{proxy}:{config.PROXY_PORT}"
+    no_proxy = f"localhost,127.0.0.1,::1,{proxy}"
+    args = ["--network", config.egress_net_name(project.slug)]
+    # Lower- and upper-case forms — different tools read different casings (apt/curl use lower; many
+    # Node/Python libs use upper). NO_PROXY excludes the proxy itself + loopback so the agent reaches
+    # the proxy directly (and never tries to proxy a connection TO the proxy).
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        args += ["-e", f"{key}={proxy_url}"]
+    for key in ("NO_PROXY", "no_proxy"):
+        args += ["-e", f"{key}={no_proxy}"]
+    return args
+
+
 def build_create_argv(
     project: Project,
     *,
@@ -186,9 +214,11 @@ def build_create_argv(
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
     argv += ["-v", f"{ws_path}:{config.CONTAINER_WORKSPACE}"]
-    # Env-mounts (ssh + files) + published ports — additive only; the hardened floor above is untouched.
+    # Env-mounts (ssh + files) + published ports + strict-egress wiring — additive only; the hardened
+    # floor above is untouched (each renderer is unit-pinned to add only its own value tokens).
     argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
     argv += _render_ports(project)
+    argv += _render_egress(project)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
     argv += [project.image, "sleep", "infinity"]

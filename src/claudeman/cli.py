@@ -350,7 +350,12 @@ def cmd_project_recreate(args) -> int:
     if not projects.exists(args.slug):
         print(f"no project {args.slug!r}", file=sys.stderr)
         return 1
-    res = lifecycle.recreate(args.slug, profile_name=args.profile, force=args.force)
+    project = projects.load(args.slug)
+    # Offer the same on-start claude update that `project up` does: check the channel and (on a TTY)
+    # prompt before rebuilding. --update-yes / --no-update control it; default prompts.
+    rebuild_to = _resolve_update(project, args)
+    res = lifecycle.recreate(args.slug, profile_name=args.profile, force=args.force,
+                             rebuild_to=rebuild_to, on_progress=print)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
 
@@ -655,11 +660,67 @@ def cmd_project_delete(args) -> int:
 
 
 def cmd_project_lock(args) -> int:
-    return _todo(4, f"lock egress for {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    # Strict egress recreates the container and may build the squid sidecar image (one-time) — stream
+    # that progress to stderr so the operator sees the build, like `image build`.
+    res = lifecycle.lock(args.slug, on_progress=lambda line: print(line, file=sys.stderr))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 def cmd_project_unlock(args) -> int:
-    return _todo(4, f"unlock egress for {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    res = lifecycle.unlock(args.slug, on_progress=lambda line: print(line, file=sys.stderr))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_egress_log(args) -> int:
+    """Show the destinations a locked project tried to reach but the allowlist blocked (for tuning)."""
+    from .network import egress
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    if project.egress != "strict":
+        print(f"{args.slug} is open-egress (not locked) — `claudemanctl project lock {args.slug}` "
+              f"to enforce an allowlist.", file=sys.stderr)
+        return 1
+    denied = egress.denied_requests(args.slug)
+    if not denied:
+        print(f"{args.slug}: no denied egress requests logged "
+              "(sidecar not running, or nothing has been blocked).")
+        return 0
+    print(f"{args.slug}: denied egress destinations (add legitimate ones to egress.allowlist):")
+    for host in denied:
+        print(f"  {host}")
+    return 0
+
+
+def cmd_project_egress_smoke(args) -> int:
+    """End-to-end check that a locked project's allowlist actually enforces (daemon-gated)."""
+    from .network import egress
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    if projects.load(args.slug).egress != "strict":
+        print(f"{args.slug} is open-egress — `claudemanctl project lock {args.slug}` first.",
+              file=sys.stderr)
+        return 1
+    ok, lines = egress.smoke(args.slug)
+    for line in lines:
+        print(line)
+    return 0 if ok else 1
 
 
 # --------------------------------------------------------------------------
@@ -891,9 +952,11 @@ def cmd_image_build(args) -> int:
     from .docker import images
 
     overlay = args.overlay or "base"
-    # An overlay is `FROM claude-man:base`, so on a clean machine `image build node` needs the base
-    # layer first. Build it if missing (never rebuild an existing base) so the single command works.
-    if overlay != "base" and not args.dry_run and not images.image_exists("base"):
+    # A toolchain overlay is `FROM claude-man:base`, so on a clean machine `image build node` needs the
+    # base layer first. Build it if missing (never rebuild an existing base) so the single command works.
+    # The proxy image is STANDALONE (its own debian base, not FROM claude-man:base), so it skips this.
+    needs_base = overlay not in ("base", config.PROXY_IMAGE)
+    if needs_base and not args.dry_run and not images.image_exists("base"):
         print(f"base image {config.image_tag('base')} missing — building it first")
         rc = images.build_one("base", claude_version=args.claude_version)
         if rc != 0:
@@ -973,8 +1036,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
         ("claude", cmd_project_claude, "run claude in a new terminal"),
-        ("lock", cmd_project_lock, "switch to strict egress"),
-        ("unlock", cmd_project_unlock, "return to open egress"),
+        ("lock", cmd_project_lock, "switch to strict egress (allowlist proxy; recreates)"),
+        ("unlock", cmd_project_unlock, "return to open egress (recreates)"),
+        ("egress-log", cmd_project_egress_log, "show denied egress destinations (for allowlist tuning)"),
+        ("egress-smoke", cmd_project_egress_smoke, "verify a locked project's allowlist enforces (daemon)"),
     ]:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug", type=_slug_arg)
@@ -989,11 +1054,15 @@ def build_parser() -> argparse.ArgumentParser:
     pdel.add_argument("--force", action="store_true",
                       help="delete even when repos hold unsynced (uncommitted/unpushed) work")
     pdel.set_defaults(func=cmd_project_delete)
-    prc = proj.add_parser("recreate", help="rebuild the container (optionally switch profile)")
+    prc = proj.add_parser("recreate", help="rebuild the container (offers a claude update; optionally switch profile)")
     prc.add_argument("slug", type=_slug_arg)
     prc.add_argument("--profile", type=_slug_arg, help="switch the project to this profile (account)")
     prc.add_argument("--force", action="store_true",
                      help="override the account-mismatch guard and re-seed the identity")
+    prc.add_argument("--update-yes", action="store_true", dest="update_yes",
+                     help="rebuild the image to the newer claude without prompting")
+    prc.add_argument("--no-update", action="store_true", dest="no_update",
+                     help="skip the on-recreate claude-version check entirely")
     prc.set_defaults(func=cmd_project_recreate)
     pst = proj.add_parser("status", help="live status JOINed with the registry")
     pst.add_argument("slug", nargs="?", type=_slug_arg)
@@ -1140,8 +1209,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # image
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)
-    ib = im.add_parser("build", help="build base/overlay image")
-    ib.add_argument("overlay", nargs="?", choices=config.OVERLAYS)
+    ib = im.add_parser("build", help="build base/overlay/proxy image")
+    ib.add_argument("overlay", nargs="?", choices=config.BUILDABLE_IMAGES)
     ib.add_argument("--claude-version", default=config.DEFAULT_CLAUDE_VERSION)
     ib.add_argument("--dry-run", action="store_true")
     ib.set_defaults(func=cmd_image_build)

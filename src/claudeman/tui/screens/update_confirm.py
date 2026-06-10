@@ -25,8 +25,8 @@ class UpdateConfirmScreen(ModalScreen["str | None"]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("r", "rebuild", "Rebuild & start"),
-        Binding("s", "skip", "Start on current"),
+        Binding("r", "rebuild", "Rebuild"),
+        Binding("s", "skip", "On current"),
     ]
     CSS = """
     UpdateConfirmScreen { align: center middle; }
@@ -41,27 +41,29 @@ class UpdateConfirmScreen(ModalScreen["str | None"]):
     #buttons Button { margin-left: 2; }
     """
 
-    def __init__(self, slug: str, current: str, target: str) -> None:
+    def __init__(self, slug: str, current: str, target: str, *, verb: str = "start") -> None:
         super().__init__()
         self._slug = slug
         self._current = current or "(unbuilt)"
         self._target = target
+        self._verb = verb                       # "start" (the `s` path) or "recreate" (the recreate path)
 
     def compose(self) -> ComposeResult:
+        verb = self._verb
         with Vertical(id="dialog"):
             yield Label(f"Update claude for {self._slug}", classes="title")
             yield Label(f"image has claude {self._current}  →  {self._target} is available")
             yield Label(
-                "Rebuilds this project's image to the newer claude and recreates the container on it "
+                f"Rebuilds this project's image to the newer claude and recreates the container on it "
                 "(a host-side update — `claude update` can't run inside the read-only container). The "
                 "rebuild may take a minute or more if a toolchain layer must rebuild.\n"
-                "[b]Enter[/]/[b]r[/] = Rebuild & start   ·   [b]s[/] = Start on current   ·   "
-                "[b]Esc[/] = Cancel",
+                f"[b]Enter[/]/[b]r[/] = Rebuild & {verb}   ·   [b]s[/] = {verb.capitalize()} on current"
+                "   ·   [b]Esc[/] = Cancel",
                 id="update-note",
             )
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Start on current", id="skip")
+                yield Button(f"{verb.capitalize()} on current", id="skip")
                 yield Button(f"Rebuild → {self._target}", variant="success", id="rebuild")
 
     def on_mount(self) -> None:

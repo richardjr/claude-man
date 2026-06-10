@@ -76,10 +76,19 @@ What crosses each way, and what must never cross:
   operator is adopted into the container, so a hostile world-writable socket left in the agent's
   reach can't be smuggled in as the forwarded agent.
 
-### Network containment
-- Open egress by default; per-project **strict** mode routes all egress through a squid sidecar on
-  an `internal: true` network (no direct route → the proxy can't be bypassed). Recommended for
-  untrusted project code. The allowlist always includes `claude.ai` (token refresh).
+### Network containment (Phase 4 — implemented)
+- Open egress by default; per-project **strict** mode (`project lock <slug>`) routes all egress
+  through a squid sidecar on a per-project `--internal` network (no gateway → no direct route, so the
+  proxy can't be bypassed). The agent attaches to that network only; the sidecar is also on the
+  default bridge (its sole egress path) and enforces a `dstdomain` allowlist over CONNECT tunnels (no
+  MITM). `up` is **fail-closed** — a locked project never starts if the sidecar can't come up. The
+  allowlist always includes `claude.ai` (token refresh) + the Anthropic API, GitHub, and the package
+  registries; denied requests are logged (`project egress-log`). Recommended for untrusted project
+  code — this is the primary control against a compromised dependency exfiltrating the OAuth/`GH`
+  token or any env-mount secret, or opening a reverse shell. The agent's strict flags are additive in
+  `runner._render_egress`, so the hardened floor is byte-identical to an open project (invariant 2).
+  (Deferred defence-in-depth: `dnsmasq` direct-DNS forwarding + an in-container `iptables` default-DROP
+  layer — today's lock covers proxy-aware traffic only.)
 
 ### Subscription-usage query (read-only, host-side)
 - claude-man queries `GET https://api.anthropic.com/api/oauth/usage` host-side, per profile, with that

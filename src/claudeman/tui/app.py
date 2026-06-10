@@ -91,6 +91,7 @@ class ClaudeManApp(App):
     ]
     _PROJECT_MENU = [
         ("o", "Ports", "ports"),
+        ("g", "Egress log (denied)", "egress_log"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -672,6 +673,7 @@ class ClaudeManApp(App):
             "refresh_git": self.action_refresh_gitstate,
             "pull_all": self.action_pull_all,
             "ports": self.action_ports,
+            "egress_log": self.action_egress_log,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -776,45 +778,49 @@ class ClaudeManApp(App):
         self.call_from_thread(self._after_action, slug, res)
 
     @work(thread=True, group="create")
-    def _update_check_worker(self, slug: str) -> None:
-        """Before start: check (host-side GET) whether a newer claude than the project's image exists.
-        If so, raise the confirm modal; otherwise go straight to start (``build_to`` set for a fresh
-        project so its first build tracks the channel). Fails open — any check fault just starts. The
-        slug stays reserved (claimed in ``action_toggle_running``) through to ``_up_worker``."""
+    def _update_check_worker(self, slug: str, action: str = "start") -> None:
+        """Before start OR recreate: check (host-side GET) whether a newer claude than the project's
+        image exists. If so, raise the confirm modal; otherwise go straight to the action (``build_to``
+        set for a fresh project so its first build tracks the channel). Fails open — any check fault
+        just proceeds. The slug stays reserved (claimed in the caller) through to the worker. ``action``
+        is ``"start"`` (the ``s`` path) or ``"recreate"`` (the Recreate path) — both offer the update."""
         try:
             chk = lifecycle.check_update(projects.load(slug))
-        except Exception as exc:  # noqa: BLE001 - never tear down the app; fail open to a plain start
-            self.call_from_thread(self._log, f"[yellow]{slug}: update check failed ({exc!r}); starting[/]")
-            self.call_from_thread(self._start_after_check, slug, "")
+        except Exception as exc:  # noqa: BLE001 - never tear down the app; fail open to the plain action
+            self.call_from_thread(self._log, f"[yellow]{slug}: update check failed ({exc!r}); {action}ing[/]")
+            self.call_from_thread(self._dispatch_after_update, slug, "", action)
             return
         if chk.prompt:
-            self.call_from_thread(self._show_update_confirm, slug, chk)
+            self.call_from_thread(self._show_update_confirm, slug, chk, action)
         else:
             if chk.note:
                 self.call_from_thread(self._log, f"{slug}: {chk.note}")
-            self.call_from_thread(self._start_after_check, slug, chk.build_to)
+            self.call_from_thread(self._dispatch_after_update, slug, chk.build_to, action)
 
-    def _show_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck) -> None:
+    def _show_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck, action: str) -> None:
         self.push_screen(
-            UpdateConfirmScreen(slug, chk.current, chk.target),
-            lambda decision: self._on_update_confirm(slug, chk, decision),
+            UpdateConfirmScreen(slug, chk.current, chk.target, verb=action),
+            lambda decision: self._on_update_confirm(slug, chk, action, decision),
         )
 
-    def _on_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck, decision) -> None:
-        if decision is None:  # Esc / Cancel — abandon the start entirely, release the reservation
+    def _on_update_confirm(self, slug: str, chk: lifecycle.UpdateCheck, action: str, decision) -> None:
+        if decision is None:  # Esc / Cancel — abandon the action entirely, release the reservation
             self._busy.discard(slug)
-            self._log(f"{slug}: start cancelled")
+            self._log(f"{slug}: {action} cancelled")
             return
         if decision == "rebuild":
-            self._log(f"rebuilding {slug} → claude {chk.target}, then starting …")
-            self._start_after_check(slug, chk.target)
-        else:  # "skip" — start on the existing image
-            self._log(f"{slug}: skipping update; starting on claude {chk.current}")
-            self._start_after_check(slug, "")
+            self._log(f"rebuilding {slug} → claude {chk.target}, then {action}ing …")
+            self._dispatch_after_update(slug, chk.target, action)
+        else:  # "skip" — proceed on the existing image
+            self._log(f"{slug}: skipping update; {action}ing on claude {chk.current}")
+            self._dispatch_after_update(slug, "", action)
 
-    def _start_after_check(self, slug: str, rebuild_to: str) -> None:
-        # slug already reserved in action_toggle_running — go straight to the up worker.
-        self._up_worker(slug, rebuild_to)
+    def _dispatch_after_update(self, slug: str, rebuild_to: str, action: str) -> None:
+        # slug already reserved by the caller — go straight to the matching worker.
+        if action == "recreate":
+            self._recreate_worker(slug, rebuild_to)
+        else:
+            self._up_worker(slug, rebuild_to)
 
     @work(thread=True, group="create")
     def _up_worker(self, slug: str, rebuild_to: str = "") -> None:
@@ -827,10 +833,11 @@ class ClaudeManApp(App):
         self.call_from_thread(self._after_action, slug, res)
 
     @work(thread=True, group="create")
-    def _recreate_worker(self, slug: str) -> None:
-        """Recreate off the UI thread; rebuilds the image if it's gone missing (streamed)."""
+    def _recreate_worker(self, slug: str, rebuild_to: str = "") -> None:
+        """Recreate off the UI thread; may rebuild the image to a newer claude first (the same update
+        offer start makes), and rebuilds a missing image too (all streamed)."""
         try:
-            res = lifecycle.recreate(slug, on_progress=self._thread_log)
+            res = lifecycle.recreate(slug, rebuild_to=rebuild_to, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"recreate failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
@@ -922,6 +929,36 @@ class ClaudeManApp(App):
         self._log(f"managing published ports for {slug} (add/remove need a recreate to apply)")
         self.push_screen(PortsScreen(slug))
 
+    def action_egress_log(self) -> None:
+        """Show the destinations a locked project tried to reach but the allowlist blocked (Phase 4)."""
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            self._log("[red]egress log: select a defined project (orphan rows aren't managed)[/]")
+            return
+        if projects.load(slug).egress != "strict":
+            self._log(f"{slug}: open egress (not locked) — recreate with strict egress to enforce "
+                      "an allowlist")
+            return
+        self._log(f"reading denied egress for {slug} …")
+        self._egress_log_worker(slug)
+
+    @work(thread=True, group="egress")
+    def _egress_log_worker(self, slug: str) -> None:
+        from ..network import egress
+
+        try:
+            denied = egress.denied_requests(slug)
+        except Exception as exc:  # noqa: BLE001 - a log read must never crash the worker
+            self._thread_log(f"[red]egress log for {slug} failed: {exc!r}[/]")
+            return
+        if not denied:
+            self._thread_log(f"{slug}: no denied egress requests logged")
+            return
+        self._thread_log(f"[yellow]{slug}: {len(denied)} denied destination(s) "
+                         "(add legitimate ones to egress.allowlist):[/]")
+        for host in denied:
+            self._thread_log(f"  {host}")
+
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")
 
@@ -989,7 +1026,9 @@ class ClaudeManApp(App):
         if not self._reserve(slug, "recreate"):
             return
         self._log(f"recreating {slug} …")
-        self._recreate_worker(slug)
+        # Offer the same on-start claude update that `s` does: check the channel first (off-thread); if a
+        # newer claude exists the modal asks before rebuilding, otherwise it recreates straight away.
+        self._update_check_worker(slug, "recreate")
 
 
 def run() -> None:

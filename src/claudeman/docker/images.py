@@ -48,9 +48,12 @@ def build_chain(overlay: str) -> list[str]:
     """The overlays that must exist for ``overlay``, base-first.
 
     Overlay images are ``FROM claude-man:base`` (see images/overlays/*.Dockerfile), so the base
-    layer must be built before any overlay. ``base`` needs only itself.
+    layer must be built before any overlay. ``base`` needs only itself; the ``proxy`` sidecar is
+    STANDALONE (its own debian base, not ``FROM claude-man:base``), so it must never chain off base.
     """
-    return ["base"] if overlay == "base" else ["base", overlay]
+    if overlay in ("base", config.PROXY_IMAGE):
+        return [overlay]
+    return ["base", overlay]
 
 
 def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION) -> list[str]:

@@ -306,25 +306,46 @@ at load** (`EnvMount.lenient`): a mount valid when saved but invalidated by a la
 the case-typo guard) loads **flagged** (`error` set) — visible/removable in the env screen, round-tripped
 on save, and skipped by the render/lifecycle — rather than crashing `projects.load` (and the TUI).
 
-## Network / egress
+## Network / egress (Phase 4 — implemented)
 
-**Open by default.** Strict mode is per-project, opt-in, and implemented at the network layer so
-`--cap-drop ALL` stays intact:
+**Open by default.** Strict mode is per-project, opt-in (`project lock <slug>` / create
+`--egress strict`), and implemented at the network layer so `--cap-drop ALL` stays intact
+(invariant 3 — the firewall is never in-container `iptables`):
 
-- A generated two-service compose: a `squid`+`dnsmasq` sidecar on both an `internal: true`
-  `proj_internal` net and a normal `proj_egress` bridge, and the agent attached **only** to
-  `proj_internal` with `--dns <squid>`.
-- `internal: true` removes any direct route, so the proxy env can't be bypassed (a real boundary,
-  not advisory). `dnsmasq` in the sidecar forwards allowlisted names to `172.17.0.1` (the host
-  resolver), since `internal: true` cuts the agent off from it directly.
-- The agent gets `HTTPS_PROXY`/`HTTP_PROXY=http://squid:3128`, `NO_PROXY=localhost,127.0.0.1,squid`,
-  and the entrypoint wires `git`, `npm`, and apt proxies explicitly.
-- **Allowlist** (squid `dstdomain`, CONNECT tunnel, no MITM): base set =
+- **One per-project `--internal` docker network** (`claude-man-net-<slug>`). `--internal` removes
+  the network's gateway, so a container on it has **no route to the internet at all** — a real
+  boundary, not advisory.
+- **The agent attaches to that network only** (rendered additively in
+  `docker/runner.py::_render_egress`, so the hardened floor is byte-identical to an open project —
+  a unit test pins this), with `HTTP(S)_PROXY` (upper + lower case) pointing at the squid sidecar by
+  its in-network DNS name and `NO_PROXY=localhost,127.0.0.1,::1,<proxy>`.
+- **The squid sidecar** (`claude-man-proxy-<slug>`, image `claude-man:proxy`) sits on that internal
+  network **and** the default bridge (attached via `docker network connect bridge` after run), so it
+  is the **only** path out. squid enforces the `dstdomain` allowlist over **CONNECT tunnels — no
+  MITM, no CA install** (HTTPS stays end-to-end); `http_access deny all` otherwise, and denials are
+  logged to stdout so `project egress-log` / the TUI Project-menu **Egress log** can surface them for
+  allowlist tuning.
+- **Allowlist** (`network/allowlist.py`, rendered to squid.conf by the pure `network/squid.py`):
   `api.anthropic.com`, `.anthropic.com`, **`claude.ai`** (OAuth refresh — critical),
-  `statsig.anthropic.com`, `registry.npmjs.org`, GitHub (`.github.com`, `codeload.github.com`,
-  `.githubusercontent.com`) + the project's `egress.allowlist[]` extras. `http_access deny all`
-  otherwise; denied requests are logged for tuning. In-container `iptables` default-DROP is a
-  deferred v2 defence-in-depth layer (its `NET_ADMIN` phase would run as a separate pre-start init).
+  `statsig.anthropic.com`, `sentry.io`, the registries (`registry.npmjs.org`, PyPI,
+  `registry.yarnpkg.com`), Debian apt mirrors, GitHub (`.github.com`, `codeload.github.com`,
+  `.githubusercontent.com`) + the project's `egress.allowlist[]` extras.
+- **Orchestration** lives in `network/egress.py` (explicit `docker network`/`docker run` argv — no
+  compose, so the agent stays on the single unit-tested `build_create_argv` renderer). The sidecar is
+  trusted infra (our fixed image + rendered config, no agent code, sees only CONNECT hostnames) so it
+  is not under the agent's hardened floor, but runs `--security-opt no-new-privileges`.
+- **Fail-closed:** `up` aborts if the sidecar can't start, so a locked project never runs with broken
+  egress. `lifecycle.set_egress` (lock/unlock) recreates to apply (egress is fixed at `docker create`,
+  like ports/mounts); unlock tears the sidecar + network down. `image smoke proxy` builds the sidecar;
+  `project egress-smoke <slug>` validates a locked project end-to-end (allowlisted host reaches,
+  non-allowlisted host blocked).
+
+**Deferred refinements (not blockers):** the agent reaches external hosts only through the proxy
+(HTTP CONNECT), which covers every proxy-aware tool (claude, `git` over HTTPS, npm/pip/apt). Tools
+that bypass the proxy and resolve DNS directly (e.g. `ssh`-based git) are not reachable under lock by
+design; a `dnsmasq` forwarder for direct-DNS support and an in-container `iptables` default-DROP
+defence-in-depth layer (its `NET_ADMIN` phase would run as a separate pre-start init) remain future
+work.
 
 ## Sync-back (review-gated three-way merge)
 

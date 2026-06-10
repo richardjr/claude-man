@@ -31,6 +31,21 @@ DOCKER_STOP_GRACE_S = 2
 OVERLAYS = ("base", "python", "rust", "node")
 EGRESS_MODES = ("open", "strict")
 
+# ---------------------------------------------------------------------------
+# Strict egress (Phase 4) — a squid proxy sidecar on a no-direct-route internal network.
+# `--cap-drop ALL` forbids in-container iptables (CLAUDE.md invariant 3), so the firewall lives at
+# the network layer: the agent runs on a per-project `--internal` network with NO route out, and the
+# only path to the internet is the squid sidecar (CONNECT-tunnel allowlist, no MITM). The proxy is
+# trusted infra (our fixed image + rendered config, no agent code) so it is NOT the hardened sandbox —
+# the AGENT keeps the full floor; only its egress is constrained.
+# ---------------------------------------------------------------------------
+PROXY_IMAGE = "proxy"                 # built as claude-man:proxy from images/proxy/Dockerfile
+PROXY_PORT = 3128                     # squid http_port — the agent's HTTP(S)_PROXY target
+EGRESS_NET_PREFIX = "claude-man-net-"          # per-project internal network: claude-man-net-<slug>
+PROXY_CONTAINER_PREFIX = "claude-man-proxy-"   # per-project squid sidecar: claude-man-proxy-<slug>
+# Buildable image tags: the project overlays + the standalone proxy sidecar (not an overlay of base).
+BUILDABLE_IMAGES = OVERLAYS + (PROXY_IMAGE,)
+
 # Pinned claude version baked into the image (override per build). Keep in sync
 # with images/base/Dockerfile's CLAUDE_VERSION ARG default.
 DEFAULT_CLAUDE_VERSION = "2.1.160"
@@ -266,6 +281,22 @@ def container_name(slug: str) -> str:
     return f"{CONTAINER_PREFIX}{slug}"
 
 
+def egress_net_name(slug: str) -> str:
+    """The per-project ``--internal`` docker network the agent attaches to under strict egress."""
+    return f"{EGRESS_NET_PREFIX}{slug}"
+
+
+def proxy_container_name(slug: str) -> str:
+    """The per-project squid sidecar container name (also its in-network DNS name for HTTP(S)_PROXY)."""
+    return f"{PROXY_CONTAINER_PREFIX}{slug}"
+
+
+def squid_conf_path(slug: str) -> Path:
+    """Host path of the rendered squid.conf (bind-mounted read-only into the sidecar). State tier —
+    derived from the registry allowlist, holds no secret."""
+    return project_state_dir(slug) / "squid.conf"
+
+
 # ---------------------------------------------------------------------------
 # Repo / image-build paths (package-relative so an auto-build triggered from the
 # TUI resolves the Dockerfiles regardless of the process CWD; the CLI used to rely
@@ -288,4 +319,8 @@ def image_dockerfile(overlay: str) -> Path:
     """Absolute path to the Dockerfile that builds ``claude-man:<overlay>``."""
     if overlay == "base":
         return repo_root() / "images" / "base" / "Dockerfile"
+    if overlay == PROXY_IMAGE:
+        # The strict-egress squid sidecar — standalone (NOT FROM claude-man:base), so it has its own
+        # top-level dir rather than living under overlays/.
+        return repo_root() / "images" / "proxy" / "Dockerfile"
     return repo_root() / "images" / "overlays" / f"{overlay}.Dockerfile"

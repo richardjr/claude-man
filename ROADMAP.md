@@ -214,10 +214,18 @@ toolchain caches to read-only system paths (`COREPACK_HOME`, uv cache) so first 
 network, and add the yarn download hosts (`registry.yarnpkg.com`, `repo.yarnpkg.com`) to the
 base allowlist; verify offline in `image smoke <overlay>`._
 
-- [ ] `network/allowlist.py` base set (incl. `claude.ai` for OAuth refresh + GitHub + npm) + project extras
-- [ ] `network/squid.py`: generate squid+dnsmasq sidecar compose, `internal: true` agent net + egress net, proxy env + apt/npm/git proxy wiring, dnsmasq → `172.17.0.1`
-- [ ] `project lock`/`unlock` verbs; denied-request logging surfaced in the TUI for allowlist tuning
-- [ ] Smoke: `claude.ai` refresh, github clone, npm install, apt install all succeed under lock; `example.com` blocked
+- [x] `network/allowlist.py` base set (incl. `claude.ai` for OAuth refresh + GitHub + npm + PyPI + yarn + Debian apt) + project extras
+- [x] `network/squid.py` (pure squid.conf renderer) + `network/egress.py` orchestration: per-project `--internal` agent net + a `claude-man:proxy` squid sidecar (also on the bridge for egress); agent gets `HTTP(S)_PROXY` → the sidecar (additive flags in `runner._render_egress`; hardened floor byte-identical)
+- [x] `project lock`/`unlock` verbs (`lifecycle.set_egress`, recreate-to-apply); `project egress-log` + the TUI Project-menu **Egress log** surface denied requests for allowlist tuning
+- [x] Smoke: `image smoke proxy` builds the sidecar; `project egress-smoke <slug>` checks an allowlisted host reaches + a non-allowlisted host is blocked (daemon-gated, like `image smoke`)
+
+_Implementation notes (2026-06-10): orchestrated with explicit `docker network`/`docker run` argv
+(NOT compose) so the hardened agent stays on the single unit-tested `build_create_argv` renderer
+(invariant 2). One per-project `--internal` net + the sidecar bridged for egress (rather than two
+nets). **Proxy-only** for now — every proxy-aware tool (claude, git-https, npm/pip/apt) is covered;
+the `dnsmasq` direct-DNS forwarder and an in-container `iptables` default-DROP layer remain deferred
+defence-in-depth. IMG-4 yarn/apt hosts are in the base allowlist; offline-first overlay cache pinning
+(`COREPACK_HOME`/uv) is still worth verifying in `image smoke <overlay>`._
 
 ## Phase 5 — Sync-back accept flow
 **Goal:** review-gated three-way merge of container config changes to host + setups repo.

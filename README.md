@@ -22,15 +22,15 @@ It exists to solve four things at once:
    diffed against a baseline and offered back to your host config behind an **accept/reject
    gate**. Credentials and identity are **never** synced.
 
-> Status: **alpha — phases 0–3 working, 4–5 planned** (2026-06-10). Mint work/home profiles; create /
+> Status: **alpha — phases 0–4 working, 5 planned** (2026-06-10). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
 > (mismatch-guarded); watch per-account token usage **and live 5-hour / weekly subscription-limit
 > bars**; commit + push from inside a container (inherited git identity + `gh` baked into every image);
 > add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
-> files into a container; publish service ports — all from both the CLI and the TUI.
-> **Not yet implemented** (honest `NotImplementedError` stubs): Phase 4 strict egress (`--egress
-> strict` projects build, but the firewall sidecar doesn't exist yet) and Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 412 dependency-free tests; the hardened image is
+> files into a container; publish service ports; **lock a project to strict egress** (a squid
+> allowlist proxy on a no-direct-route network) — all from both the CLI and the TUI.
+> **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 440 dependency-free tests; the hardened image is
 > `image smoke`-gated.
 
 ## Platform support
@@ -72,6 +72,45 @@ real operator state.
 The TOML registry answers *what a project is*; `docker ps` (queried fresh, never cached) answers
 *what state its container is in right now*. The two never describe the same fact, so they can't
 drift — on any divergence the **registry wins** and the container is recreated.
+
+## What it protects against
+
+claude-man's containment is a **headline feature**, not a side effect. The 2026 wave of
+supply-chain attacks on AI coding agents — poisoned npm/PyPI packages whose install hooks steal
+`~/.claude/.credentials.json`, GitHub/cloud/SSH keys; malicious skills/agents that run shell
+commands without approval; `~/.claude.json` rewrites that redirect your OAuth token to an
+attacker; `rm -rf ~/` trip-wires; `-setup.pth` startup-hook persistence — all assume **the agent,
+its config, and your credentials share one host filesystem**. Running Claude Code inside a
+hardened, per-project container breaks that assumption by construction. The point isn't to stop a
+compromised package from *installing* — `npm install` still runs its hooks — it's to ensure the
+blast radius is **one disposable container**, not your machine.
+
+| Attack technique (real 2026 TTPs) | What claude-man does |
+|---|---|
+| **Steal `~/.claude/.credentials.json`** | The file is **never** in the container — auth is an env-var OAuth token, never a credentials file (invariant 1). There is nothing to read. |
+| **Harvest SSH private keys** | Keys **never enter the container**: only the host ssh-agent *socket* is forwarded, so a payload can't exfiltrate a key (it can sign while connected — a documented residual). |
+| **Poison host `~/.claude/settings.json` hooks** | The per-project `~/.claude` is seeded from a **filtered allowlist with hooks/statusLine stripped**; there is no path for a poisoned host hook to ride into the container, nor (today) for a container-written hook to reach the host. |
+| **`rm -rf ~/` destructive trip-wire** | `~` is `/home/agent` inside the sandbox — the wiper can only touch the re-seedable per-project config and a tmpfs. **The host home is untouched.** |
+| **`-setup.pth` / daemon persistence** | The rootfs is **read-only** (`--read-only`), capabilities are **all dropped** (`--cap-drop ALL`), `no-new-privileges`, non-root, pid-limited. Image-level persistence is impossible; anything in a `/workspace` venv dies on recreate. |
+| **Malicious skill runs `Bash(*)` / reverse shell** | The command still runs — but **inside** the sandbox: no host reach, and the reverse shell needs egress + tooling the minimal base image doesn't ship. Under **strict egress** the connection is refused outright. |
+| **Exfiltrate secrets / redirect OAuth token to attacker infra** | **Strict egress** (below) routes every connection through an allowlisting proxy on a no-direct-route network — the token and any env secrets can only reach Anthropic/allowlisted hosts, never an attacker endpoint. |
+| **Steal the host GitHub PAT during clone** | Repos are cloned **host-side** with the PAT masked; the host git PAT **never enters the container**. |
+
+### Strict egress (the lockable network boundary)
+
+Egress is **open by default** and **lockable per project** to a strict allowlist. Because
+`--cap-drop ALL` forbids in-container `iptables`, the firewall lives at the **network layer**: the
+agent runs on an `internal` Docker network with **no direct route out**, and a **squid proxy
+sidecar** is the only path to the internet. Only allowlisted domains are reachable — the base set
+always includes `claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the package registries;
+everything else is **denied and logged** so you can tune the list. HTTPS stays end-to-end (CONNECT
+tunnels, no MITM, no CA install). Lock a project with `project lock <slug>` (or create it
+`--egress strict`); the denied-request log surfaces in the TUI for allowlist tuning.
+
+This is the single biggest lever against the *exfiltration* and *command-and-control* steps that
+nearly every one of the attacks above depends on. See [`docs/SECURITY.md`](docs/SECURITY.md) for
+the full threat model and [`CLAUDE.md`](CLAUDE.md) for the load-bearing invariants that keep these
+guarantees true.
 
 ## Install
 
@@ -188,6 +227,10 @@ uv run claudemanctl project stop demo       # stop the container (project + work
 uv run claudemanctl project shell demo      # open a shell in a new terminal
 uv run claudemanctl project claude demo     # run claude in a new terminal
 
+# Recreate the container (applies env/port/identity changes). Like `up`, it offers the on-start
+# claude update — prompts on a TTY; --update-yes rebuilds to the latest without asking, --no-update skips:
+uv run claudemanctl project recreate demo
+uv run claudemanctl project recreate demo --update-yes
 # Switch a project to a different account (mismatch-guarded; --force to override + re-seed identity):
 uv run claudemanctl project recreate demo --profile home
 uv run claudemanctl project recreate demo --profile home --force
@@ -230,6 +273,28 @@ uv run claudemanctl project env rm demo /home/agent/.netrc            # by conta
 
 A single-repo project launches `claude`/shell **in the repo dir** by default (`docker exec -w`); set
 `[project] workdir = "<subdir>"` in the TOML to override (a multi-repo project defaults to `/workspace`).
+
+### Strict egress (lock a project to an allowlist)
+
+Lock a project so its container can only reach an allowlist of domains, routed through a squid proxy
+sidecar on a no-direct-route network (see *What it protects against* above for why). Egress is fixed
+at container create, so lock/unlock **recreate** the container; the base allowlist always includes
+`claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the package registries.
+
+```bash
+uv run claudemanctl project create demo --egress strict   # locked from the start
+uv run claudemanctl project lock demo            # lock an existing project (builds the proxy image once, recreates)
+uv run claudemanctl project unlock demo          # back to open egress (tears the sidecar + network down, recreates)
+uv run claudemanctl project egress-log demo      # destinations the allowlist BLOCKED — add legit ones to egress.allowlist
+uv run claudemanctl project egress-smoke demo    # verify enforcement: an allowlisted host reaches, a blocked one doesn't
+uv run claudemanctl image build proxy            # (re)build the claude-man:proxy squid sidecar image by hand
+```
+
+Add project-specific allowlist domains under `[project.egress]` `allowlist = [...]` in the project's
+TOML, then `project lock demo` again to re-render and recreate. In the TUI, the **Project** menu
+(`p`) → **Egress log** (`g`) shows blocked destinations. Today's lock covers proxy-aware traffic
+(claude, `git` over HTTPS, npm/pip/apt); `ssh`-based git and direct-DNS tools are intentionally not
+reachable under lock — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § *Network / egress*.
 
 ### Git identity + GitHub CLI (`gh`) inside the container
 
