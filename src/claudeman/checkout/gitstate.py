@@ -337,7 +337,15 @@ def host_uid_matches_container() -> bool:
     On a mismatch, host-side git on a workspace written by the in-container uid-1000 agent trips
     "dubious ownership". The CLI surfaces a one-time advisory; claude-man never auto-writes
     ``safe.directory`` (that guard exists for exactly this surface).
+
+    On macOS the advisory is suppressed: Docker Desktop's file sharing synthesises bind-mount
+    ownership, so in-container uid-1000 writes appear host-side as the operator's own files and
+    the mismatch is not real (``hostplatform.uid_checks_meaningful``).
     """
+    from .. import hostplatform
+
+    if not hostplatform.uid_checks_meaningful():
+        return True
     getuid = getattr(os, "getuid", None)
     return getuid is not None and getuid() == config.CONTAINER_UID
 

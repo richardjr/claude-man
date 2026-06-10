@@ -76,15 +76,18 @@ These are security- and correctness-critical. Every change must preserve them.
    and every host target is **backed up before** merge. Deletions and conflicts **default to reject**.
    See `src/claudeman/syncback/denylist.py`.
 6. **One `claude` per container.** A second shell is fine; a second `claude` in the same container
-   races on `.claude.json`/session writes. The spawn paths *should* enforce a single claude session
-   per project, but that guard is **not yet implemented** (REVIEW SEC-3) — until it lands, don't add
-   code paths that launch a second `claude` in a live container, and avoid doing so manually.
+   races on `.claude.json`/session writes. `terminals.spawn_claude` enforces this (REVIEW SEC-3):
+   it probes the container for a live `claude` process (`build_claude_probe_argv`, a /proc comm
+   walk — fails OPEN so a wedged daemon can't lock the operator out) and refuses to spawn a second.
+   Every claude-launch path must go through `spawn_claude` — don't add code paths that bypass it,
+   and avoid launching a second `claude` manually from a shell (the guard can't see a future one).
 
 ## Project layout
 
 ```
 src/claudeman/
   config.py            XDG paths + all shared constants (label prefix, container/image names, baked container paths)
+  hostplatform.py      per-host seams (Linux reference / macOS / WSL2; native Windows out of scope): pure platform predicates, the Docker Desktop ssh-agent magic socket, uid-advisory gating. ALL platform branches go through here — no inline sys.platform checks elsewhere
   cli.py               claudemanctl argparse surface (profile / project / sync / image verbs)
   lifecycle.py         create / up / stop / recreate / delete orchestration shared by the CLI + TUI (+ account-mismatch guard, workspace-ownership pre-flight, env-mount add/remove/resync + ssh seed, sync-checked delete_plan/delete_project teardown, asset sync-in on up / sync-out on stop, on-start claude-version check (`check_update`) -> operator-confirmed host-side image rebuild + recreate before start via `up(rebuild_to=...)`; stamps the container version from the image's real baked label)
   assets.py            per-project asset sync (host-side copy of CLAUDE.md + skills/agents between the synced config-tier source ~/.config/claude-man/assets/<slug>/ and the /workspace + ~/.claude binds): sync_in on start (asset wins), sync_out on stop (bind wins), backup-then-overwrite; claude side is a default-DENY allowlist (skills/agents/commands only) with a per-entry filtered recursive copy that drops denylisted-named nested entries + refuses escaping / denylist-targeting symlinks; workspace side is containment-checked; bootstraps a stub CLAUDE.md — distinct from the Phase-5 review-gated sync-back
@@ -102,7 +105,7 @@ src/claudeman/
   checkout/            repos.py (host-side clone/fetch into workspace/ + cred-mask + dir containment; host PAT never enters the container), gitstate.py (porcelain-v2 parser → per-repo live state: branch/dirty/ahead-behind/drift)
   network/             allowlist.py (base egress set), squid.py (strict-egress sidecar generator — Phase 4 stub)
   syncback/            denylist.py, artifacts.py, diff.py (impl); baseline.py, detect.py, merge.py — Phase 5 stubs of the review-gated 3-way merge
-  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via a 30s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached ghostty/alacritty spawn + `spawn_path` opening the workspace mount in the system file manager via xdg-open/gio — the `b` Browse action), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, add_port, ports, update_confirm, settings, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, stop_all_confirm, shutdown, logs, sync_review)
+  tui/                 app.py (projects JOIN + live Repos column / repo-detail panel via a 30s gitstate worker + per-profile usage panel — token totals plus 5h/Week subscription bars from a 60s refresh_utilization worker), terminals.py (detached terminal spawn via a settings-driven per-platform launcher table — ghostty/alacritty/kitty/wezterm/foot/gnome-terminal/konsole/xterm, Terminal.app+iTerm2 on macOS, wt on WSL2, or a custom '{argv}' template; the one-claude-per-container guard (SEC-3) in spawn_claude; + `spawn_path` opening the workspace mount in the system file manager via xdg-open/gio / `open` / wslview — the `b` Browse action), screens/ (create, add_repo, remove_repo, env_mounts, add_mount, add_port, ports, update_confirm, settings, terminal_select, git_identity, gh_token, add_key, menu, pull_confirm, delete_project, stop_all_confirm, shutdown, logs, sync_review)
 images/                base/Dockerfile (native ~/.local claude install + baked neovim) + overlays/{python,rust,node}.Dockerfile
 images/nvim/           curated, no-plugin-manager neovim config baked into the base image (init.lua + after/plugin/curated.lua): TS + Markdown + git-from-nvim. Plugins are native packages (pack/curated/start), treesitter parsers compiled to /opt/nvim-parsers, LSP servers (ts_ls/marksman/jsonls) + prettier on PATH — all baked read-only; nvim writes only shada/state to the .cache tmpfs. No runtime network/Mason. git identity is the injected GIT_CONFIG_* (commits from fugitive/gitsigns carry the right author). Floor unchanged (invariant 2)
 templates/             project.toml.example, profile.toml.example, claude-json-stub.json, squid.conf.j2
@@ -153,7 +156,9 @@ project env add <slug> ssh|file|env [...]           # add an env mount; `env <NA
 project env rm <slug> <ssh|dst|NAME> | env list     # remove (by ssh / file dst / env var name) or list a project's env mounts
 project ports add <slug> <container|host:container> [--bind IP] [--proto tcp|udp]   # publish a service port (-p; container ≥1024; default bind 127.0.0.1 host-only; recreate to apply)
 project ports rm <slug> <host[/proto]> | ports list # unpublish a port (by host port) or list a project's published ports
-config show                                         # global settings: resolved git identity + ssh keys/load status
+config show                                         # global settings: resolved git identity + terminal/opener + ssh keys/load status
+config terminal [--program X | --custom '…' | --auto]   # terminal for shell/claude windows (built-in launcher table per platform, or an '{argv}' template; TUI: Settings -> e)
+config opener [--command '…' | --auto]             # file-manager command for Browse (b)
 config git [--name ... --email ... | --clear]      # set/clear the injected git author identity (recreate to apply; --clear inherits the host git config)
 config gh-token [--clear | --stdin]                # set/clear the GitHub token injected as GH_TOKEN (hidden prompt; 0600 state-tier; recreate to apply)
 config image [--channel latest|stable] [--pin X | --no-pin] [--check on|off]   # claude release channel/pin + the on-start "newer claude?" check (default: latest, on)

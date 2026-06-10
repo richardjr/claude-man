@@ -22,14 +22,28 @@ It exists to solve four things at once:
    diffed against a baseline and offered back to your host config behind an **accept/reject
    gate**. Credentials and identity are **never** synced.
 
-> Status: **Phases 0–2 + most of Phase 3 working** (2026-06-05). Mint work/home profiles; create /
+> Status: **alpha — phases 0–3 working, 4–5 planned** (2026-06-10). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
 > (mismatch-guarded); watch per-account token usage **and live 5-hour / weekly subscription-limit
 > bars**; commit + push from inside a container (inherited git identity + `gh` baked into every image);
-> add / remove / inspect a project's git repos with live state; and mount ssh (agent-forward) + host
-> files into a container — all from both the CLI and the TUI. Phase 3 remainder (`project delete`,
-> version-bump), Phase 4 (strict egress) and Phase 5 (sync-back) are next — see [`ROADMAP.md`](ROADMAP.md).
-> 193 dependency-free tests; the hardened image is `image smoke`-gated.
+> add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
+> files into a container; publish service ports — all from both the CLI and the TUI.
+> **Not yet implemented** (honest `NotImplementedError` stubs): Phase 4 strict egress (`--egress
+> strict` projects build, but the firewall sidecar doesn't exist yet) and Phase 5 review-gated config
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 412 dependency-free tests; the hardened image is
+> `image smoke`-gated.
+
+## Platform support
+
+| Host | Status | Notes |
+|---|---|---|
+| **Linux** | ✅ supported | The reference platform (developed against Docker 29.x). |
+| **macOS** | ✅ supported | Docker Desktop runs the same Linux image; ssh-agent forwarding uses Docker Desktop's built-in default-agent socket; Terminal.app works out of the box (iTerm2/kitty/alacritty/wezterm too). |
+| **Windows** | ✅ via **WSL2** only | Run claude-man *inside* a WSL2 distro (with Docker Desktop's WSL backend or docker-ce in the distro) — there it *is* Linux. Windows Terminal (`wt`) and `explorer.exe`/`wslview` are auto-detected for spawned windows / Browse. **Native Windows is out of scope.** |
+
+The container side is identical everywhere: the image is Linux regardless of host, so the hardened
+profile never varies. On macOS, note that bind-mount I/O (VirtioFS) is slower than native Linux —
+large `yarn`/`npm` installs in `/workspace` take noticeably longer.
 
 ## How it fits together
 
@@ -59,7 +73,21 @@ The TOML registry answers *what a project is*; `docker ps` (queried fresh, never
 *what state its container is in right now*. The two never describe the same fact, so they can't
 drift — on any divergence the **registry wins** and the container is recreated.
 
-## Quick start (dev)
+## Install
+
+claude-man runs **from a git checkout** (no PyPI package yet):
+
+```bash
+git clone https://github.com/richardjr/claude-man.git
+cd claude-man
+uv sync          # installs textual + tomlkit into .venv
+```
+
+The checkout location matters: image builds resolve `images/` relative to the source tree, so keep
+the clone around (it *is* the install). Runtime state lives outside it, under
+`~/.config/claude-man` and `~/.local/state/claude-man`.
+
+## Quick start
 
 ```bash
 uv sync                       # install textual + tomlkit into .venv
@@ -208,8 +236,10 @@ So the agent can `git commit` and `gh` under the read-only rootfs:
   and `gh auth login` work in-container without hitting the read-only rootfs. **Changing the identity
   needs a `recreate`** to take effect.
 - **`gh` is baked into every image** (pinned GitHub CLI; rebuild base, then any overlay, to add it to an
-  existing install). No GitHub token is injected — auth is the operator's job: run `gh auth login` inside
-  the container (it writes the writable config dir), or supply a `GH_TOKEN` via a `file`/env mount.
+  existing install). A GitHub token is injected **only if you opt in** with `config gh-token` (stored
+  `0600` in the state tier, injected pass-through as `GH_TOKEN` — never in argv or the config file).
+  Without one, auth is the operator's job: run `gh auth login` inside the container (it writes the
+  writable config dir), or supply a token via an `env` mount.
 
 ```bash
 uv run claudemanctl config show                    # resolved git identity + ssh-key load status
@@ -226,6 +256,31 @@ uv run claudemanctl project recreate demo
 In the TUI, the **Settings** screen (press `,`) shows the resolved identity and ssh-key status; press
 `g` there to open the git-identity edit modal (leave a field blank to inherit the host). Recreate a
 project afterwards to apply.
+
+## Terminal & file-manager preferences
+
+`project shell` / `project claude` open a **detached terminal window** running `docker exec` into
+the container, and Browse (`b` in the TUI) opens the workspace in your file manager. Both are
+auto-detected per platform, and both are configurable:
+
+```bash
+uv run claudemanctl config terminal                 # show the current choice + what's installed
+uv run claudemanctl config terminal --program kitty # pick a launcher explicitly
+uv run claudemanctl config terminal --auto          # back to auto-detect
+# Any other terminal, via a template ('{argv}' expands to the docker exec argv;
+# '{title}' and '{class}' are also substituted):
+uv run claudemanctl config terminal --custom 'myterm --title {title} -e {argv}'
+
+uv run claudemanctl config opener --command 'nautilus'   # Browse opener (the path is appended)
+uv run claudemanctl config opener --auto
+```
+
+Built-in launchers: `ghostty`, `alacritty`, `kitty`, `wezterm`, `foot`, `gnome-terminal`,
+`konsole`, `xterm` (Linux/WSL2); `terminal-app` (Terminal.app — the zero-install macOS fallback),
+`iterm2`, plus `kitty`/`alacritty`/`wezterm` (macOS); `wt` (Windows Terminal, WSL2).
+Auto-detection prefers `ghostty` → `alacritty` → the rest, so existing setups behave unchanged.
+In the TUI, Settings (`,`) → `e` opens the picker. The preference lives in
+`~/.config/claude-man/config.toml` under `[terminal]` / `[opener]`.
 
 ## Building images
 
@@ -244,7 +299,32 @@ hardening rationale.
 
 ## Host requirements
 
-- Linux with Docker (rootful is fine; this was designed against Docker 29.x on Arch/Hyprland).
+- **Linux** (the reference platform), **macOS** (Docker Desktop), or **Windows via WSL2** — see
+  *Platform support* above.
+- Docker — rootful docker-ce on Linux/WSL2 (designed against Docker 29.x), or Docker Desktop on
+  macOS (also fine as the WSL2 backend on Windows).
 - Python ≥ 3.11 and [`uv`](https://docs.astral.sh/uv/).
-- A terminal emulator for spawned shells — `ghostty` (preferred) or `alacritty`.
+- A terminal emulator for spawned shells — any of the built-in launchers above, or your own via
+  `config terminal --custom`. macOS needs nothing extra (Terminal.app); on WSL2, Windows Terminal
+  is picked up automatically (install [`wslu`](https://wslutiliti.es/wslu/) for the best Browse
+  experience — `wslview` translates paths for Windows Explorer).
 - A Claude Code install on the host to mint profile tokens (`claude setup-token`).
+
+### Windows (WSL2) notes
+
+Everything runs **inside** the WSL2 distro — clone, `uv sync`, and run claude-man there, with
+either Docker Desktop's WSL integration or docker-ce installed in the distro. The host ssh-agent,
+state dirs, and workspaces are all distro-side, exactly like native Linux. `project shell|claude`
+opens Windows Terminal tabs (running `wsl.exe -e docker exec …`), and Browse opens the workspace
+in Explorer via `wslview`. Running claude-man from native Windows (PowerShell/cmd) is not
+supported.
+
+## Contributing & security
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, the test/lint gate, and the load-bearing
+  invariants every change must preserve.
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability (privately, please).
+
+## License
+
+[MIT](LICENSE) © Richard Reynolds

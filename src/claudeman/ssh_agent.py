@@ -32,7 +32,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config
+from . import config, hostplatform
 
 AGENT_TIMEOUT_S = 10.0
 # A SHA256 key fingerprint as printed by `ssh-add -l` / `ssh-keygen -lf` (the field after the bit count).
@@ -105,6 +105,12 @@ def ensure_agent() -> str | None:
     (e.g. ``ssh-agent`` not installed)."""
     if os.environ.get("SSH_AUTH_SOCK") and agent_reachable():
         return os.environ["SSH_AUTH_SOCK"]  # an existing session agent — use it as-is
+    if hostplatform.is_macos():
+        # No managed-agent fallback on macOS: Docker Desktop forwards only the DEFAULT (launchd)
+        # agent into its VM, so keys loaded into a claude-man-spawned agent at a custom socket
+        # would be invisible to every container. launchd normally provides SSH_AUTH_SOCK; if it's
+        # genuinely absent, surface that instead of building an agent containers can't reach.
+        return None
     sock = str(config.managed_ssh_agent_sock())
     # Harden the parent dir to 0700 BEFORE we trust anything at the managed path (mkdir's mode is
     # umask-masked, so chmod explicitly) — closes the window for another user to plant a socket there.

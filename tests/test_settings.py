@@ -123,6 +123,57 @@ class SettingsStoreTest(unittest.TestCase):
         s = settings_registry._parse({"image": {"claude_channel": "weekly"}})
         self.assertEqual(s.claude_channel, "latest")
 
+    # -- terminal / opener preferences -----------------------------------------
+    def test_terminal_defaults_to_auto(self) -> None:
+        s = settings_registry.load()
+        self.assertEqual(s.terminal_program, "")
+        self.assertEqual(s.terminal_command, ())
+        self.assertEqual(s.opener_command, ())
+
+    def test_terminal_program_roundtrip(self) -> None:
+        settings_registry.set_terminal(program="kitty")
+        self.assertEqual(settings_registry.load().terminal_program, "kitty")
+        settings_registry.set_terminal(program="")  # back to auto
+        self.assertEqual(settings_registry.load().terminal_program, "")
+
+    def test_terminal_custom_roundtrip(self) -> None:
+        settings_registry.set_terminal(program="custom",
+                                       command=["myterm", "-e", "{argv}"])
+        s = settings_registry.load()
+        self.assertEqual(s.terminal_program, "custom")
+        self.assertEqual(s.terminal_command, ("myterm", "-e", "{argv}"))
+
+    def test_terminal_custom_without_argv_element_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            settings_registry.set_terminal(program="custom", command=["myterm", "-e"])
+
+    def test_parse_coerces_broken_custom_to_auto(self) -> None:
+        # A hand-edited custom template missing '{argv}' must not brick load().
+        s = settings_registry._parse(
+            {"terminal": {"program": "custom", "command": ["myterm"]}})
+        self.assertEqual(s.terminal_program, "")
+
+    def test_parse_rejects_non_list_command(self) -> None:
+        with self.assertRaises(ValidationError):
+            settings_registry._parse({"terminal": {"command": "not-a-list"}})
+
+    def test_opener_roundtrip_and_clear(self) -> None:
+        settings_registry.set_opener(["nautilus", "--new-window"])
+        self.assertEqual(settings_registry.load().opener_command, ("nautilus", "--new-window"))
+        settings_registry.set_opener([])
+        self.assertEqual(settings_registry.load().opener_command, ())
+
+    def test_terminal_coexists_with_other_sections(self) -> None:
+        settings_registry.add_ssh_key("~/.ssh/a")
+        settings_registry.set_git_identity("X", "x@y.z")
+        settings_registry.set_terminal(program="kitty")
+        settings_registry.set_opener(["open"])
+        s = settings_registry.load()
+        self.assertEqual(s.ssh_keys, ("~/.ssh/a",))      # preserved across the terminal writes
+        self.assertEqual(s.git_user_name, "X")
+        self.assertEqual(s.terminal_program, "kitty")
+        self.assertEqual(s.opener_command, ("open",))
+
 
 if __name__ == "__main__":
     unittest.main()

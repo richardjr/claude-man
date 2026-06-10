@@ -71,8 +71,9 @@ test endpoint inside a container is reachable on the host, and **edit/commit in 
 (TypeScript + Markdown LSP, treesitter, git-from-nvim) — all from both the CLI and the TUI.
 
 **Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
-table to an async `docker ps`/`docker events` worker (TUI-2); the one-claude-per-container guard
-(SEC-3). **Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
+table to an async `docker ps`/`docker events` worker (TUI-2). The one-claude-per-container guard
+(SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10, with the open-sourcing pass).
+**Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
 incl. routing in-container ssh-git when egress is locked), Phase 5 (sync-back). Tracked lower-severity
 items live in [`docs/REVIEW.md`](docs/REVIEW.md).
 
@@ -138,10 +139,10 @@ SEC-2, IMG-2/5, IMG-3.)
 - [x] `docker/runner.py` create/start/stop + `docker/status.py` live JOIN, wired into the CLI/TUI via `lifecycle.py` (WIRE-1/WIRE-7); `claude-config` seeded first via `profiles/seed.py` (WIRE-3)
 - [~] `tui/app.py`: live JOIN + DEFINED→create+start with surfaced errors (TUI-1), `enter`→shell (TUI-3), cursor-by-slug (TUI-7); **still TODO:** async `docker ps` worker (TUI-2), drop the redundant re-query (TUI-4)
 - [x] `tui/screens/create.py`: `n`→new-project modal (slug/profile/overlay/egress; inline slug validation + duplicate guard; runs `lifecycle.create_project` in a thread worker that converts every failure to a red `Result`). **Repos/env/allowlist capture deferred** — `create_project` has no `repos` param yet (see Phase 3)
-- [x] `tui/terminals.py`: detached ghostty/alacritty spawn (**SEC-6** CLI-boundary slug validation for `shell`/`claude` still TODO — distinct from the create-form slug check above)
+- [x] `tui/terminals.py`: detached terminal spawn — settings-driven launcher table (ghostty/alacritty/kitty/wezterm/foot/gnome-terminal/konsole/xterm + macOS Terminal.app/iTerm2 + WSL2 wt, or a custom template) (**SEC-6** done: slug validated at the CLI argparse boundary *and* in `_inner_exec` before the keep-open shell string)
 - [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (TUI-5)
 - [x] Auth: `profiles.load_token(name)` injects a `0600` token file as `CLAUDE_CODE_OAUTH_TOKEN`; minted by `profile add` (Phase 2); `ANTHROPIC_*` scrubbed incl. `env_file` (0.5)
-- [ ] **SEC-3:** enforce "one claude per container" at the spawn paths (guard not yet implemented; CLAUDE.md invariant 6 wording reflects this)
+- [x] **SEC-3:** "one claude per container" enforced in `terminals.spawn_claude` (a /proc comm probe via `docker exec`; fails open on probe errors; both the CLI and TUI spawn paths go through it)
 - [x] **In-container git identity + GitHub CLI (under `--read-only` rootfs):** `git commit` failed
   (*Author identity unknown*) and `git config --global` hit EROFS on the read-only rootfs. New
   `gitconfig.py` injects the author identity via git ENV-config (`GIT_CONFIG_COUNT` +

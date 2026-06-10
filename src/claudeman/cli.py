@@ -21,6 +21,18 @@ def _todo(phase: int, what: str) -> int:
     return 2
 
 
+def _slug_arg(value: str) -> str:
+    """argparse ``type=`` for project slugs / profile names — the SEC-6 CLI-boundary guard.
+
+    Rejects a malformed slug before it can reach path construction or a terminal spawn."""
+    from .registry.schema import ValidationError, validate_slug
+
+    try:
+        return validate_slug(value)
+    except ValidationError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 # --------------------------------------------------------------------------
 # profile
 # --------------------------------------------------------------------------
@@ -677,6 +689,8 @@ def cmd_config_show(args) -> int:
     pin = f", pin {s.claude_version_pin}" if s.claude_version_pin else ""
     print(f"claude image: channel {s.claude_channel}{pin}, "
           f"on-start update check {'on' if s.image_update_check else 'off'}")
+    print(f"terminal: {_terminal_summary(s)}")
+    print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -728,6 +742,87 @@ def cmd_config_gh_token(args) -> int:
         return 1
     gh_token.save(token)  # 0600 in the state tier; never echoed, never in argv
     print("gh token saved (0600). Recreate a project to inject it as GH_TOKEN.")
+    return 0
+
+
+def _terminal_summary(s) -> str:
+    """One-line current-terminal description shared by `config show` and `config terminal`."""
+    if s.terminal_program == terminals.CUSTOM_PROGRAM:
+        return f"custom: {' '.join(s.terminal_command)}"
+    if s.terminal_program:
+        return s.terminal_program
+    try:
+        return f"auto ({terminals.resolve_spec().name} detected)"
+    except RuntimeError as exc:
+        return f"auto — {exc}"
+
+
+def cmd_config_terminal(args) -> int:
+    from .registry import schema
+    from .registry import settings as settings_registry
+
+    if args.auto:
+        settings_registry.set_terminal(program="")
+        print("terminal preference cleared (auto-detect)")
+        return 0
+    if args.custom is not None:
+        import shlex as _shlex
+        command = _shlex.split(args.custom)
+        try:
+            settings_registry.set_terminal(program=terminals.CUSTOM_PROGRAM, command=command)
+        except schema.ValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"terminal set: custom: {' '.join(command)}")
+        return 0
+    if args.program is not None:
+        name = args.program.strip()
+        if name not in terminals.known_program_names():
+            print(f"unknown terminal {name!r}: one of "
+                  f"{', '.join(terminals.known_program_names())}", file=sys.stderr)
+            return 1
+        if name == terminals.CUSTOM_PROGRAM and \
+                "{argv}" not in settings_registry.load().terminal_command:
+            print("no custom command template set yet — use "
+                  "`config terminal --custom 'myterm -T {title} -e {argv}'`", file=sys.stderr)
+            return 1
+        try:
+            settings_registry.set_terminal(program=name)
+        except schema.ValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"terminal set: {name}")
+        return 0
+    s = settings_registry.load()
+    print(f"terminal: {_terminal_summary(s)}")
+    print("\navailable on this platform:")
+    for spec in terminals.platform_terminals():
+        mark = "installed" if spec.available() else "not installed"
+        print(f"  {spec.name:<14} [{mark}]")
+    print("\nset with `config terminal --program <name>`, `--custom '<template>'` "
+          "('{argv}' = the docker exec argv; also '{title}', '{class}'), or `--auto`")
+    return 0
+
+
+def cmd_config_opener(args) -> int:
+    from .registry import settings as settings_registry
+
+    if args.auto:
+        settings_registry.set_opener([])
+        print("opener preference cleared (platform default)")
+        return 0
+    if args.command is not None:
+        import shlex as _shlex
+        command = _shlex.split(args.command)
+        if not command:
+            print("empty opener command", file=sys.stderr)
+            return 1
+        settings_registry.set_opener(command)
+        print(f"opener set: {' '.join(command)} (the path is appended)")
+        return 0
+    s = settings_registry.load()
+    print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
+    print("set with `config opener --command 'nautilus'`, or `--auto` for the platform default")
     return 0
 
 
@@ -818,7 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     # profile
     prof = sub.add_parser("profile", help="account profiles").add_subparsers(dest="cmd", required=True)
     pa = prof.add_parser("add", help="mint a profile token via `claude setup-token`")
-    pa.add_argument("name")
+    pa.add_argument("name", type=_slug_arg)
     pa.add_argument("--default", action="store_true", help="make this the default profile")
     pa.add_argument("--email", help="account email (else read from `claude auth status`)")
     pa.add_argument("--display-name", dest="display_name", help="human-readable label")
@@ -828,33 +923,33 @@ def build_parser() -> argparse.ArgumentParser:
                     help="login via Anthropic Console (API billing) before minting")
     pa.set_defaults(func=cmd_profile_add)
     pr = prof.add_parser("renew", help="re-mint an expired token")
-    pr.add_argument("name")
+    pr.add_argument("name", type=_slug_arg)
     pr.set_defaults(func=cmd_profile_renew)
     pv = prof.add_parser("verify", help="show which account a profile's token authenticates as")
-    pv.add_argument("name")
+    pv.add_argument("name", type=_slug_arg)
     pv.add_argument("--raw", action="store_true", help="also print the raw auth status JSON")
     pv.set_defaults(func=cmd_profile_verify)
     ps = prof.add_parser("seed", help="rebuild the profile config seed")
-    ps.add_argument("name")
+    ps.add_argument("name", type=_slug_arg)
     ps.set_defaults(func=cmd_profile_seed)
     prof.add_parser("list", help="list profiles").set_defaults(func=cmd_profile_list)
     prof.add_parser("usage", help="token usage per profile across claude-man projects").set_defaults(
         func=cmd_profile_usage
     )
     pl = prof.add_parser("limits", help="per-account 5h/weekly subscription usage (/api/oauth/usage)")
-    pl.add_argument("name", nargs="?", help="a single profile (default: all)")
+    pl.add_argument("name", nargs="?", type=_slug_arg, help="a single profile (default: all)")
     pl.set_defaults(func=cmd_profile_limits)
 
     # project
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)
     pc = proj.add_parser("create", help="create a project + container")
-    pc.add_argument("slug")
-    pc.add_argument("--profile")
+    pc.add_argument("slug", type=_slug_arg)
+    pc.add_argument("--profile", type=_slug_arg)
     pc.add_argument("--overlay", choices=config.OVERLAYS)
     pc.add_argument("--egress", choices=config.EGRESS_MODES)
     pc.set_defaults(func=cmd_project_create)
     pup = proj.add_parser("up", help="create-if-needed + start (checks for a newer claude first)")
-    pup.add_argument("slug")
+    pup.add_argument("slug", type=_slug_arg)
     pup.add_argument("--update-yes", action="store_true", dest="update_yes",
                      help="rebuild the image to the newer claude without prompting")
     pup.add_argument("--no-update", action="store_true", dest="no_update",
@@ -870,26 +965,26 @@ def build_parser() -> argparse.ArgumentParser:
         ("unlock", cmd_project_unlock, "return to open egress"),
     ]:
         sp = proj.add_parser(name, help=helptext)
-        sp.add_argument("slug")
+        sp.add_argument("slug", type=_slug_arg)
         sp.set_defaults(func=func)
     proj.add_parser(
         "stop-all", help="stop + sync-out every running container (end-of-day batch)"
     ).set_defaults(func=cmd_project_stop_all)
     pdel = proj.add_parser("delete", help="tear down (container + state + registry; idempotent)")
-    pdel.add_argument("slug")
+    pdel.add_argument("slug", type=_slug_arg)
     pdel.add_argument("--keep-workspace", action="store_true", dest="keep_workspace",
                       help="preserve the /workspace checkout on disk (remove container + registry only)")
     pdel.add_argument("--force", action="store_true",
                       help="delete even when repos hold unsynced (uncommitted/unpushed) work")
     pdel.set_defaults(func=cmd_project_delete)
     prc = proj.add_parser("recreate", help="rebuild the container (optionally switch profile)")
-    prc.add_argument("slug")
-    prc.add_argument("--profile", help="switch the project to this profile (account)")
+    prc.add_argument("slug", type=_slug_arg)
+    prc.add_argument("--profile", type=_slug_arg, help="switch the project to this profile (account)")
     prc.add_argument("--force", action="store_true",
                      help="override the account-mismatch guard and re-seed the identity")
     prc.set_defaults(func=cmd_project_recreate)
     pst = proj.add_parser("status", help="live status JOINed with the registry")
-    pst.add_argument("slug", nargs="?")
+    pst.add_argument("slug", nargs="?", type=_slug_arg)
     pst.set_defaults(func=cmd_project_status)
 
     # project repo (add / rm / list) — manage a project's checked-out repos
@@ -897,7 +992,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="subcmd", required=True
     )
     radd = repo.add_parser("add", help="register a repo + clone it live into /workspace")
-    radd.add_argument("slug")
+    radd.add_argument("slug", type=_slug_arg)
     radd.add_argument("url", help="git remote (git@github.com:org/repo.git or https://…)")
     radd.add_argument("--branch", default="main")
     radd.add_argument("--dir", help="workspace subdir (default: derived from the url)")
@@ -905,13 +1000,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="register only; don't clone now (a later `up`/`sync-repos` clones it)")
     radd.set_defaults(func=cmd_project_repo_add)
     rrm = repo.add_parser("rm", help="drop a repo from the registry (checkout left on disk)")
-    rrm.add_argument("slug")
+    rrm.add_argument("slug", type=_slug_arg)
     rrm.add_argument("target", help="the repo's workspace dir or its url")
     rrm.add_argument("--purge", action="store_true",
                      help="also delete the on-disk checkout (containment-checked rm -rf)")
     rrm.set_defaults(func=cmd_project_repo_rm)
     rls = repo.add_parser("list", help="per-repo live git state (fetch-less)")
-    rls.add_argument("slug")
+    rls.add_argument("slug", type=_slug_arg)
     rls.set_defaults(func=cmd_project_repos_list)
 
     # project env (add / rm / list) — environment mounts (ssh + files) synced into the container
@@ -919,7 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="envcmd", required=True
     )
     eadd = env.add_parser("add", help="add an env mount (ssh / file / env var; recreate to apply)")
-    eadd.add_argument("slug")
+    eadd.add_argument("slug", type=_slug_arg)
     eadd.add_argument("kind", choices=("ssh", "file", "env"))
     eadd.add_argument("src", nargs="?", help="(file) host path ~/$VARS expanded; (env) the var NAME")
     eadd.add_argument("dst", nargs="?", help="(file) absolute container path")
@@ -928,11 +1023,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="(env) read the value from stdin instead of a hidden prompt")
     eadd.set_defaults(func=cmd_project_env_add)
     erm = env.add_parser("rm", help="remove an env mount (by 'ssh', a file's container dst, or env NAME)")
-    erm.add_argument("slug")
+    erm.add_argument("slug", type=_slug_arg)
     erm.add_argument("target")
     erm.set_defaults(func=cmd_project_env_rm)
     els = env.add_parser("list", help="list a project's env mounts")
-    els.add_argument("slug")
+    els.add_argument("slug", type=_slug_arg)
     els.set_defaults(func=cmd_project_env_list)
 
     # project ports (add / rm / list) — publish container service ports (ingress; recreate to apply)
@@ -940,29 +1035,29 @@ def build_parser() -> argparse.ArgumentParser:
         "ports", help="publish container service ports for testing (-p; recreate to apply)"
     ).add_subparsers(dest="portscmd", required=True)
     padd = ports.add_parser("add", help="publish a port (<container> or <host>:<container>; recreate to apply)")
-    padd.add_argument("slug")
+    padd.add_argument("slug", type=_slug_arg)
     padd.add_argument("spec", help="<container> (host=container) or <host>:<container> — container must be ≥1024")
     padd.add_argument("--bind", default="127.0.0.1",
                       help="host bind IP (default 127.0.0.1 = host-only; 0.0.0.0 = expose on the LAN)")
     padd.add_argument("--proto", choices=("tcp", "udp"), default="tcp")
     padd.set_defaults(func=cmd_project_ports_add)
     prm = ports.add_parser("rm", help="unpublish a port (by host port, optionally <host>/<proto>)")
-    prm.add_argument("slug")
+    prm.add_argument("slug", type=_slug_arg)
     prm.add_argument("target")
     prm.set_defaults(func=cmd_project_ports_rm)
     pls = ports.add_parser("list", help="list a project's published ports")
-    pls.add_argument("slug")
+    pls.add_argument("slug", type=_slug_arg)
     pls.set_defaults(func=cmd_project_ports_list)
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
-    prs.add_argument("slug")
+    prs.add_argument("slug", type=_slug_arg)
     prs.set_defaults(func=cmd_project_resync)
     pas = proj.add_parser("assets", help="show the asset source dir(s); --bootstrap a stub CLAUDE.md")
-    pas.add_argument("slug")
+    pas.add_argument("slug", type=_slug_arg)
     pas.add_argument("--bootstrap", action="store_true",
                      help="create a stub CLAUDE.md in the asset source if none exists")
     pas.set_defaults(func=cmd_project_assets)
     psy = proj.add_parser("sync", help="sync assets out (binds -> source); --in to sync in")
-    psy.add_argument("slug")
+    psy.add_argument("slug", type=_slug_arg)
     psy.add_argument("--in", dest="in_", action="store_true",
                      help="force sync-IN (asset source -> binds; source wins)")
     psy.set_defaults(func=cmd_project_sync)
@@ -970,10 +1065,10 @@ def build_parser() -> argparse.ArgumentParser:
     # sync
     sy = sub.add_parser("sync", help="config sync-back").add_subparsers(dest="cmd", required=True)
     syr = sy.add_parser("review", help="open the accept/reject gate")
-    syr.add_argument("slug")
+    syr.add_argument("slug", type=_slug_arg)
     syr.set_defaults(func=cmd_sync_review)
     syp = sy.add_parser("plan", help="dry-run the reconcile")
-    syp.add_argument("slug")
+    syp.add_argument("slug", type=_slug_arg)
     syp.set_defaults(func=cmd_sync_plan)
 
     # config (global settings — ssh keys auto-loaded into the agent + future general features)
@@ -993,6 +1088,19 @@ def build_parser() -> argparse.ArgumentParser:
     cssh.add_parser("load", help="load all configured keys into the agent now").set_defaults(
         func=cmd_config_ssh_load
     )
+    ct = cfg.add_parser("terminal",
+                        help="terminal emulator used for project shell/claude windows")
+    ct.add_argument("--program", help="a launcher name (run with no args to list), or 'custom'")
+    ct.add_argument("--custom", metavar="TEMPLATE",
+                    help="custom launcher template, e.g. 'myterm -T {title} -e {argv}' "
+                         "('{argv}' expands to the docker exec argv)")
+    ct.add_argument("--auto", action="store_true", help="clear the preference (auto-detect)")
+    ct.set_defaults(func=cmd_config_terminal)
+    cop = cfg.add_parser("opener", help="file-manager command used by Browse (b)")
+    cop.add_argument("--command", metavar="CMD",
+                     help="opener argv, e.g. 'nautilus' or 'gio open' (the path is appended)")
+    cop.add_argument("--auto", action="store_true", help="clear (use the platform default)")
+    cop.set_defaults(func=cmd_config_opener)
     cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
     cg.add_argument("--name", help="set git user.name (overrides host inherit)")
     cg.add_argument("--email", help="set git user.email")

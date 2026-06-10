@@ -22,6 +22,19 @@ class ValidationError(ValueError):
     """Raised when a TOML definition is malformed."""
 
 
+def validate_slug(slug: str) -> str:
+    """Validate a project-slug / profile-name shape; returns it unchanged.
+
+    The CLI-boundary guard (review: SEC-6): slugs/names from argv reach path construction
+    (``projects/<slug>.toml``, ``state/profiles/<name>/``) and — for spawn verbs — a terminal
+    launch, so they must be shape-checked BEFORE first use, not only when a dataclass happens
+    to be constructed. Same pattern the dataclasses enforce (``Project``/``Profile``).
+    """
+    if not _SLUG_RE.match(slug):
+        raise ValidationError(f"invalid slug {slug!r}: must match {_SLUG_RE.pattern}")
+    return slug
+
+
 def _validate_subdir(rel: str) -> None:
     """Reject a workspace-relative repo dir that could escape ``workspace/``.
 
@@ -446,6 +459,12 @@ class Settings:
     image_update_check: bool = True      # run the on-start "newer claude available?" check
     claude_channel: str = config.DEFAULT_CLAUDE_CHANNEL  # "latest" | "stable" — which channel to track
     claude_version_pin: str = ""         # exact version pin; "" -> track the channel
+    # Terminal / opener preferences (tui/terminals.py): which emulator opens the detached
+    # shell/claude windows, and which command opens the workspace in a file manager (Browse).
+    # All default to "" / () = auto-detect for the host platform — the pre-preference behaviour.
+    terminal_program: str = ""           # "" -> auto; a launcher name (`config terminal` lists); "custom"
+    terminal_command: tuple[str, ...] = ()  # program="custom": argv template ({title}/{class}/"{argv}")
+    opener_command: tuple[str, ...] = ()    # custom 'open this path' argv (path appended); () -> auto
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:
@@ -454,6 +473,11 @@ class Settings:
         if self.claude_channel not in config.CLAUDE_CHANNELS:
             raise ValidationError(
                 f"claude_channel {self.claude_channel!r} must be one of {config.CLAUDE_CHANNELS}"
+            )
+        if self.terminal_program == "custom" and "{argv}" not in self.terminal_command:
+            raise ValidationError(
+                "a custom terminal needs a command template with an '{argv}' element "
+                "(it expands to the docker exec argv), e.g. ['myterm', '-T', '{title}', '-e', '{argv}']"
             )
 
 

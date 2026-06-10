@@ -20,9 +20,11 @@ from textual.widgets import Button, DataTable, Label
 
 from ... import gh_token, gitconfig, lifecycle, ssh_agent
 from ...registry import settings as settings_registry
+from .. import terminals
 from .add_key import AddKeyScreen
 from .gh_token import GhTokenScreen
 from .git_identity import GitIdentityScreen
+from .terminal_select import TerminalSelectScreen
 
 _KEY_COLUMNS = ("Ssh key", "Status")
 
@@ -36,6 +38,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("l", "load", "Load all"),
         Binding("g", "git_identity", "Git identity"),
         Binding("t", "gh_token", "GH token"),
+        Binding("e", "terminal", "Terminal"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -58,7 +61,8 @@ class SettingsScreen(ModalScreen[None]):
             yield DataTable(id="keys", cursor_type="row")
             yield Label("", id="git-identity", classes="panel-title")
             yield Label("", id="gh-token", classes="panel-title")
-            yield Label("a Add · x Remove · l Load all · g Git · t GH token · esc Close",
+            yield Label("", id="terminal", classes="panel-title")
+            yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · esc Close",
                         id="settings-status")
             with Horizontal(id="buttons"):
                 yield Button("Add", variant="success", id="add")
@@ -66,13 +70,30 @@ class SettingsScreen(ModalScreen[None]):
                 yield Button("Load all", id="load")
                 yield Button("Git", id="git")
                 yield Button("GH", id="ghtoken")
+                yield Button("Terminal", id="term")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
         self.query_one("#keys", DataTable).add_columns(*_KEY_COLUMNS)
         self._render_git_identity()
         self._render_gh_token()
+        self._render_terminal()
         self._refresh_status()
+
+    def _render_terminal(self) -> None:
+        s = settings_registry.load()
+        if s.terminal_program == terminals.CUSTOM_PROGRAM:
+            label = f"custom: {' '.join(s.terminal_command)}"
+        elif s.terminal_program:
+            label = s.terminal_program
+        else:
+            try:
+                label = f"auto ({terminals.resolve_spec().name} detected)"
+            except RuntimeError:
+                label = "auto (none detected!)"
+        self.query_one("#terminal", Label).update(
+            f"Terminal (shell/claude windows): {label} · e to change"
+        )
 
     def _render_gh_token(self) -> None:
         state = "set" if gh_token.is_set() else "(none)"
@@ -198,6 +219,21 @@ class SettingsScreen(ModalScreen[None]):
             msg = "gh token cleared — recreate to apply" if gh_token.clear() else "no gh token was set"
         self._render_gh_token()
         self._status(lifecycle.Result(True, msg))
+
+    @on(Button.Pressed, "#term")
+    def action_terminal(self) -> None:
+        s = settings_registry.load()
+        self.app.push_screen(
+            TerminalSelectScreen(s.terminal_program, s.terminal_command), self._on_terminal
+        )
+
+    def _on_terminal(self, choice) -> None:
+        if choice is None:  # cancelled
+            return
+        settings_registry.set_terminal(program=choice)
+        self._render_terminal()
+        label = choice or "auto-detect"
+        self._status(lifecycle.Result(True, f"terminal preference saved: {label}"))
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

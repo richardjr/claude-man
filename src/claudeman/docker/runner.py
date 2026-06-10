@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from .. import config
+from .. import config, hostplatform
 from ..registry.schema import Project
 from . import labels
 
@@ -274,9 +274,10 @@ def create(
     """
     file_env = read_env_file(project.env_file) if project.env_file else {}
     # Resolve the host ssh-agent socket only if an ssh env-mount is configured (the socket PATH is not
-    # a secret; the private keys stay in the host agent — agent-forward).
+    # a secret; the private keys stay in the host agent — agent-forward). On macOS this resolves to
+    # Docker Desktop's forwarded default-agent socket — an arbitrary host socket can't cross the VM.
     ssh_sock = (
-        os.environ.get("SSH_AUTH_SOCK")
+        hostplatform.docker_ssh_auth_sock(os.environ.get("SSH_AUTH_SOCK"))
         if any(m.kind == "ssh" for m in project.env_mount) else None
     )
     argv = build_create_argv(

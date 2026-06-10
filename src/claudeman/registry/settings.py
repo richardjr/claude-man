@@ -22,6 +22,13 @@ from .. import config
 from .schema import Settings, ValidationError
 
 
+def _argv_list(table: dict, key: str, label: str) -> tuple[str, ...]:
+    value = table.get(key, [])
+    if not isinstance(value, list):
+        raise ValidationError(f"config {label} must be a list of argv strings")
+    return tuple(str(v) for v in value)
+
+
 def _parse(data: dict) -> Settings:
     ssh = data.get("ssh", {}) or {}
     keys = ssh.get("keys", [])
@@ -34,6 +41,14 @@ def _parse(data: dict) -> Settings:
     channel = str(image.get("claude_channel", config.DEFAULT_CLAUDE_CHANNEL) or config.DEFAULT_CLAUDE_CHANNEL)
     if channel not in config.CLAUDE_CHANNELS:
         channel = config.DEFAULT_CLAUDE_CHANNEL
+    terminal = data.get("terminal", {}) or {}
+    opener = data.get("opener", {}) or {}
+    program = str(terminal.get("program", "") or "")
+    command = _argv_list(terminal, "command", "terminal.command")
+    # Same coercion philosophy as the channel: a hand-edited custom template missing its '{argv}'
+    # element falls back to auto-detect instead of bricking load() (Settings would raise on it).
+    if program == "custom" and "{argv}" not in command:
+        program = ""
     return Settings(
         ssh_keys=tuple(str(k) for k in keys),
         ssh_auto_load=bool(ssh.get("auto_load", True)),
@@ -42,6 +57,9 @@ def _parse(data: dict) -> Settings:
         image_update_check=bool(image.get("update_check", True)),
         claude_channel=channel,
         claude_version_pin=str(image.get("claude_version_pin", "") or ""),
+        terminal_program=program,
+        terminal_command=command,
+        opener_command=_argv_list(opener, "command", "opener.command"),
     )
 
 
@@ -75,6 +93,13 @@ def save(settings: Settings) -> Path:
     image["claude_channel"] = settings.claude_channel
     image["claude_version_pin"] = settings.claude_version_pin
     doc["image"] = image
+    terminal = tomlkit.table()
+    terminal["program"] = settings.terminal_program
+    terminal["command"] = list(settings.terminal_command)
+    doc["terminal"] = terminal
+    opener = tomlkit.table()
+    opener["command"] = list(settings.opener_command)
+    doc["opener"] = opener
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +138,28 @@ def set_git_identity(name: str, email: str) -> Settings:
     updated = dataclasses.replace(
         load(), git_user_name=name.strip(), git_user_email=email.strip()
     )
+    save(updated)
+    return updated
+
+
+def set_terminal(*, program: str | None = None,
+                 command: list[str] | tuple[str, ...] | None = None) -> Settings:
+    """Set the terminal preference (``program=""`` -> auto-detect). ``command`` is the argv template
+    for ``program="custom"``. Raises ``ValidationError`` (via ``Settings``) for a custom program
+    without a usable template, so a bad ``config terminal --custom`` fails loudly."""
+    cur = load()
+    updated = dataclasses.replace(
+        cur,
+        terminal_program=cur.terminal_program if program is None else program.strip(),
+        terminal_command=cur.terminal_command if command is None else tuple(command),
+    )
+    save(updated)
+    return updated
+
+
+def set_opener(command: list[str] | tuple[str, ...]) -> Settings:
+    """Set (or clear, with ``[]``) the custom file-manager opener argv used by Browse."""
+    updated = dataclasses.replace(load(), opener_command=tuple(command))
     save(updated)
     return updated
 

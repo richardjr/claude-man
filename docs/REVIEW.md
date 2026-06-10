@@ -13,8 +13,8 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 > 2 resolved **WIRE-1/2/3/7** (lifecycle wiring + token loader + config seeding), **BUG-1** (env
 > coercion), **TUI-1/3/7** (start-on-DEFINED, `enter`→shell, cursor-by-slug), and **SYNC-2** (seed
 > field-patch). **IMG-1**'s fix was finalised as a **native `~/.local` install** (which also clears
-> the `claude doctor` warnings). Still open: **TUI-2** (async projects refresh), **TUI-4**, **SEC-3**
-> (one-claude guard), **SEC-6** (CLI slug validation), and the Phase 3/4/5 design notes.
+> the `claude doctor` warnings). Still open: **TUI-2** (async projects refresh), **TUI-4**, and the Phase 3/4/5 design
+> notes. **SEC-3** (one-claude guard) and **SEC-6** (CLI slug validation) were closed 2026-06-10.
 
 ## Critical
 
@@ -44,9 +44,9 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 
 | ID | Location | Finding | Fix | Status |
 |----|----------|---------|-----|--------|
-| SEC-3 | `tui/terminals.py:83-84`; `cli.py:77-79` | Nothing enforces "one claude per container" (invariant 6), yet CLAUDE.md asserts in the present tense that the spawn paths do. Two `claude` race on `.claude.json`/session writes. | Add a `pgrep -x claude` guard before spawn, or soften the CLAUDE.md wording. | PLANNED (Phase 1/2) |
+| SEC-3 | `tui/terminals.py:83-84`; `cli.py:77-79` | Nothing enforces "one claude per container" (invariant 6), yet CLAUDE.md asserts in the present tense that the spawn paths do. Two `claude` race on `.claude.json`/session writes. | Add a `pgrep -x claude` guard before spawn, or soften the CLAUDE.md wording. | DONE (2026-06-10: `spawn_claude` probes /proc comm via `docker exec` and refuses a second claude; fails open) |
 | SEC-5 | `docs/SECURITY.md:26` | Trust-boundary table lists "refreshed token (in-place in the bind)" as an allowed container→host flow — contradicts the env-token/no-credentials-file model and could lure a contributor into re-introducing `.credentials.json`. | Remove/reword the row. | DONE (records) |
-| SEC-6 | `tui/terminals.py:24-30` | keep-open path rebuilds `docker exec` via `bash -lc` f-string; CLI `project shell/claude <slug>` passes the slug **unvalidated** (no `_SLUG_RE` at the CLI boundary), so a crafted slug reaches the shell string. | Validate slug at the CLI boundary (registry-membership); keep docker exec a pure argv list + terminal hold flag. | PLANNED (Phase 1) |
+| SEC-6 | `tui/terminals.py:24-30` | keep-open path rebuilds `docker exec` via `bash -lc` f-string; CLI `project shell/claude <slug>` passes the slug **unvalidated** (no `_SLUG_RE` at the CLI boundary), so a crafted slug reaches the shell string. | Validate slug at the CLI boundary (registry-membership); keep docker exec a pure argv list + terminal hold flag. | DONE (2026-06-10: argparse `type=` slug/name validation on every verb + `_inner_exec` re-validates before the keep-open shell string) |
 | BUG-1 | `registry/projects.py:54`; `runner.py:84` | Non-string TOML env values (`DEBUG = true`) render as Python repr (`DEBUG=True`). | Coerce env values to `str` at parse time (bools → `true`/`false`). | TODO (Phase 1-min) |
 | BUG-2 | `docker/status.py:83-90` | `_parse_label_csv` splits the `docker ps` Labels CSV on `,` — truncates any label value containing a comma (latent; current values are comma-free). | Read labels from `docker inspect --format '{{json .Config.Labels}}'`. | PLANNED (Phase 3) |
 | BUG-3 | `syncback/denylist.py:49,96` | `*-cache.json` (via fnmatch, `*` matches `/`) wrongly denies nested files like `agents/build-cache.json`. Over-denial, not a leak. | Anchor the `*-cache.json` class to `os.path.basename`. | PLANNED (Phase 5) |

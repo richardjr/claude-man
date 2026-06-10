@@ -19,7 +19,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import assets, config, env_secrets, gh_token, gitconfig, ssh_agent, updates
+from . import assets, config, env_secrets, gh_token, gitconfig, hostplatform, ssh_agent, updates
 from .checkout import gitstate, repos
 from .docker import images, runner, status
 from .profiles import seed as seed_mod
@@ -132,7 +132,10 @@ def _validate_mount_sources(project: Project) -> tuple[list[str], list[str]]:
                               f"(fix the path or `project env rm {project.slug} {m.dst}`)")
             elif not os.access(src, os.R_OK):
                 errors.append(f"env mount source not readable: {src}")
-        elif m.kind == "ssh" and not os.environ.get("SSH_AUTH_SOCK"):
+        elif m.kind == "ssh" and not os.environ.get("SSH_AUTH_SOCK") \
+                and not hostplatform.is_macos():
+            # On macOS the container gets Docker Desktop's forwarded default-agent socket
+            # regardless of SSH_AUTH_SOCK here, so the unset-var warning doesn't apply.
             warnings.append("ssh env-mount: no ssh-agent (SSH_AUTH_SOCK unset) — "
                             "`ssh-add` your key then `recreate`")
     return errors, warnings
