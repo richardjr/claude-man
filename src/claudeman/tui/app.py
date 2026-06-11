@@ -91,7 +91,13 @@ class ClaudeManApp(App):
         Binding("y", "sync_review", "Sync-back"),
         # global — app-wide
         Binding("n", "new_project", "New"),
+        # Bind BOTH "S" and "shift+s": terminals WITHOUT the Kitty keyboard protocol report Shift+S
+        # as the character "S", but terminals WITH it (ghostty/kitty/foot/wezterm) report "shift+s"
+        # (textual's _xterm_parser rewrites an uppercase CSI-u name to shift+<lower>). A lone
+        # Binding("S") silently never fires under Kitty mode — Shift+S looks dead and stop-all appears
+        # frozen. The alias is show=False so it's not a duplicate row in the command palette.
         Binding("S", "stop_all", "Stop all", key_display="S"),
+        Binding("shift+s", "stop_all", "Stop all", show=False),
         Binding("v", "view_menu", "View…"),
         Binding("comma", "settings", "Settings", key_display=","),
         Binding("q", "quit", "Quit"),
@@ -520,12 +526,18 @@ class ClaudeManApp(App):
         self.exit()
 
     def _running_slugs(self) -> list[str]:
-        """UP rows NOT mid-lifecycle — a `_busy` slug (create/recreate in flight) must not be stopped
-        out from under its worker (mirrors action_toggle_running's busy guard).
+        """Registry-defined, UP, NOT mid-lifecycle slugs — what stop-all may stop.
+
+        Three filters: ``UP`` (only running containers), ``not in _busy`` (a create/recreate in flight
+        must not be stopped out from under its worker — mirrors action_toggle_running's guard), and
+        ``projects.exists`` (skip ORPHAN containers — a claude-man-labelled container with no registry
+        entry; the registry is the source of truth and every other action refuses orphans, so stop-all
+        must not silently stop one either — invariant 4 / TUI-6).
 
         Reads the CACHED rows from the 2 s poll, not a fresh ``docker ps`` — so ``action_stop_all`` (a
         UI-thread handler) never blocks on a subprocess while deciding what to stop."""
-        return [r.slug for r in self._last_rows if r.kind == status.UP and r.slug not in self._busy]
+        return [r.slug for r in self._last_rows
+                if r.kind == status.UP and r.slug not in self._busy and projects.exists(r.slug)]
 
     def action_stop_all(self) -> None:
         """End-of-day command: stop + sync-out every running container, then optionally quit. Confirms
@@ -552,9 +564,18 @@ class ClaudeManApp(App):
             return
         self._stopping_all = True
         # Spinner + live status off-thread (docker stop + a shutil sync-out would freeze the UI thread).
+        # The dismiss callback (_on_shutdown_dismissed) clears the guard + ref on EITHER exit path — the
+        # worker finishing, OR the operator pressing Esc to hide a stalled modal — so the TUI always
+        # returns to a usable state and `S` works again.
         self._shutdown_screen = ShutdownScreen(len(slugs))
-        self.push_screen(self._shutdown_screen)
+        self.push_screen(self._shutdown_screen, self._on_shutdown_dismissed)
         self._stop_all_worker(slugs, then_exit=then_exit)
+
+    def _on_shutdown_dismissed(self, _result) -> None:
+        """Fires when the progress modal is dismissed — by the worker (done) or the operator (Esc-hide).
+        Either way the stop-all guard is cleared so a wedged background worker can't leave `S` dead."""
+        self._shutdown_screen = None
+        self._stopping_all = False
 
     @work(thread=True, group="stop_all")
     def _stop_all_worker(self, slugs: list[str], *, then_exit: bool) -> None:
@@ -577,14 +598,19 @@ class ClaudeManApp(App):
                 self.call_from_thread(self._after_stop_all, total)
 
     def _after_stop_all(self, total: int) -> None:
-        """Stop-all finished and we're staying in the app: drop the progress modal, refresh, log."""
+        """Stop-all worker finished (stay path): drop the progress modal if it's still up, refresh, log.
+
+        The operator may have already Esc-hidden the modal (``_shutdown_screen`` is then None and the
+        guard already cleared via ``_on_shutdown_dismissed``) — in that case just refresh + log. When
+        the modal IS still up, dismissing it triggers ``_on_shutdown_dismissed`` which clears the guard."""
         if self._shutdown_screen is not None:
             try:
-                self._shutdown_screen.dismiss()
-            except Exception:  # noqa: BLE001 - the screen may already be gone
-                pass
-            self._shutdown_screen = None
-        self._stopping_all = False
+                self._shutdown_screen.dismiss()  # -> _on_shutdown_dismissed clears the guard + ref
+            except Exception:  # noqa: BLE001 - the screen may already be gone; clear the guard directly
+                self._shutdown_screen = None
+                self._stopping_all = False
+        else:
+            self._stopping_all = False  # modal already hidden by the operator
         self.refresh_projects()
         self._log(f"[green]stop-all: {total} container(s) stopped + assets synced out[/]")
 

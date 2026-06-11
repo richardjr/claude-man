@@ -180,6 +180,36 @@ class EnsureNetworkInternalTest(unittest.TestCase):
         self.assertIn("NOT --internal", res.detail)
 
 
+class TeardownTimeoutTest(unittest.TestCase):
+    """stop_proxy / teardown run on every project stop (open projects rm a non-existent sidecar).
+    A wedged/contended docker daemon must not hang the caller — every docker call here is bounded,
+    so the stop-all worker can't stall behind the un-cancellable progress modal forever."""
+
+    def _capture(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw.get("timeout")))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        return run, calls
+
+    def test_stop_proxy_is_time_bounded(self) -> None:
+        run, calls = self._capture()
+        with mock.patch.object(egress.runner, "_run", run):
+            egress.stop_proxy("demo")
+        self.assertTrue(calls and all(t is not None and t > 0 for _, t in calls),
+                        f"stop_proxy must pass a timeout to every docker call: {calls}")
+
+    def test_teardown_is_time_bounded(self) -> None:
+        run, calls = self._capture()
+        with mock.patch.object(egress.runner, "_run", run):
+            egress.teardown("demo")
+        self.assertEqual(len(calls), 2)  # rm sidecar + rm network
+        self.assertTrue(all(t is not None and t > 0 for _, t in calls),
+                        f"teardown must pass a timeout to every docker call: {calls}")
+
+
 class ParseDeniedTest(unittest.TestCase):
     SAMPLE = (
         "1700000000.123     0 172.18.0.3 TCP_DENIED/403 3897 CONNECT example.com:443 - HIER_NONE/- text/html\n"

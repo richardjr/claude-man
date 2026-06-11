@@ -195,17 +195,24 @@ def ensure_proxy(project, *, on_progress=None) -> Result:
     return Result(True, f"egress locked ({n} allowed domains) via {config.proxy_container_name(slug)}")
 
 
+# Teardown docker calls are TIME-BOUNDED: a wedged/contended daemon must never hang the caller
+# forever. `stop_proxy` runs in `lifecycle.stop` for EVERY project (open ones just rm a non-existent
+# sidecar — fast), so an unbounded `docker rm` here could stall the stop-all worker and trap the
+# operator behind the progress modal. `runner._run` maps a timeout to a non-zero result (124).
+_TEARDOWN_TIMEOUT_S = 20
+
+
 def stop_proxy(slug: str) -> None:
     """Remove the sidecar (best-effort) when the agent stops. The network is left in place (the stopped
     agent is still attached, so it can't be removed yet, and it's recreated idempotently on next up)."""
-    runner._run(["docker", "rm", "-f", config.proxy_container_name(slug)])
+    runner._run(["docker", "rm", "-f", config.proxy_container_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
 
 
 def teardown(slug: str) -> None:
     """Remove the sidecar AND the per-project network (best-effort, idempotent). Called on delete and
     when a project is unlocked back to open egress, so no orphan network/sidecar lingers."""
-    runner._run(["docker", "rm", "-f", config.proxy_container_name(slug)])
-    runner._run(["docker", "network", "rm", config.egress_net_name(slug)])
+    runner._run(["docker", "rm", "-f", config.proxy_container_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
+    runner._run(["docker", "network", "rm", config.egress_net_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
 
 
 # ---------------------------------------------------------------------------
