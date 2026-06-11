@@ -185,6 +185,15 @@ class CellLabelTest(unittest.TestCase):
         self.assertEqual(gitstate.commit_label(synced), "abc1234 bump")
         self.assertEqual(gitstate.commit_label(unc), "—")
 
+    def test_ab_style_flags_non_zero(self) -> None:
+        # A non-0/0 repo (unpushed/unpulled commits) pops yellow; 0/0 and "—" recede to dim.
+        base = dict(dir="a", present=True, upstream="origin/main")
+        self.assertEqual(gitstate.ab_style(RepoState(**base, ahead=2)), "yellow")
+        self.assertEqual(gitstate.ab_style(RepoState(**base, behind=1)), "yellow")
+        self.assertEqual(gitstate.ab_style(RepoState(**base)), "dim")
+        self.assertEqual(gitstate.ab_style(RepoState(dir="a", present=True, upstream=None)), "dim")
+        self.assertEqual(gitstate.ab_style(RepoState(dir="a", present=False, ahead=3)), "dim")
+
 
 class PullDecisionTest(unittest.TestCase):
     """The pure ff-only eligibility policy: only a clean, on-upstream, behind-only repo is pullable;

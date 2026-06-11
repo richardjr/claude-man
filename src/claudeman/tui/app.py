@@ -26,6 +26,7 @@ from ..docker import status
 from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
+from . import rowfx
 from . import terminals
 from .screens.add_repo import AddRepoScreen
 from .screens.create import NewProject, NewProjectScreen
@@ -51,6 +52,8 @@ _USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", 
 _USAGE_LEVEL_STYLE = {"ok": "green", "warn": "yellow", "crit": "red", "none": "dim"}
 # Braille spinner frames for the header "work in progress" indicator (start/stop/recreate/… take time).
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Band passes for a repo-panel git-change sweep ("a few times" — start/stop row sweeps run once).
+_GIT_SWEEP_REPEATS = 3
 # The two-line key bar replacing the stock Footer: row 1 = verbs acting on the SELECTED project row,
 # row 2 = app-wide verbs — so the scope of every key is explicit at a glance. Display only — key
 # dispatch stays in BINDINGS; keep the two in sync when adding a verb.
@@ -65,7 +68,8 @@ class ClaudeManApp(App):
     TITLE = "claude-man"
     CSS = """
     #projects { height: 1fr; }
-    #repos { height: auto; max-height: 8; border: round $panel; }
+    /* 13 = 10 repo rows + 1 header + 2 border — sized to show a full realistic repo list. */
+    #repos { height: auto; max-height: 13; border: round $panel; }
     #profiles { height: auto; max-height: 10; border: round $panel; }
     .panel-title { color: $text-muted; padding: 0 1; }
     RichLog { height: 8; border: round $panel; }
@@ -158,9 +162,20 @@ class ClaudeManApp(App):
         # profile name -> last subscription-usage result (5h/weekly). Fetched off-thread on a gentle
         # cadence (external endpoint); the usage panel reads this cache for the bar cells.
         self._util: dict[str, usage_api.UsageResult] = {}
+        # slug -> monotonic start for project rows mid state-change sweep, and the plain cell texts
+        # the frames are built from (also the settle repaint once the band exits). Both are
+        # rebuilt/pruned by _render_projects, so a deleted or reused slug can't replay a stale sweep.
+        self._rowfx: dict[str, float] = {}
+        self._row_cells: dict[str, list[str]] = {}
+        # (slug, repo dir) -> monotonic start for repo-panel rows whose git state just changed (went
+        # dirty / ahead-behind moved / new commit). Repeated passes (_GIT_SWEEP_REPEATS) — the scan is
+        # a 30 s background tick, so one quick band is easy to miss. Armed by _apply_gitstate's diff;
+        # frames paint only while that project is under the cursor (the panel shows one project).
+        self._repofx: dict[tuple[str, str], float] = {}
         table = self.query_one("#projects", DataTable)
-        self._repos_col = table.add_columns(*_COLUMNS)[_COLUMNS.index("Repos")]
-        self.query_one("#repos", DataTable).add_columns(*_REPO_COLUMNS)
+        self._proj_cols = table.add_columns(*_COLUMNS)
+        self._repos_col = self._proj_cols[_COLUMNS.index("Repos")]
+        self._repo_cols = self.query_one("#repos", DataTable).add_columns(*_REPO_COLUMNS)
         self.query_one("#profiles", DataTable).add_columns(*_USAGE_COLUMNS)
         self.refresh_projects()
         self.refresh_usage()
@@ -176,6 +191,9 @@ class ClaudeManApp(App):
         self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
         self.set_interval(0.2, self._tick_spinner)  # animate the header spinner while any op is in flight
+        # Row state-change sweeps: 30 fps only while one is live (resumed by _render_projects when a
+        # status flip is detected, paused again by _tick_rowfx once the last band exits).
+        self._fx_timer = self.set_interval(1 / rowfx.FPS, self._tick_rowfx, pause=True)
         # Boot splash, pushed LAST: everything above is already scheduled, so the table fills
         # underneath while the logo plays and the scroll-off reveals live data, not an empty shell.
         # Skipped when disabled (`config splash off`) or the terminal can't fit the logo.
@@ -213,17 +231,30 @@ class ClaudeManApp(App):
         # Restore the cursor by SLUG, not integer index — rows are slug-sorted and the set can
         # change between polls, so an index restore could land on the wrong project (review TUI-7).
         prev_slug = self._current_slug()
+        # Status flips since the LAST paint trigger the row sweep — one diff point covers every path
+        # (s/start-stop, stop-all, an external `docker stop`), since lifecycle workers and the 10 s poll
+        # all repaint through here. Diffed before _last_rows is overwritten; only UP transitions animate
+        # (DEFINED<->STOPPED is container bookkeeping, not a start/stop).
+        prev_kinds = {r.slug: r.kind for r in self._last_rows}
         table.clear()
         # Cache for _running_slugs (quit) AND the action handlers — so neither blocks on a fresh docker ps.
         self._last_rows = rows
+        cells_map: dict[str, list[str]] = {}
         for row in rows:
+            cells = [row.slug, row.kind, row.profile, row.egress,
+                     self._repos_cell(row), row.version or "-", row.status_text or "-"]
+            cells_map[row.slug] = cells
             # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
             kind = Text(row.kind, style=status.status_style(row.kind))
-            table.add_row(
-                row.slug, kind, row.profile, row.egress,
-                self._repos_cell(row), row.version or "-", row.status_text or "-",
-                key=row.slug,
-            )
+            table.add_row(cells[0], kind, *cells[2:], key=row.slug)
+            prev = prev_kinds.get(row.slug)
+            if prev is not None and prev != row.kind and status.UP in (prev, row.kind):
+                self._rowfx[row.slug] = time.monotonic()
+        self._row_cells = cells_map
+        self._rowfx = {s: v for s, v in self._rowfx.items() if s in cells_map}
+        if self._rowfx:
+            self._fx_timer.resume()
+            self._tick_rowfx()  # paint the first frame NOW — the repaint above drew the plain row
         if prev_slug is not None:
             slugs = [r.slug for r in rows]
             if prev_slug in slugs:
@@ -330,17 +361,40 @@ class ClaudeManApp(App):
             return  # a newer scan already won (last-writer-by-dispatch-seq; threads can't be preempted)
         self._gitstate_applied = seq
         live_set = set(live)
+        # Arm a repeated repo-row sweep for every repo whose VISIBLE row changed (went dirty,
+        # ahead/behind moved, new commit, branch switch) — diffed against the previous scan BEFORE
+        # the merge below overwrites it. A slug's first scan arms nothing (no baseline to differ
+        # from), so startup never plays a wall of sweeps.
+        now = time.monotonic()
+        for slug, new_summary in results.items():
+            prev = self._gitstate.get(slug)
+            if prev is None:
+                continue
+            prev_by_dir = {s.dir: s for s in prev.states}
+            for s in new_summary.states:
+                p = prev_by_dir.get(s.dir)
+                if p is not None and self._repo_cells(p) != self._repo_cells(s):
+                    self._repofx[(slug, s.dir)] = now
         # Merge keeps last-good for a slug whose scan threw this pass; the prune drops slugs gone from
         # the registry so a reused slug never renders the old project's repos (and the cache can't grow).
         self._gitstate = {k: v for k, v in {**self._gitstate, **results}.items() if k in live_set}
         self._gitstate_at = time.monotonic()
+        live_fx = {(slug, s.dir) for slug, summ in self._gitstate.items() for s in summ.states}
+        self._repofx = {k: v for k, v in self._repofx.items() if k in live_fx}
         self._paint_repos_column()  # update only the Repos cells from cache — no UI-thread docker ps
         self._render_repo_detail()
+        if self._repofx:
+            self._fx_timer.resume()
+            self._tick_rowfx()  # paint the first frame NOW — the panel render above drew base rows
 
     def _paint_repos_column(self) -> None:
         """Repaint the Repos column from the cache without a full ``refresh_projects`` (no docker ps)."""
         table = self.query_one("#projects", DataTable)
         for slug, summary in self._gitstate.items():
+            if (cells := self._row_cells.get(slug)) is not None:
+                cells[_COLUMNS.index("Repos")] = summary.line  # keep sweep frames + settle in sync
+            if slug in self._rowfx:
+                continue  # mid-sweep — the 30 fps tick paints this row from the updated cache
             try:
                 table.update_cell(slug, self._repos_col, summary.line, update_width=True)
             except Exception:  # noqa: BLE001 - row not rendered yet; the 2 s poll paints it from cache
@@ -365,10 +419,21 @@ class ClaudeManApp(App):
             panel.add_row("(no repos — press 'a' to add one)", "", "", "", "")
             return
         for s in summary.states:
-            # Colour the State cell so clean (green) vs dirty/problem (red) is obvious at a glance.
-            state = Text(gitstate.state_label(s), style=gitstate.state_style(s))
-            panel.add_row(s.dir, gitstate.branch_label(s), state,
-                          gitstate.ab_label(s), gitstate.commit_label(s))
+            panel.add_row(*self._repo_row_values(s), key=s.dir)
+
+    @staticmethod
+    def _repo_cells(s: gitstate.RepoState) -> tuple[list[str], list[str | None]]:
+        """One repo-panel row as (plain cell texts, base styles) — the single source for the resting
+        paint, the sweep frames, AND the change diff in _apply_gitstate (cells differ == row visibly
+        changed). State is green/red/yellow (clean/dirty/advisory); ↑/↓ pops yellow when non-0/0."""
+        cells = [s.dir, gitstate.branch_label(s), gitstate.state_label(s),
+                 gitstate.ab_label(s), gitstate.commit_label(s)]
+        return cells, [None, None, gitstate.state_style(s), gitstate.ab_style(s), None]
+
+    def _repo_row_values(self, s: gitstate.RepoState) -> list:
+        """The repo-panel row's resting cell values (styled Text where a base style applies)."""
+        cells, styles = self._repo_cells(s)
+        return [Text(c, style=st) if st else c for c, st in zip(cells, styles)]
 
     def on_data_table_row_highlighted(self, event) -> None:
         # Cursor moved on the projects table -> repaint the detail panel for the newly selected slug.
@@ -420,6 +485,75 @@ class ClaudeManApp(App):
         self._spin = (self._spin + 1) % len(_SPINNER)
         ops = ", ".join(f"{self._busy_verbs.get(s, 'working')} {s}" for s in sorted(self._busy))
         self.sub_title = f"{_SPINNER[self._spin]} {ops}"
+
+    @staticmethod
+    def _fx_styles(cells: list[str]) -> list[str | None]:
+        """Base styles for sweep frames: only the Status cell (index 1) is coloured at rest."""
+        return [None, status.status_style(cells[1])] + [None] * (len(cells) - 2)
+
+    def _tick_rowfx(self) -> None:
+        """Advance every live sweep one frame (30 fps; paused when none are live).
+
+        Drives both the project-row state-change sweeps and the repo-panel git-change sweeps.
+        Frames come from the pure ``rowfx.frame_cells`` (splash pattern) and land via per-cell
+        ``update_cell`` — never a row rebuild, so cursors and row keys are untouched. A row that
+        vanished mid-sweep (delete / cursor moved off the project) is dropped or painted blind;
+        a finished sweep settles the row back to its resting paint.
+        """
+        if not self._rowfx and not self._repofx:
+            self._fx_timer.pause()
+            return
+        now = time.monotonic()
+        if self._rowfx:
+            self._tick_project_sweeps(now)
+        if self._repofx:
+            self._tick_repo_sweeps(now)
+
+    def _tick_project_sweeps(self, now: float) -> None:
+        table = self.query_one("#projects", DataTable)
+        for slug, t0 in list(self._rowfx.items()):
+            cells = self._row_cells.get(slug)
+            if cells is None or slug not in table.rows:
+                del self._rowfx[slug]
+                continue
+            frame = rowfx.frame_cells(cells, now - t0, styles=self._fx_styles(cells))
+            if frame is None:  # band has exited — settle to the resting paint
+                del self._rowfx[slug]
+                self._settle_row(table, slug, cells)
+                continue
+            for col, markup in zip(self._proj_cols, frame):
+                table.update_cell(slug, col, Text.from_markup(markup))
+
+    def _tick_repo_sweeps(self, now: float) -> None:
+        """Repo-panel sweeps tick on TIME for every armed (slug, dir) but paint only the rows the
+        panel is actually showing (the cursor's project) — moving the cursor onto a project
+        mid-sweep picks the animation up in flight; an expired hidden sweep just drops."""
+        panel = self.query_one("#repos", DataTable)
+        shown = self._current_slug()
+        for (slug, dir_), t0 in list(self._repofx.items()):
+            summary = self._gitstate.get(slug)
+            s = next((x for x in summary.states if x.dir == dir_), None) if summary else None
+            if s is None:  # repo/project gone from the cache mid-sweep
+                del self._repofx[(slug, dir_)]
+                continue
+            cells, styles = self._repo_cells(s)
+            frame = rowfx.frame_cells(cells, now - t0, styles=styles, repeats=_GIT_SWEEP_REPEATS)
+            visible = slug == shown and dir_ in panel.rows
+            if frame is None:
+                del self._repofx[(slug, dir_)]
+                if visible:  # settle to the resting paint (hidden rows are already at rest)
+                    for col, value in zip(self._repo_cols, self._repo_row_values(s)):
+                        panel.update_cell(dir_, col, value)
+                continue
+            if visible:
+                for col, markup in zip(self._repo_cols, frame):
+                    panel.update_cell(dir_, col, Text.from_markup(markup))
+
+    def _settle_row(self, table: DataTable, slug: str, cells: list[str]) -> None:
+        """Repaint one row's cells to their resting values (post-sweep; mirrors _render_projects)."""
+        values = [cells[0], Text(cells[1], style=status.status_style(cells[1])), *cells[2:]]
+        for col, value in zip(self._proj_cols, values):
+            table.update_cell(slug, col, value)
 
     # -- actions ----------------------------------------------------------
     def action_open_shell(self) -> None:

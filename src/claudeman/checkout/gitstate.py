@@ -248,6 +248,13 @@ def ab_label(s: RepoState) -> str:
     return f"{s.ahead}/{s.behind}"
 
 
+def ab_style(s: RepoState) -> str:
+    """Rich colour for the ↑/↓ cell (pure — a plain colour name, mirrors ``state_style``):
+    a non-0/0 repo (unpushed or unpulled commits) shows yellow; 0/0 and the no-upstream ``—``
+    recede to dim so the flagged ones pop."""
+    return "yellow" if s.present and s.upstream is not None and (s.ahead or s.behind) else "dim"
+
+
 def commit_label(s: RepoState) -> str:
     """Last-commit cell: ``<short-sha> <subject>`` or ``—``."""
     return f"{s.last_sha} {s.last_subject}".strip() or "—"
