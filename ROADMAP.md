@@ -74,8 +74,9 @@ test endpoint inside a container is reachable on the host, and **edit/commit in 
 table to an async `docker ps`/`docker events` worker (TUI-2). The one-claude-per-container guard
 (SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10, with the open-sourcing pass).
 **Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
-incl. routing in-container ssh-git when egress is locked), Phase 5 (sync-back). Tracked lower-severity
-items live in [`docs/REVIEW.md`](docs/REVIEW.md).
+incl. routing in-container ssh-git when egress is locked), Phase 5 (sync-back), and **Phase 6
+(curated packs — skills + CLAUDE.md injectors selected per project; design agreed, see
+[`docs/PACKS.md`](docs/PACKS.md))**. Tracked lower-severity items live in [`docs/REVIEW.md`](docs/REVIEW.md).
 
 **Operator note:** containers built before the native-install image change show stale `claude
 doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
@@ -240,6 +241,27 @@ secret scan to `mask_line`. (SYNC-4/SYNC-6 denylist additions + SEC-5 doc fix al
 - [ ] `detect.py` classify; `diff.py` difflib + canonical key-diff + secret-mask; per-profile merge lock
 - [ ] `tui/screens/sync_review.py` accept/reject/skip gate with defaults (text accept; settings/MCP/deletions/conflict reject)
 - [ ] `merge.py`: backup → field-patch `settings.json` → `claude mcp add/remove --scope` → symlink-preserving tree copy + path rewrite → mirror to `setups/claude-code` + git commit; baseline refresh; `sync --plan` dry-run
+
+## Phase 6 — Curated packs (skills + CLAUDE.md injectors)
+**Goal:** a curated, in-repo library of task-focused skills + CLAUDE.md fragments that projects
+select as **packs** (bundles), materialized through the existing asset-sync rail so claude picks
+them up automatically. Full design: [`docs/PACKS.md`](docs/PACKS.md) (agreed 2026-06-11).
+
+_Key decisions: pack = a bundle (a dir of `claude-md/*.md` fragments + `skills/<name>/` that
+travel together; selection at pack granularity). Library tiers = `common/` + per-language dirs
+(discovered, not hardcoded); defaults = `default = true` packs in `common/` + `<language>/`,
+resolved at CREATE and written explicitly into the project TOML (no silent creep; a `defaults`
+verb re-applies on demand). `Project.language` is an EXPLICIT field — not inferred from the
+overlay (create may pre-fill the suggestion). Fragments land at `/workspace/.claude-man/<pack>/`
+and are LINKED from the main CLAUDE.md via a fenced block of `@` imports (operator content
+outside the block untouched); skills ride the existing claude-side allowlist. Curated-wins drift
+policy (re-stamp + backup + note); a state-tier manifest separates "ours to re-stamp" from
+operator files (deselection/collision safety). All container delivery is `assets.sync_in` — no
+new mounts, floor byte-identical (invariant 2)._
+
+- [ ] **6a:** `library/packs/<tier>/<pack>/` layout + `pack.toml` (description, `default`); `packs/library.py` (pure discovery/parse/hash + name-uniqueness lint); `packs/materialize.py` (asset-source writes + fenced CLAUDE.md block patch + manifest); `Project.packs`/`Project.language` schema; lifecycle `up` hook before `sync_in`; CLI (`packs list`, `project packs add|rm|list|defaults`); `launch_workdir` default → always `/workspace` (explicit `workdir` still wins; lone-repo auto-cd dropped)
+- [ ] **6b:** TUI Packs… checklist screen (grouped Common / language, drift indicator, re-apply defaults) + create-modal Language field
+- [ ] **6c:** curate the initial library: `guardrails` / `code-quality` / `workflow` / `review-skills` (common) + `node-conventions` / `python-uv` / `rust-cargo`; launch smoke (claude reports the imported memory). Templates are PUBLIC (repo is public) — house rules in, client/project-specific content stays in per-project assets
 
 ---
 
