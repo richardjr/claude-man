@@ -307,6 +307,28 @@ def check_update(project: Project) -> UpdateCheck:
     return UpdateCheck(current=current, target=target, note=f"image {current} up to date")
 
 
+def resolve_build_version() -> tuple[str, str]:
+    """The claude version a bare ``image build`` (no explicit ``--claude-version``) should bake.
+
+    Same precedence as ``check_update`` minus the per-project pin (an image build has no project
+    context): the global pin when set, else the tracked channel's current release (host-side GET),
+    else — offline / unreadable config, failing OPEN like ``check_update`` — the static
+    ``DEFAULT_CLAUDE_VERSION`` fallback. Returns ``(version, note)``; the note names the winning
+    source so the operator's log line shows why that version was picked. Never raises."""
+    fallback = config.DEFAULT_CLAUDE_VERSION
+    try:
+        settings = settings_registry.load()
+    except (OSError, ValueError):
+        return fallback, f"config unreadable — fallback {fallback}"
+    pin = (settings.claude_version_pin or "").strip()
+    if pin:
+        return pin, f"pinned {pin}"
+    rc = updates.resolve_channel(settings.claude_channel)
+    if rc.version:
+        return rc.version, f"{settings.claude_channel} {rc.version}"
+    return fallback, f"{rc.note or 'offline'} — fallback {fallback}"
+
+
 def _maybe_rebuild_for_update(project: Project, version: str, *, on_progress: ProgressFn | None) -> None:
     """Force-rebuild the project's image to ``version`` and remove the existing (stopped) container so
     ``ensure_created`` recreates it on the fresh image. Best-effort + fail-open: a RUNNING container or

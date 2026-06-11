@@ -1,4 +1,4 @@
-"""Pick the terminal emulator used for project shell/claude windows (Settings -> ``e``).
+"""Pick the terminal emulator used for project shell/claude/nvim windows (Settings -> ``e``).
 
 Lists the host platform's launcher table with installed/not-installed status, plus "auto"
 (detect — the default) and, when a template is configured, "custom". Dismisses the chosen
@@ -46,7 +46,7 @@ class TerminalSelectScreen(ModalScreen["str | None"]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("Terminal for shell/claude windows", classes="title")
+            yield Label("Terminal for shell/claude/nvim windows", classes="title")
             yield DataTable(id="terms", cursor_type="row")
             yield Label(
                 "custom template is set via `claudemanctl config terminal --custom '…'`",

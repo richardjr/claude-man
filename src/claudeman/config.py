@@ -46,9 +46,11 @@ PROXY_CONTAINER_PREFIX = "claude-man-proxy-"   # per-project squid sidecar: clau
 # Buildable image tags: the project overlays + the standalone proxy sidecar (not an overlay of base).
 BUILDABLE_IMAGES = OVERLAYS + (PROXY_IMAGE,)
 
-# Pinned claude version baked into the image (override per build). Keep in sync
-# with images/base/Dockerfile's CLAUDE_VERSION ARG default.
-DEFAULT_CLAUDE_VERSION = "2.1.160"
+# FALLBACK claude version for image builds — used only when the channel can't be resolved (offline /
+# unreadable config; see lifecycle.resolve_build_version). A bare `image build` and the on-start
+# update check both resolve the configured pin / tracked channel first, so this is never the normal
+# path. Keep in sync with images/base/Dockerfile's CLAUDE_VERSION ARG default.
+DEFAULT_CLAUDE_VERSION = "2.1.173"
 # Pinned GitHub CLI version baked into the image (keep in sync with the Dockerfile GH_VERSION ARG).
 DEFAULT_GH_VERSION = "2.93.0"
 

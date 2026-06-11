@@ -142,7 +142,7 @@ uv run claudemanctl image smoke base
 uv run claudemanctl profile add home --default     # completes `claude setup-token` (browser flow)
 uv run claudemanctl project create demo            # write registry + seed config + create container
 uv run claudemanctl project up demo                # start it
-uv run claudemanctl project shell demo             # open a shell inside (or `project claude demo`)
+uv run claudemanctl project shell demo             # open a shell inside (or `project claude|nvim demo`)
 uv run claudemanctl profile usage                  # per-account token usage
 ```
 
@@ -219,13 +219,14 @@ usage). Newly added profiles already get both scopes.
 uv run claudemanctl project create demo --profile work --overlay python --egress open
 #   --profile <name>             account to run under   (default: the default profile)
 #   --overlay base|python|rust|node   toolchain baked into the image (default: base)
-#   --egress  open|strict        network policy         (default: open; strict is Phase 4)
+#   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
 
 uv run claudemanctl project up demo         # create-if-needed + start
 uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug)
 uv run claudemanctl project stop demo       # stop the container (project + workspace are kept)
 uv run claudemanctl project shell demo      # open a shell in a new terminal
 uv run claudemanctl project claude demo     # run claude in a new terminal
+uv run claudemanctl project nvim demo       # open neovim (baked into the image) in a new terminal
 
 # Recreate the container (applies env/port/identity changes). Like `up`, it offers the on-start
 # claude update — prompts on a TTY; --update-yes rebuilds to the latest without asking, --no-update skips:
@@ -329,7 +330,7 @@ project afterwards to apply.
 
 ## Terminal & file-manager preferences
 
-`project shell` / `project claude` open a **detached terminal window** running `docker exec` into
+`project shell` / `project claude` / `project nvim` open a **detached terminal window** running `docker exec` into
 the container, and Browse (`b` in the TUI) opens the workspace in your file manager. Both are
 auto-detected per platform, and both are configurable:
 
@@ -389,7 +390,7 @@ must keep, [`ROADMAP.md`](ROADMAP.md) for the phase plan,
 
 Everything runs **inside** the WSL2 distro — clone, `uv sync`, and run claude-man there, with
 either Docker Desktop's WSL integration or docker-ce installed in the distro. The host ssh-agent,
-state dirs, and workspaces are all distro-side, exactly like native Linux. `project shell|claude`
+state dirs, and workspaces are all distro-side, exactly like native Linux. `project shell|claude|nvim`
 opens Windows Terminal tabs (running `wsl.exe -e docker exec …`), and Browse opens the workspace
 in Explorer via `wslview`. Running claude-man from native Windows (PowerShell/cmd) is not
 supported.

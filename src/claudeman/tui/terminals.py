@@ -257,6 +257,14 @@ def spawn_shell(slug: str) -> subprocess.Popen:
     return spawn(slug, "bash", workdir=launch_workdir(slug))
 
 
+def spawn_nvim(slug: str) -> subprocess.Popen:
+    """Open neovim (baked read-only into the image — images/nvim) in the project's launch workdir.
+
+    No one-per-container guard: unlike claude (invariant 6), parallel nvim instances share no
+    mutable state worth guarding (shada/state live per-container on the .cache tmpfs)."""
+    return spawn(slug, "nvim", workdir=launch_workdir(slug))
+
+
 # One `claude` per container (CLAUDE.md invariant 6 / review SEC-3): a second claude in the same
 # container races on `.claude.json`/session writes. The probe walks /proc comm names inside the
 # container (no procps dependency); the image's native install runs as a process named `claude`.

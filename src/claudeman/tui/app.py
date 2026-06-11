@@ -1,7 +1,7 @@
 """The claude-man Textual application.
 
 Phase-1 skeleton: a live projects table (registry JOINed with `docker ps`), bindings to
-open a shell / claude in a detached terminal, start/stop, a modal new-project form
+open a shell / claude / nvim in a detached terminal, start/stop, a modal new-project form
 (slug/profile/overlay/egress; repos are a later increment), and placeholders for the log
 pane and sync-review gate that later phases fill in.
 
@@ -17,7 +17,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import DataTable, Footer, Header, Label, RichLog
+from textual.widgets import DataTable, Header, Label, RichLog, Static
 
 from .. import config, lifecycle, usage, usage_api
 from ..checkout import gitstate
@@ -51,6 +51,14 @@ _USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", 
 _USAGE_LEVEL_STYLE = {"ok": "green", "warn": "yellow", "crit": "red", "none": "dim"}
 # Braille spinner frames for the header "work in progress" indicator (start/stop/recreate/… take time).
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# The two-line key bar replacing the stock Footer: row 1 = verbs acting on the SELECTED project row,
+# row 2 = app-wide verbs — so the scope of every key is explicit at a glance. Display only — key
+# dispatch stays in BINDINGS; keep the two in sync when adding a verb.
+_KEYBAR = (
+    "[dim]project[/] [b]↵[/b] shell  [b]c[/b] claude  [b]e[/b] editor  [b]b[/b] browse  "
+    "[b]s[/b] start/stop  [b]g[/b] repos…  [b]p[/b] project…  [b]y[/b] sync-back\n"
+    "[dim]global[/]  [b]n[/b] new  [b]S[/b] stop-all  [b]v[/b] view…  [b],[/b] settings  [b]q[/b] quit"
+)
 
 
 class ClaudeManApp(App):
@@ -61,23 +69,30 @@ class ClaudeManApp(App):
     #profiles { height: auto; max-height: 10; border: round $panel; }
     .panel-title { color: $text-muted; padding: 0 1; }
     RichLog { height: 8; border: round $panel; }
+    /* height: auto — on a narrow terminal the project row wraps onto a second line; a fixed
+       height: 2 would clip the whole global row (including the quit hint) out of view. */
+    #keybar { dock: bottom; height: auto; background: $panel; padding: 0 1; }
     """
-    # Footer stays compact: the highest-frequency verbs are top-level single keys; the lower-frequency
-    # repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the footer doesn't
-    # grow a key per action. Refresh-git, Add/Remove-repo, Pull-all -> g; Recreate/Delete -> p;
-    # Usage/Logs -> v. The action_* handlers are reused unchanged, dispatched via _on_menu_pick.
+    # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
+    # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
+    # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
+    # Ports, Egress-log, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers are reused
+    # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
+    # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
-        Binding("n", "new_project", "New"),
-        Binding("g", "repos_menu", "Repos…"),
-        Binding("e", "env_mounts", "Env…"),
-        Binding("p", "project_menu", "Project…"),
-        Binding("v", "view_menu", "View…"),
+        # project-scoped — act on the cursor's row
         Binding("enter", "open_shell", "Shell"),
         Binding("c", "open_claude", "Claude"),
+        Binding("e", "open_editor", "Editor (nvim)"),
         Binding("b", "browse", "Browse"),
         Binding("s", "toggle_running", "Start/Stop"),
-        Binding("S", "stop_all", "Stop all", key_display="S"),
+        Binding("g", "repos_menu", "Repos…"),
+        Binding("p", "project_menu", "Project…"),
         Binding("y", "sync_review", "Sync-back"),
+        # global — app-wide
+        Binding("n", "new_project", "New"),
+        Binding("S", "stop_all", "Stop all", key_display="S"),
+        Binding("v", "view_menu", "View…"),
         Binding("comma", "settings", "Settings", key_display=","),
         Binding("q", "quit", "Quit"),
     ]
@@ -90,6 +105,7 @@ class ClaudeManApp(App):
         ("p", "Pull all (ff-only)", "pull_all"),
     ]
     _PROJECT_MENU = [
+        ("e", "Env mounts", "env_mounts"),
         ("o", "Ports", "ports"),
         ("g", "Egress log (denied)", "egress_log"),
         ("r", "Recreate", "recreate"),
@@ -110,7 +126,7 @@ class ClaudeManApp(App):
                         classes="panel-title")
             yield DataTable(id="profiles")
             yield RichLog(id="log", highlight=True, markup=True)
-        yield Footer()
+        yield Static(_KEYBAR, id="keybar")
 
     def on_mount(self) -> None:
         # Slugs with an in-flight create/up/recreate worker. Same-slug lifecycle ops must not overlap
@@ -406,6 +422,9 @@ class ClaudeManApp(App):
     def action_open_claude(self) -> None:
         self._open_terminal("claude")
 
+    def action_open_editor(self) -> None:
+        self._open_terminal("nvim")
+
     def action_browse(self) -> None:
         """Open the project's workspace mount (the host-side `/workspace` bind dir) in the system file
         manager. Works regardless of container state — the workspace is a host dir that exists once the
@@ -428,7 +447,7 @@ class ClaudeManApp(App):
         self._log(f"[green]browsing[/] {ws}")
 
     def _open_terminal(self, program: str) -> None:
-        """Open a detached terminal running ``program`` (bash/claude) in the cursor's project.
+        """Open a detached terminal running ``program`` (bash/claude/nvim) in the cursor's project.
 
         A ``docker exec`` needs a RUNNING container, so a STOPPED/DEFINED project is started first —
         in a worker, since the start may have to build the image — and the terminal is spawned only
@@ -444,7 +463,7 @@ class ClaudeManApp(App):
         # not take the UP fast path the 2 s poll has just exposed and spawn a duplicate window — the
         # worker opens the terminal itself once the container is up.
         if slug in self._busy:
-            verb = "claude" if program == "claude" else "shell"
+            verb = {"claude": "claude", "nvim": "editor"}.get(program, "shell")
             self._log(f"[yellow]{slug}: {verb} skipped — an operation is already running[/]")
             return
         row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
@@ -464,10 +483,10 @@ class ClaudeManApp(App):
     def _spawn_terminal(self, slug: str, program: str) -> None:
         """Spawn the detached terminal window (UI thread). Wrapped so a missing terminal binary
         (RuntimeError from build_argv) or a spawn failure logs instead of bubbling up."""
-        spawn, verb, past = (
-            (terminals.spawn_claude, "claude", "launched") if program == "claude"
-            else (terminals.spawn_shell, "shell", "opened")
-        )
+        spawn, verb, past = {
+            "claude": (terminals.spawn_claude, "claude", "launched"),
+            "nvim": (terminals.spawn_nvim, "editor", "opened"),
+        }.get(program, (terminals.spawn_shell, "shell", "opened"))
         try:
             spawn(slug)
         except (RuntimeError, OSError) as exc:
@@ -510,7 +529,7 @@ class ClaudeManApp(App):
 
     def action_stop_all(self) -> None:
         """End-of-day command: stop + sync-out every running container, then optionally quit. Confirms
-        first (it closes detached claude/shell windows), then runs off-thread behind a progress modal."""
+        first (it closes detached claude/shell/nvim windows), then runs off-thread behind a progress modal."""
         if self._stopping_all:
             return  # a stop-all pass is already active — ignore a second `S`
         running = self._running_slugs()
@@ -672,6 +691,7 @@ class ClaudeManApp(App):
             "remove_repo": self.action_remove_repo,
             "refresh_git": self.action_refresh_gitstate,
             "pull_all": self.action_pull_all,
+            "env_mounts": self.action_env_mounts,
             "ports": self.action_ports,
             "egress_log": self.action_egress_log,
             "recreate": self.action_recreate,

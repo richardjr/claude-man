@@ -1,4 +1,4 @@
-"""`claudemanctl project shell|claude` auto-start-before-spawn ordering (dependency-free — no textual).
+"""`claudemanctl project shell|claude|nvim` auto-start-before-spawn ordering (dependency-free — no textual).
 
 Pins the fix that a STOPPED/DEFINED project is started BEFORE the detached `docker exec` terminal is
 spawned (previously the terminal opened against a dead container and its exec failed). Pure stdlib:
@@ -37,6 +37,7 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         self._patch(lifecycle, "up", self._fake_up_ok)
         self._patch(terminals, "spawn_shell", lambda slug: self.calls.append(f"shell:{slug}"))
         self._patch(terminals, "spawn_claude", lambda slug: self.calls.append(f"claude:{slug}"))
+        self._patch(terminals, "spawn_nvim", lambda slug: self.calls.append(f"nvim:{slug}"))
 
     def _patch(self, module, name, value) -> None:
         original = getattr(module, name)
@@ -58,6 +59,11 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         rc = cli.cmd_project_claude(_Args("demo"))
         self.assertEqual(rc, 0)
         self.assertEqual(self.calls, ["up:project:demo", "claude:demo"])
+
+    def test_stopped_project_started_before_nvim_spawn(self) -> None:
+        rc = cli.cmd_project_nvim(_Args("demo"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.calls, ["up:project:demo", "nvim:demo"])
 
     # -- already running: spawn straight in, no start -------------------------
     def test_running_project_spawns_without_up(self) -> None:

@@ -18,7 +18,7 @@
 
 FROM debian:trixie-slim
 
-ARG CLAUDE_VERSION=2.1.160
+ARG CLAUDE_VERSION=2.1.173
 ARG GH_VERSION=2.93.0
 ARG NVIM_VERSION=0.12.2
 ARG MARKSMAN_VERSION=2026-02-08
@@ -134,6 +134,15 @@ RUN set -eux; \
     pin stevearc/conform.nvim                      conform.nvim         619363c30309d29ffa631e67c8183f2a72caa373; \
     pin MeanderingProgrammer/render-markdown.nvim  render-markdown.nvim 5adf0895310c1904e5abfaad40a2baad7fe44a07; \
     pin tahayvr/matteblack.nvim                    matteblack.nvim      a8a039f5d6189b28d76fa0221e64965efec7e996; \
+    # File explorer: neo-tree (the same left panel as the operator's local LazyVim) + its deps.
+    # neo-tree/nui/plenary SHAs match the operator's lazy-lock.json (resolved 2026-06-11).
+    pin nvim-neo-tree/neo-tree.nvim                neo-tree.nvim        6ba0ef540a8dc92f9533433a3f10d414014676aa; \
+    pin MunifTanjim/nui.nvim                       nui.nvim             de740991c12411b663994b2860f1a4fd0937c130; \
+    pin nvim-lua/plenary.nvim                      plenary.nvim         b9fd5226c2f76c951fc8ed5923d85e4de065e509; \
+    pin nvim-tree/nvim-web-devicons                nvim-web-devicons    dfbfaa967a6f7ec50789bead7ef87e336c1fa63c; \
+    # Start dashboard: mini.starter (zero-dep; lists recent files inline natively — the picker-driven
+    # snacks dashboard the operator runs locally would be mostly dead keys here). Resolved 2026-06-11.
+    pin nvim-mini/mini.starter                     mini.starter         a7d8b353cf120fee32bb5d88e7a9de5eaec746e7; \
     find "$pack" -name .git -maxdepth 2 -type d -prune -exec rm -rf {} +; \
     chown -R agent:agent /home/agent/.config
 

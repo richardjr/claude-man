@@ -92,7 +92,7 @@ class SettingsScreen(ModalScreen[None]):
             except RuntimeError:
                 label = "auto (none detected!)"
         self.query_one("#terminal", Label).update(
-            f"Terminal (shell/claude windows): {label} · e to change"
+            f"Terminal (shell/claude/nvim windows): {label} · e to change"
         )
 
     def _render_gh_token(self) -> None:

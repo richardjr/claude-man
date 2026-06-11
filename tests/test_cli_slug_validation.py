@@ -32,6 +32,7 @@ BAD_SLUGS = (
 SLUG_VERBS = (
     ["project", "shell"],
     ["project", "claude"],
+    ["project", "nvim"],
     ["project", "up"],
     ["project", "stop"],
     ["project", "create"],

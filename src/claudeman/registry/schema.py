@@ -383,7 +383,7 @@ class Project:
     claude_version: str = ""             # per-project exact claude pin; "" -> the global channel/pin
     env: dict[str, str] = field(default_factory=dict)
     env_file: str | None = None
-    workdir: str = ""                    # where claude/shell launch (else: lone repo's dir, else /workspace)
+    workdir: str = ""                    # where claude/shell/nvim launch (else: lone repo's dir, else /workspace)
     extra_apt: tuple[str, ...] = ()
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
@@ -460,7 +460,7 @@ class Settings:
     claude_channel: str = config.DEFAULT_CLAUDE_CHANNEL  # "latest" | "stable" — which channel to track
     claude_version_pin: str = ""         # exact version pin; "" -> track the channel
     # Terminal / opener preferences (tui/terminals.py): which emulator opens the detached
-    # shell/claude windows, and which command opens the workspace in a file manager (Browse).
+    # shell/claude/nvim windows, and which command opens the workspace in a file manager (Browse).
     # All default to "" / () = auto-detect for the host platform — the pre-preference behaviour.
     terminal_program: str = ""           # "" -> auto; a launcher name (`config terminal` lists); "custom"
     terminal_command: tuple[str, ...] = ()  # program="custom": argv template ({title}/{class}/"{argv}")

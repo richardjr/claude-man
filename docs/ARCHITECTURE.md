@@ -204,7 +204,7 @@ docker create --name claude-man-<slug> \
   -v <state>/projects/<slug>/workspace:/workspace \
   -w /workspace \
   claude-man:<overlay> \
-  sleep infinity        # long-lived; shell/claude opened via `docker exec` from the TUI
+  sleep infinity        # long-lived; shell/claude/nvim opened via `docker exec` from the TUI
 ```
 
 **Writable surfaces (everything else is read-only):** `/home/agent/.claude` (persistent bind —
@@ -390,13 +390,18 @@ worker tailing `docker events`. The **Repos column** is the live git-state summa
 `1 uncloned`) from a separate **8 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
 thread, cached between scans — host-FS state, distinct from the never-cached container liveness); a
 **repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·
-Last commit), repainted on cursor-move from the same cache. Bindings: `n` new · `a` add-repo ·
-`R` remove-repo · `e` env-mounts · `enter` shell · `c` claude · `l` logs · `s` start/stop · `u` usage ·
-`g` refresh-git (fetch-ful) · `y` sync-review · `d` delete · `r` recreate · `,` settings (ssh keys +
-git identity; `g` there opens the git-identity edit modal). Add/Remove-repo are modal
+Last commit), repainted on cursor-move from the same cache. The bottom **key bar** is a two-row
+`Static` (replacing the stock Footer) so the scope of every key is explicit — row 1 `project`
+(acts on the cursor's row): `enter` shell · `c` claude · `e` editor (nvim) · `b` browse ·
+`s` start/stop · `g` Repos… · `p` Project… · `y` sync-review; row 2 `global`: `n` new ·
+`S` stop-all · `v` View… · `,` settings (ssh keys + git identity; `g` there opens the git-identity
+edit modal) · `q` quit. Lower-frequency verbs live behind the g/p/v submenus
+(`tui/screens/menu.py`): Repos… = add/remove-repo · refresh-git (fetch-ful) · pull-all;
+Project… = env-mounts · ports · egress-log · recreate · delete; View… = refresh-usage ·
+focus-logs. Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
-`e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` + `add_mount.py`): a modal listing the
+Project… → `e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` + `add_mount.py`): a modal listing the
 project's ssh/file mounts with in-screen add (validated against the dest-denylist) / remove / resync —
 the fast registry mutations run inline, `resync` (docker exec) on a thread worker.
 
@@ -405,8 +410,8 @@ the fast registry mutations run inline, `resync` (docker exec) on a thread worke
 - **Terminal spawn** (`tui/terminals.py`): a **separate OS window** (not `suspend()`), launched
   detached via `Popen(..., start_new_session=True)`. `ghostty` preferred, `alacritty` fallback, with
   `--class=claude-man-<slug>` so a Hyprland `windowrulev2` can place it:
-  `ghostty --class=claude-man-<slug> -e docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude}`.
-  `claude`/shell open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
+  `ghostty --class=claude-man-<slug> -e docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude|nvim}`.
+  `claude`/shell/nvim open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
   `[project] workdir`, else a **lone repo's checkout dir** (so a single-repo project drops you straight
   into it), else `/workspace`.
 

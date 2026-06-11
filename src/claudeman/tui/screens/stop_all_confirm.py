@@ -3,7 +3,7 @@
 Decoupled from quitting: pressing ``q`` now exits immediately and leaves containers running.
 This screen is the deliberate batch stop, reached via the top-level ``S`` binding. Stopping each
 container runs its asset sync-out (CLAUDE.md + skills/agents → the synced config tier) and closes any
-detached claude/shell windows, so we confirm first. KEYBOARD-FIRST: ``Enter``/``q`` = Stop, sync &
+detached claude/shell/nvim windows, so we confirm first. KEYBOARD-FIRST: ``Enter``/``q`` = Stop, sync &
 quit (the focused default — the end-of-day one-shot), ``s`` = Stop & sync (stay in the app),
 ``Esc`` = Cancel. Dismisses ``"stop_quit"`` / ``"stop_stay"`` / ``None``.
 """
@@ -51,7 +51,7 @@ class StopAllConfirmScreen(ModalScreen["str | None"]):
             yield Label(f"{n} container(s) running: " + ", ".join(self._running))
             yield Label(
                 "Stops each container and syncs its assets out (CLAUDE.md + skills/agents) to the "
-                "synced config tier. This closes any detached claude/shell windows.\n"
+                "synced config tier. This closes any detached claude/shell/nvim windows.\n"
                 "[b]Enter[/]/[b]q[/] = Stop, sync & quit   ·   [b]s[/] = Stop & sync (stay)   ·   "
                 "[b]Esc[/] = Cancel",
                 id="stop-all-note",

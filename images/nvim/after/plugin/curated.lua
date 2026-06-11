@@ -84,6 +84,22 @@ end)
 -- Markdown in-buffer rendering.
 safe("render-markdown", function() require("render-markdown").setup({}) end)
 
+-- File explorer (neo-tree — the same left panel as the local LazyVim install; icons need the
+-- TERMINAL's font to be a nerd font, which is host-side). <leader>e toggles, matching LazyVim.
+safe("neo-tree", function()
+  require("neo-tree").setup({
+    close_if_last_window = true,
+    -- No file logging: neo-tree's log lands in stdpath('data') (~/.local/share/nvim), which is on
+    -- the READ-ONLY rootfs in the hardened container (invariant 2) — the image smoke gate pins this.
+    log_to_file = false,
+    filesystem = {
+      follow_current_file = { enabled = true },
+      use_libuv_file_watcher = true,
+    },
+  })
+  vim.keymap.set("n", "<leader>e", "<cmd>Neotree toggle<cr>", { desc = "file explorer (neo-tree)" })
+end)
+
 -- Git: gitsigns (hunks/blame) + fugitive (:Git commit/push). claude-man injects your git identity, so
 -- commits made here carry the right author.
 safe("gitsigns", function() require("gitsigns").setup({}) end)
@@ -95,6 +111,25 @@ vim.keymap.set("n", "]h", "<cmd>Gitsigns next_hunk<cr>", { desc = "next hunk" })
 vim.keymap.set("n", "[h", "<cmd>Gitsigns prev_hunk<cr>", { desc = "prev hunk" })
 vim.keymap.set("n", "<leader>hs", "<cmd>Gitsigns stage_hunk<cr>", { desc = "stage hunk" })
 vim.keymap.set("n", "<leader>hp", "<cmd>Gitsigns preview_hunk<cr>", { desc = "preview hunk" })
+
+-- Start dashboard (mini.starter — opens on a bare `nvim`; type to filter, <CR> to pick). Recent
+-- files come from the shada on the .cache tmpfs, so they persist across nvim sessions within a
+-- container's lifetime and reset on recreate. Zero-dep — no picker needed (unlike the snacks
+-- dashboard the operator runs locally, whose default keys drive pickers this build doesn't bake).
+safe("starter", function()
+  local starter = require("mini.starter")
+  starter.setup({
+    header = "claude-man",
+    items = {
+      { name = "File tree (neo-tree)", action = "Neotree toggle", section = "Actions" },
+      { name = "Git status (fugitive)", action = "Git", section = "Actions" },
+      { name = "New file", action = "enew", section = "Actions" },
+      { name = "Quit", action = "qa", section = "Actions" },
+      starter.sections.recent_files(7, false),
+    },
+    footer = "type to filter · <CR> to open",
+  })
+end)
 
 -- Niceties.
 vim.keymap.set("n", "<leader>w", "<cmd>w<cr>", { desc = "save" })

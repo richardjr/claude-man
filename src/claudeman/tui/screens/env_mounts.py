@@ -1,6 +1,6 @@
 """Env-mounts management screen (Phase 3.x TUI).
 
-A single ``e``-opened modal that lists a project's env mounts and manages them in place — add (via
+A modal (opened from the Project… submenu: ``p`` → ``e``) that lists a project's env mounts and manages them in place — add (via
 ``AddMountScreen``), remove, and resync — matching the operator's "config options where you can add /
 delete one or more" model. Registry mutations (``lifecycle.add_mount``/``remove_mount``) are fast
 (flocked TOML writes, no subprocess) so they run inline; ``resync`` shells out to docker (re-seeds the

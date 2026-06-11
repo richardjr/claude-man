@@ -67,27 +67,37 @@ bottom:
 - **Log pane** — every action's result lands here (green ok / red failure / yellow advisory),
   including streamed docker-build progress.
 
-The footer lists the top-level keys. Three of them open **submenus** (press the key, then one
-more key to pick):
+The bottom key bar has two rows so the scope of every key is explicit: the **project** row
+acts on the project under the cursor; the **global** row acts app-wide. Three keys open
+**submenus** (press the key, then one more key to pick).
+
+**`project` row** — acts on the selected project:
+
+| Key | Action |
+|---|---|
+| `enter` | Shell into the selected project (auto-starts it if stopped) |
+| `c` | Claude in the selected project (auto-starts it if stopped) |
+| `e` | Editor — neovim in the project's workspace (auto-starts it if stopped) |
+| `b` | Browse the project's workspace in your file manager |
+| `s` | Start / stop the selected project |
+| `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
+| `p` | Project… → `e` Env mounts · `o` Ports · `g` Egress log · `r` Recreate · `d` Delete |
+| `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
+
+**`global` row** — acts app-wide:
 
 | Key | Action |
 |---|---|
 | `n` | New project |
-| `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `e` | Env mounts (ssh / file / env var) for the selected project |
-| `p` | Project… → `o` Ports · `r` Recreate · `d` Delete |
-| `v` | View… → `u` Refresh usage · `l` Focus logs |
-| `enter` | Shell into the selected project (auto-starts it if stopped) |
-| `c` | Claude in the selected project (auto-starts it if stopped) |
-| `b` | Browse the project's workspace in your file manager |
-| `s` | Start / stop the selected project |
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
-| `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
+| `v` | View… → `u` Refresh usage · `l` Focus logs |
 | `,` | Settings (ssh keys · git identity · GH token · terminal) |
 | `q` | Quit immediately — containers keep running |
 
-Everything acts on the project row under the cursor, and rows for orphan containers (a
+Project-row keys act on the row under the cursor, and rows for orphan containers (a
 container with no registry entry) are refused — the registry is the source of truth.
+(Env mounts used to be a top-level `e`; they now live in the Project… submenu, and `e`
+opens the editor.)
 
 ## 2. Create a project (`n`)
 
@@ -99,9 +109,10 @@ Press `n`. The **New project** form has four fields:
   inherit the default. Only existing profiles are listed (step 0).
 - **Overlay (image)** — `base`, `python`, `rust`, or `node`: the toolchain baked into the
   project's image.
-- **Egress** — `open` or `strict`. **Pick `open`**: the strict-egress firewall sidecar is
-  Phase 4 and not implemented yet — `strict` is recorded in the registry but doesn't filter
-  anything today (see [`ROADMAP.md`](../ROADMAP.md)).
+- **Egress** — `open` or `strict`. `strict` runs the project behind the allowlist egress
+  proxy (a squid sidecar on a no-route internal network — see the README's strict-egress
+  section); it can also be toggled later with `claudemanctl project lock|unlock <slug>`.
+  Start with `open` unless you've already tuned an allowlist.
 
 `Create` writes the registry TOML, auto-builds the image chain if missing (base, then the
 overlay — the first build takes minutes and streams into the log pane), seeds the per-project
@@ -179,7 +190,7 @@ Without a token, `gh` still works — run `gh auth login` inside the container (
 on a writable tmpfs), or add a project-scoped token as an `env` mount (step 7). Don't name an
 env mount `GH_TOKEN` though — that name is reserved for the Settings entry and rejected.
 
-## 6. SSH pass-through (`,` → `a`, then `e` → `a`)
+## 6. SSH pass-through (`,` → `a`, then `p` → `e` → `a`)
 
 This gives the agent working `git push` / `ssh` **without any private key ever entering the
 container** — the host ssh-agent signs, and only the agent *socket* is forwarded.
@@ -196,8 +207,9 @@ container** — the host ssh-agent signs, and only the agent *socket* is forward
 - `l` — Load all configured keys now; `x` — stop auto-loading a key (it stays loaded this
   session until you `ssh-add -d`).
 
-**Then add the ssh mount to the project.** Select the project, press `e` (Env mounts), then
-`a` (Add). Set **Kind** to `ssh` — there's nothing else to fill in, just `Add`. The status
+**Then add the ssh mount to the project.** Select the project, press `p` then `e` (Project…
+→ Env mounts), then `a` (Add). Set **Kind** to `ssh` — there's nothing else to fill in, just
+`Add`. The status
 line reminds you: mounts are fixed at container create, so **recreate to apply** (`Esc` back
 to the main screen, `p` → `r`).
 
@@ -222,7 +234,7 @@ managed agent if your session has none.
 
 ## 7. Other env mounts and published ports
 
-**File mounts and env vars** (`e` → `a`):
+**File mounts and env vars** (`p` → `e`, then `a`):
 
 - Kind `file` binds a host file (or directory) at a container path, read-only by default
   (e.g. `~/.netrc` → `/home/agent/.netrc`). Destinations inside claude-man-managed mounts
@@ -245,7 +257,7 @@ listen on `0.0.0.0`, not container-localhost. As with mounts: **recreate to appl
   skills/agents back to the synced config tier); starting syncs them in.
 - `S` is the end-of-day command: confirm once, and every running container is stopped +
   synced out (`Enter` there also quits; `s` stays). The confirm warns that stopping closes
-  any detached claude/shell windows.
+  any detached claude/shell/nvim windows.
 - `q` quits the TUI **immediately and leaves containers running** — quit is not stop. The
   containers, workspaces, and config dirs persist until you delete the project; after a host
   reboot the containers come back *stopped* (no restart policy is set) — press `s` to start
@@ -261,7 +273,8 @@ listen on `0.0.0.0`, not container-localhost. As with mounts: **recreate to appl
 
 Not in the TUI yet, honestly stubbed: the `y` sync-back review gate (Phase 5 — distinct from
 the automatic asset sync above) and live container logs in `v` → `l` (the pane it focuses is
-the TUI's own event log). Strict egress is Phase 4 — see [`ROADMAP.md`](../ROADMAP.md).
+the TUI's own event log). Strict egress is toggled from the CLI (`project lock|unlock`) or
+chosen at create; the TUI surfaces the Egress column and Project… → Egress log.
 
 ## Quick reference — what stays CLI-only
 

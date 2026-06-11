@@ -2,7 +2,7 @@
 
 The "submenu" primitive: a ``ModalScreen`` whose body IS the second keystroke — press a top-level key
 to open it, then one more key to pick an action. This mirrors the established ``EnvMountsScreen``
-pattern (a modal with its own hotkeys + a hint Label) so the footer never has to grow a key per verb;
+pattern (a modal with its own hotkeys + a hint Label) so the key bar never has to grow a key per verb;
 new actions are extra rows here, not new top-level ``Binding``s.
 
 It is deliberately group-agnostic: the app feeds it a title + a list of ``(key, label, token)`` rows

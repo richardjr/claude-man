@@ -64,6 +64,13 @@ class TerminalWorkdirTest(unittest.TestCase):
         argv = terminals.build_alacritty_argv("demo", "claude", workdir="/workspace/api")
         self.assertIn("-w /workspace/api", " ".join(argv))
 
+    def test_nvim_keep_open_drops_to_shell(self) -> None:
+        # The `e` Editor action: nvim gets the same keep-open wrap as claude — quitting the
+        # editor drops to a shell in the container instead of closing the window.
+        argv = terminals.build_ghostty_argv("demo", "nvim", workdir="/workspace/svc")
+        self.assertIn("docker exec -it -w /workspace/svc claude-man-demo nvim; exec bash",
+                      " ".join(argv))
+
     def test_alacritty_keep_open_holds(self) -> None:
         argv = terminals.build_alacritty_argv("demo", "claude")
         self.assertIn("--hold", argv)

@@ -407,6 +407,42 @@ class CheckUpdateTest(unittest.TestCase):
         self.assertIn("config", chk.note)
 
 
+class ResolveBuildVersionTest(unittest.TestCase):
+    """`resolve_build_version` — the version a bare `image build` bakes when no --claude-version is
+    given: pin > tracked channel > the static fallback (offline / unreadable config; fail open)."""
+
+    def _resolve(self, *, settings=None, channel_version=None, load_raises=None):
+        rc = ReleaseCheck(channel_version, "" if channel_version else "offline")
+        load = mock.Mock(side_effect=load_raises) if load_raises \
+            else mock.Mock(return_value=settings or Settings())
+        with mock.patch.object(lifecycle.settings_registry, "load", load), \
+             mock.patch.object(lifecycle.updates, "resolve_channel", return_value=rc) as resolve:
+            version, note = lifecycle.resolve_build_version()
+        return version, note, resolve
+
+    def test_pin_wins_without_network(self) -> None:
+        version, note, resolve = self._resolve(settings=Settings(claude_version_pin="2.1.150"),
+                                               channel_version="2.1.173")
+        self.assertEqual(version, "2.1.150")
+        self.assertIn("pinned", note)
+        resolve.assert_not_called()  # a pin must not trigger the channel GET
+
+    def test_channel_resolved_when_no_pin(self) -> None:
+        version, note, _ = self._resolve(settings=Settings(), channel_version="2.1.173")
+        self.assertEqual(version, "2.1.173")
+        self.assertIn("2.1.173", note)
+
+    def test_offline_falls_back_to_default(self) -> None:
+        version, note, _ = self._resolve(settings=Settings(), channel_version=None)
+        self.assertEqual(version, config.DEFAULT_CLAUDE_VERSION)
+        self.assertIn("fallback", note)
+
+    def test_unreadable_config_falls_back_to_default(self) -> None:
+        version, note, _ = self._resolve(load_raises=ValueError("bad toml"))
+        self.assertEqual(version, config.DEFAULT_CLAUDE_VERSION)
+        self.assertIn("fallback", note)
+
+
 class MaybeRebuildForUpdateTest(unittest.TestCase):
     """The rebuild+recreate helper: skip a running container, recreate a stopped one, fail open."""
 

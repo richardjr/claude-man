@@ -1,7 +1,7 @@
 """``claudemanctl`` — the scriptable CLI surface.
 
 Importable without ``textual``. Phase-0/1 implements the read-only/safe verbs (profile
-list, project status, shell/claude spawn, image build/smoke command rendering); the rest
+list, project status, shell/claude/nvim spawn, image build/smoke command rendering); the rest
 print an honest "not yet implemented (phase N)" and exit non-zero.
 """
 
@@ -248,8 +248,10 @@ def _open_terminal(slug: str, program: str) -> int:
         print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
         if not res.ok:
             return 1
-    label = "claude" if program == "claude" else "shell"
-    spawn = terminals.spawn_claude if program == "claude" else terminals.spawn_shell
+    label, spawn = {
+        "claude": ("claude", terminals.spawn_claude),
+        "nvim": ("nvim", terminals.spawn_nvim),
+    }.get(program, ("shell", terminals.spawn_shell))
     try:
         spawn(slug)
     except (RuntimeError, OSError) as exc:
@@ -264,6 +266,10 @@ def cmd_project_shell(args) -> int:
 
 def cmd_project_claude(args) -> int:
     return _open_terminal(args.slug, "claude")
+
+
+def cmd_project_nvim(args) -> int:
+    return _open_terminal(args.slug, "nvim")
 
 
 def cmd_project_create(args) -> int:
@@ -949,19 +955,26 @@ def cmd_config_image(args) -> int:
 
 
 def cmd_image_build(args) -> int:
+    from . import lifecycle
     from .docker import images
 
     overlay = args.overlay or "base"
+    # No --claude-version given -> resolve it (global pin, else the tracked channel's latest, else
+    # the offline fallback) instead of silently baking a stale hardcoded default.
+    version = args.claude_version
+    if not version:
+        version, note = lifecycle.resolve_build_version()
+        print(f"claude version: {note}")
     # A toolchain overlay is `FROM claude-man:base`, so on a clean machine `image build node` needs the
     # base layer first. Build it if missing (never rebuild an existing base) so the single command works.
     # The proxy image is STANDALONE (its own debian base, not FROM claude-man:base), so it skips this.
     needs_base = overlay not in ("base", config.PROXY_IMAGE)
     if needs_base and not args.dry_run and not images.image_exists("base"):
         print(f"base image {config.image_tag('base')} missing — building it first")
-        rc = images.build_one("base", claude_version=args.claude_version)
+        rc = images.build_one("base", claude_version=version)
         if rc != 0:
             return rc
-    return images.build_one(overlay, claude_version=args.claude_version, dry_run=args.dry_run)
+    return images.build_one(overlay, claude_version=version, dry_run=args.dry_run)
 
 
 def cmd_image_smoke(args) -> int:
@@ -1036,6 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
         ("claude", cmd_project_claude, "run claude in a new terminal"),
+        ("nvim", cmd_project_nvim, "open neovim in a new terminal"),
         ("lock", cmd_project_lock, "switch to strict egress (allowlist proxy; recreates)"),
         ("unlock", cmd_project_unlock, "return to open egress (recreates)"),
         ("egress-log", cmd_project_egress_log, "show denied egress destinations (for allowlist tuning)"),
@@ -1170,7 +1184,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_config_ssh_load
     )
     ct = cfg.add_parser("terminal",
-                        help="terminal emulator used for project shell/claude windows")
+                        help="terminal emulator used for project shell/claude/nvim windows")
     ct.add_argument("--program", help="a launcher name (run with no args to list), or 'custom'")
     ct.add_argument("--custom", metavar="TEMPLATE",
                     help="custom launcher template, e.g. 'myterm -T {title} -e {argv}' "
@@ -1211,7 +1225,9 @@ def build_parser() -> argparse.ArgumentParser:
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)
     ib = im.add_parser("build", help="build base/overlay/proxy image")
     ib.add_argument("overlay", nargs="?", choices=config.BUILDABLE_IMAGES)
-    ib.add_argument("--claude-version", default=config.DEFAULT_CLAUDE_VERSION)
+    ib.add_argument("--claude-version", default="",
+                    help="claude version to bake (default: the configured pin, else the tracked "
+                         "channel's latest release)")
     ib.add_argument("--dry-run", action="store_true")
     ib.set_defaults(func=cmd_image_build)
     ism = im.add_parser("smoke", help="smoke-test a hardened image")
