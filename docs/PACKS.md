@@ -1,7 +1,9 @@
 # Curated packs — skills + CLAUDE.md injectors (Phase 6 design)
 
-Status: **proposed** (design agreed 2026-06-11; not yet implemented). Implementation tracking
-lives in [`ROADMAP.md`](../ROADMAP.md) Phase 6.
+Status: **6a implemented** (2026-06-11 — library + schema + materializer + CLI verbs + the
+`/workspace` launch default). Remaining: **6b** (TUI Packs screen + create-modal Language field)
+and **6c** (deeper curation — port the operator's existing skills). Tracking:
+[`ROADMAP.md`](../ROADMAP.md) Phase 6.
 
 ## Concept
 
@@ -159,3 +161,41 @@ repos. Operators who prefer landing in the repo set `workdir = "<dir>"` once.
 - **6c** — curate the initial library content: guardrails / code-quality / workflow /
   review-skills (common) + node / python / rust convention packs; smoke that a launched claude
   actually reports the imported memory.
+
+## Implementation notes — 6a as built (2026-06-11)
+
+Everything in the design above is implemented as described; the concrete map:
+
+- **Modules:** `src/claudeman/packs/library.py` (pure: `discover()`, `defaults_for(language)`,
+  `tiers()`, `file_hash()`; raises `LibraryError` on curation mistakes) and
+  `src/claudeman/packs/materialize.py` (`refresh(project)`, the pure `patch_block`/`block_lines`/
+  `desired_files`, manifest load/save). Paths: `config.library_packs_dir()` (repo-relative, like
+  `images/`) and `config.packs_manifest_path(slug)` (state tier).
+- **Schema/registry:** `Project.language` + `Project.packs` (shape-validated only — a stored
+  name may outlive the library); `projects.set_packs()` comment-preserving TOML patch;
+  `DEFAULT_SYNC_WORKSPACE` gained `".claude-man"` (projects with a hand-written sync list need it
+  added — `refresh` notes when it's missing).
+- **Lifecycle:** `up()` calls `_packs_refresh` (fail-soft) right before `_sync_in`;
+  `create_project(language=…)` resolves + stores the default selection for NEW projects;
+  `lifecycle.set_packs(slug, names)` = registry → materialize → sync-in (immediate apply, no
+  recreate — used by the CLI, intended for the 6b TUI screen too).
+- **CLI:** `packs list [--tier]`, `project packs add|rm|list|defaults <slug>`,
+  `project create --language <tier>`.
+- **Starter library:** `common/guardrails` + `common/code-quality` (default),
+  `common/workflow` (opt-in), `node/node-conventions`, `python/python-uv`, `rust/rust-cargo`
+  (default within their tiers). All fragments only — no skills ported yet (that's 6c).
+- **Tests:** `tests/test_packs_library.py` (incl. the shipped-library lint),
+  `tests/test_packs_materialize.py` (patch idempotence, drift/collision/deselect, bind removal,
+  CLAUDE.md adoption), plus registry round-trip + the updated `launch_workdir` pins.
+
+**Migration notes for existing projects:** selections start empty — run
+`project packs defaults <slug>` to opt in (explicit-at-create means nothing creeps in);
+lone-repo projects now launch at `/workspace` — set `workdir = "<repo-dir>"` to restore the old
+landing spot.
+
+**6b sketch:** a `PacksScreen` modal (mirror `ports.py`/`env_mounts.py`) listing the library
+grouped Common / `<language>` with checkboxes + drift indicator, saving via
+`lifecycle.set_packs`; add a Language field to `screens/create.py` and thread it through
+`NewProject` → `create_project`. **6c:** port the operator's real skills into
+`library/packs/common/<pack>/skills/…` (remember: the repo is public) and verify in-container
+that claude reports the imported memory (`/memory` shows the `@` imports).

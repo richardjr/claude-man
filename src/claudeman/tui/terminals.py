@@ -12,8 +12,8 @@ On Linux/Wayland the ``--class``/``--app-id`` carries ``window_class(slug)`` so 
 can place these windows (e.g. Hyprland ``windowrulev2 = float, class:^(claude-man-.*)$``).
 
 ``build_*`` are pure (no process spawn, no filesystem beyond ``shutil.which`` in the pickers) so
-they can be unit-tested. ``claude``/shell open in the project's ``launch_workdir`` (a lone repo's
-dir by default) via ``docker exec -w``. ``spawn_path`` opens a HOST directory (the workspace bind
+they can be unit-tested. ``claude``/shell open in the project's ``launch_workdir`` (``/workspace``
+unless overridden) via ``docker exec -w``. ``spawn_path`` opens a HOST directory (the workspace bind
 source) in the system file manager (``xdg-open`` / ``open`` / ``wslview`` per platform).
 """
 

@@ -113,6 +113,8 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         ports=ports,
         allowlist=tuple(egress_tbl.get("allowlist", []) or ()),
         sync=sync,
+        language=str(proj.get("language", "") or ""),
+        packs=tuple(proj.get("packs", []) or ()),
     )
 
 
@@ -167,6 +169,10 @@ def save(project: Project) -> Path:
     if project.profile:
         proj["profile"] = project.profile
     proj["overlay"] = project.overlay
+    if project.language:
+        proj["language"] = project.language
+    if project.packs:
+        proj["packs"] = list(project.packs)
     if project.claude_version:
         proj["claude_version"] = project.claude_version
     if project.workdir:
@@ -460,6 +466,31 @@ def remove_port(slug: str, target: str) -> tuple[Project, PortMapping | None]:
     updated = dataclasses.replace(project, ports=tuple(kept))
     _rewrite_ports(slug, updated.ports)
     return updated, removed
+
+
+def set_packs(slug: str, names: tuple[str, ...]) -> Project:
+    """Replace the project's pack selection (comment-preserving scalar patch, atomic write).
+
+    Pure registry edit — materializing the selection into the asset source is the caller's job
+    (``packs.materialize.refresh``). Name SHAPE is validated via the dataclass; existence in the
+    library is the caller's concern (the CLI checks on ``add`` so typos fail early, but a stored
+    name may legitimately outlive the library entry)."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, packs=tuple(names))  # ValidationError on bad/dup names
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if updated.packs:
+        proj["packs"] = list(updated.packs)
+    elif "packs" in proj:
+        del proj["packs"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
 
 
 def delete_definition(slug: str) -> bool:

@@ -1,0 +1,2 @@
+description = "Python conventions: uv-only (no pip/poetry), pyproject-driven"
+default = true

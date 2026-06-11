@@ -1,0 +1,2 @@
+description = "Rust conventions: cargo-driven, fmt + clippy clean before done"
+default = true

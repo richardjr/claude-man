@@ -75,8 +75,11 @@ table to an async `docker ps`/`docker events` worker (TUI-2). The one-claude-per
 (SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10, with the open-sourcing pass).
 **Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
 incl. routing in-container ssh-git when egress is locked), Phase 5 (sync-back), and **Phase 6
-(curated packs — skills + CLAUDE.md injectors selected per project; design agreed, see
-[`docs/PACKS.md`](docs/PACKS.md))**. Tracked lower-severity items live in [`docs/REVIEW.md`](docs/REVIEW.md).
+(curated packs — [`docs/PACKS.md`](docs/PACKS.md)): 6a LANDED 2026-06-11** (library + schema +
+materializer + CLI + the /workspace launch default — see the Phase 6 checklist); **next bites are
+6b** (TUI Packs… checklist screen + create-modal Language field) **and 6c** (deeper curation —
+port the operator's existing skills into `library/packs/`). Tracked lower-severity items live in
+[`docs/REVIEW.md`](docs/REVIEW.md).
 
 **Operator note:** containers built before the native-install image change show stale `claude
 doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
@@ -259,7 +262,7 @@ policy (re-stamp + backup + note); a state-tier manifest separates "ours to re-s
 operator files (deselection/collision safety). All container delivery is `assets.sync_in` — no
 new mounts, floor byte-identical (invariant 2)._
 
-- [ ] **6a:** `library/packs/<tier>/<pack>/` layout + `pack.toml` (description, `default`); `packs/library.py` (pure discovery/parse/hash + name-uniqueness lint); `packs/materialize.py` (asset-source writes + fenced CLAUDE.md block patch + manifest); `Project.packs`/`Project.language` schema; lifecycle `up` hook before `sync_in`; CLI (`packs list`, `project packs add|rm|list|defaults`); `launch_workdir` default → always `/workspace` (explicit `workdir` still wins; lone-repo auto-cd dropped)
+- [x] **6a (landed 2026-06-11):** `library/packs/<tier>/<pack>/` layout + `pack.toml` (description, `default`); `packs/library.py` (pure discovery/parse/hash + name-uniqueness lint); `packs/materialize.py` (asset-source writes + fenced CLAUDE.md block patch + manifest); `Project.packs`/`Project.language` schema + `projects.set_packs` + `lifecycle.set_packs` (immediate apply); lifecycle `up` hook before `sync_in` (fail-soft); CLI (`packs list`, `project packs add|rm|list|defaults`, `project create --language`); `launch_workdir` default → always `/workspace` (explicit `workdir` still wins; lone-repo auto-cd dropped). Starter library: guardrails/code-quality (default) + workflow (opt-in) + node/python/rust convention packs. 34 new tests (discovery lint, block-patch idempotence, ours/theirs manifest boundary, drift/collision/deselect) + a live CLI smoke
 - [ ] **6b:** TUI Packs… checklist screen (grouped Common / language, drift indicator, re-apply defaults) + create-modal Language field
 - [ ] **6c:** curate the initial library: `guardrails` / `code-quality` / `workflow` / `review-skills` (common) + `node-conventions` / `python-uv` / `rust-cargo`; launch smoke (claude reports the imported memory). Templates are PUBLIC (repo is public) — house rules in, client/project-specific content stays in per-project assets
 

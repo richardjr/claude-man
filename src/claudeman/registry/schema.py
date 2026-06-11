@@ -329,7 +329,7 @@ class PortMapping:
 # Default per-project asset-sync allowlists. CLAUDE.md at the workspace root; skills/agents/commands
 # at USER scope (~/.claude). settings.json is intentionally NOT here (machine-local perms/hooks risk)
 # and is refused even if hand-added (see assets._assert_claude_allowlist_safe).
-DEFAULT_SYNC_WORKSPACE = ("CLAUDE.md",)
+DEFAULT_SYNC_WORKSPACE = ("CLAUDE.md", ".claude-man")  # .claude-man = materialized pack fragments
 DEFAULT_SYNC_CLAUDE = ("skills", "agents", "commands")
 
 
@@ -383,19 +383,31 @@ class Project:
     claude_version: str = ""             # per-project exact claude pin; "" -> the global channel/pin
     env: dict[str, str] = field(default_factory=dict)
     env_file: str | None = None
-    workdir: str = ""                    # where claude/shell/nvim launch (else: lone repo's dir, else /workspace)
+    workdir: str = ""                    # where claude/shell/nvim launch (default: /workspace)
     extra_apt: tuple[str, ...] = ()
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
     ports: tuple[PortMapping, ...] = ()   # published container service ports (ingress -p; recreate to apply)
     allowlist: tuple[str, ...] = ()      # extra egress dstdomains (strict mode only)
     sync: Sync = field(default_factory=Sync)  # per-project asset sync (CLAUDE.md + skills/agents)
+    language: str = ""                   # EXPLICIT pack-tier key ("node"/"python"/…); "" = common only
+    packs: tuple[str, ...] = ()          # selected curated packs (resolved at create; docs/PACKS.md)
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
             raise ValidationError(
                 f"invalid slug {self.slug!r}: must match {_SLUG_RE.pattern}"
             )
+        # Pack/language names share the slug shape (they become directory names). Validated by
+        # SHAPE only — never against the live library, so a registry entry naming a since-removed
+        # pack still loads (materialize skips it with a note).
+        if self.language and not _SLUG_RE.match(self.language):
+            raise ValidationError(f"invalid language {self.language!r}: must match {_SLUG_RE.pattern}")
+        for name in self.packs:
+            if not _SLUG_RE.match(name):
+                raise ValidationError(f"invalid pack name {name!r}: must match {_SLUG_RE.pattern}")
+        if len(set(self.packs)) != len(self.packs):
+            raise ValidationError("duplicate pack names in selection")
         if self.overlay not in config.OVERLAYS:
             raise ValidationError(
                 f"invalid overlay {self.overlay!r}: one of {config.OVERLAYS}"
@@ -428,14 +440,14 @@ class Project:
     def launch_workdir(self) -> str:
         """Container dir where ``claude`` / a shell launch (``docker exec -w``).
 
-        Explicit ``workdir`` wins (relative -> under ``/workspace``, absolute -> as-is); else a lone
-        repo's checkout dir (so a single-repo project drops you straight into it); else ``/workspace``.
+        Explicit ``workdir`` wins (relative -> under ``/workspace``, absolute -> as-is); else
+        ``/workspace`` — ALWAYS, even for a lone-repo project (the old lone-repo auto-cd was
+        dropped with the packs design so /workspace and its CLAUDE.md are the uniform anchor;
+        operators who prefer landing in the repo set ``workdir = "<dir>"``). See docs/PACKS.md.
         """
         if self.workdir:
             w = self.workdir
             return w if w.startswith("/") else f"{config.CONTAINER_WORKSPACE}/{w.strip('/')}"
-        if len(self.repos) == 1:
-            return f"{config.CONTAINER_WORKSPACE}/{self.repos[0].resolved_dir()}"
         return config.CONTAINER_WORKSPACE
 
 

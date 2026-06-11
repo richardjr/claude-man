@@ -23,6 +23,8 @@ from . import assets, config, env_secrets, gh_token, gitconfig, hostplatform, ss
 from .checkout import gitstate, repos
 from .docker import images, runner, status
 from .network import egress
+from .packs import library as packs_library
+from .packs import materialize as packs_materialize
 from .profiles import seed as seed_mod
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
@@ -377,6 +379,9 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
         px = egress.ensure_proxy(project, on_progress=on_progress)
         if not px.ok:
             return Result(False, px.detail)
+    # Refresh the pack selection into the asset source BEFORE sync-in carries it to the binds, so
+    # the materialized fragments/skills ride the same start. Best-effort, like the sync itself.
+    packs_note = _packs_refresh(project, on_progress=on_progress)
     # Sync assets IN after ensure_created (which seeds profile defaults) so per-project assets layer
     # on top, and BEFORE start so the container sees them. Best-effort — a sync fault never blocks start.
     sync_note = _sync_in(project, on_progress=on_progress)
@@ -386,7 +391,7 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     if _has_ssh_mount(project):
         _seed_ssh(project.slug)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
     prefix = created.detail + "; " if "created" in created.detail else ""
-    return Result(True, f"{prefix}started {project.container}{sync_note}")
+    return Result(True, f"{prefix}started {project.container}{packs_note}{sync_note}")
 
 
 def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
@@ -422,6 +427,20 @@ def stop_all(
         if on_each:
             on_each(slug, res)
     return results
+
+
+def _packs_refresh(project: Project, *, on_progress: ProgressFn | None) -> str:
+    """Pack materialization for the start path → a ``'; <detail>'`` suffix (or ''). Never raises —
+    a broken library or selection must not prevent a container start (notes surface instead)."""
+    if not project.packs:
+        return ""
+    try:
+        rep = packs_materialize.refresh(project, on_progress=on_progress)
+    except Exception as exc:  # noqa: BLE001 - never block start on a packs fault
+        if on_progress:
+            on_progress(f"packs refresh failed: {exc!r}")
+        return f"; packs error: {exc}"
+    return ("; " + rep.detail) if rep.detail else ""
 
 
 def _sync_in(project: Project, *, on_progress: ProgressFn | None) -> str:
@@ -463,6 +482,30 @@ def sync(slug: str, *, direction: str, on_progress: ProgressFn | None = None) ->
     project = projects_registry.load(slug)
     rep = (assets.sync_in if direction == "in" else assets.sync_out)(project, on_progress=on_progress)
     return Result(rep.ok, rep.detail or f"{slug}: nothing to sync-{direction}")
+
+
+def set_packs(slug: str, names: tuple[str, ...]) -> Result:
+    """Replace a project's pack selection, materialize it, and sync assets in (immediate apply).
+
+    The binds are live host dirs, so a running container sees the change at once (claude reads it
+    at its next session launch) — no recreate. Registry first (source of truth), then materialize
+    + sync-in; a materialize/sync fault after a successful registry write reports ok=False with
+    the selection already saved (the next ``up`` retries the refresh)."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        project = projects_registry.set_packs(slug, names)
+    except ValidationError as exc:
+        return Result(False, str(exc))
+    detail = f"{slug}: packs = {', '.join(names) if names else '(none)'}"
+    try:
+        rep = packs_materialize.refresh(project)
+    except Exception as exc:  # noqa: BLE001 - registry already updated; surface, don't raise
+        return Result(False, f"{detail}; materialize failed: {exc}")
+    if rep.detail:
+        detail += "; " + rep.detail
+    detail += _sync_in(project, on_progress=None)
+    return Result(rep.ok, detail)
 
 
 def account_mismatch(project: Project, profile: Profile | None) -> str | None:
@@ -581,17 +624,31 @@ def create_project(
     profile: str | None = None,
     overlay: str | None = None,
     egress: str | None = None,
+    language: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Result:
-    """Write (or load) the project definition, then create the container."""
+    """Write (or load) the project definition, then create the container.
+
+    For a NEW project the default pack selection — every ``default = true`` pack in the library's
+    ``common/`` + ``<language>/`` tiers — is resolved HERE and written explicitly into the TOML
+    (docs/PACKS.md: explicit-at-create, no silent creep later). Fail-soft: a broken library means
+    an empty selection plus a progress note, never a failed create."""
     if projects_registry.exists(slug):
         project = projects_registry.load(slug)
     else:
+        try:
+            default_packs = packs_library.defaults_for(language or "")
+        except packs_library.LibraryError as exc:
+            default_packs = ()
+            if on_progress:
+                on_progress(f"pack library unreadable — no default packs applied: {exc}")
         project = Project(
             slug=slug,
             profile=profile,
             overlay=overlay or config.DEFAULT_OVERLAY,
             egress=egress or config.DEFAULT_EGRESS,
+            language=language or "",
+            packs=default_packs,
         )
         try:
             with _slug_lock(slug):  # serialise with concurrent add_repo/remove_repo on this slug

@@ -104,6 +104,30 @@ class RegistryTest(unittest.TestCase):
         projects.save(Project(slug="pinned", claude_version="2.1.169"))
         self.assertEqual(projects.load("pinned").claude_version, "2.1.169")
 
+    def test_language_and_packs_roundtrip(self) -> None:
+        projects.save(Project(slug="packed", language="node",
+                              packs=("guardrails", "node-conventions")))
+        p = projects.load("packed")
+        self.assertEqual(p.language, "node")
+        self.assertEqual(p.packs, ("guardrails", "node-conventions"))
+        # Defaults stay terse: an unset language/packs emits no keys at all.
+        projects.save(Project(slug="bare"))
+        text = (Path(self.tmp.name) / "projects" / "bare.toml").read_text()
+        self.assertNotIn("language", text)
+        self.assertNotIn("packs", text)
+
+    def test_set_packs_patches_and_validates(self) -> None:
+        projects.save(Project(slug="packed", packs=("guardrails",)))
+        p = projects.set_packs("packed", ("guardrails", "workflow"))
+        self.assertEqual(p.packs, ("guardrails", "workflow"))
+        self.assertEqual(projects.load("packed").packs, ("guardrails", "workflow"))
+        projects.set_packs("packed", ())  # empty selection drops the key entirely
+        self.assertNotIn("packs", (Path(self.tmp.name) / "projects" / "packed.toml").read_text())
+        with self.assertRaises(ValidationError):
+            projects.set_packs("packed", ("dup", "dup"))
+        with self.assertRaises(ValidationError):
+            projects.set_packs("packed", ("Bad Name",))
+
     def test_ports_roundtrip_and_terse_defaults(self) -> None:
         from claudeman.registry.schema import PortMapping
         projects.save(Project(slug="svc", ports=(
@@ -408,9 +432,11 @@ class LaunchWorkdirTest(unittest.TestCase):
     def test_no_repos_is_workspace(self) -> None:
         self.assertEqual(Project(slug="p").launch_workdir, "/workspace")
 
-    def test_lone_repo_is_repo_dir(self) -> None:
+    def test_lone_repo_is_workspace_too(self) -> None:
+        # The lone-repo auto-cd was dropped (docs/PACKS.md): /workspace is the uniform anchor so
+        # the injected CLAUDE.md is what you land on; an explicit workdir restores the old feel.
         p = Project(slug="p", repos=(Repo(url="git@github.com:o/svc.git"),))
-        self.assertEqual(p.launch_workdir, "/workspace/svc")
+        self.assertEqual(p.launch_workdir, "/workspace")
 
     def test_multiple_repos_is_workspace(self) -> None:
         p = Project(slug="p", repos=(Repo(url="git@github.com:o/a.git"),

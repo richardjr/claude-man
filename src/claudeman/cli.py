@@ -276,7 +276,8 @@ def cmd_project_create(args) -> int:
     from . import lifecycle
 
     res = lifecycle.create_project(
-        args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress
+        args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
+        language=args.language,
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -640,6 +641,109 @@ def cmd_project_sync(args) -> int:
         return 1
     direction = "in" if args.in_ else "out"
     res = lifecycle.sync(args.slug, direction=direction)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+# -- packs (curated skills + CLAUDE.md fragments — docs/PACKS.md) -------------
+def _packs_library():
+    """Discover the library, mapping a curation error to (None, message)."""
+    from .packs import library as packs_library
+
+    try:
+        return packs_library.discover(), None
+    except packs_library.LibraryError as exc:
+        return None, f"pack library error: {exc}"
+
+
+def cmd_packs_list(args) -> int:
+    lib, err = _packs_library()
+    if lib is None:
+        print(err, file=sys.stderr)
+        return 1
+    rows = [p for p in lib.values() if not args.tier or p.tier == args.tier]
+    if not rows:
+        print("(no packs" + (f" in tier {args.tier!r}" if args.tier else "") + ")")
+        return 0
+    print(f"{'PACK':<20} {'TIER':<10} {'DEFAULT':<8} {'CONTENTS':<14} DESCRIPTION")
+    for p in rows:
+        print(f"{p.name:<20} {p.tier:<10} {'yes' if p.default else '-':<8} {p.summary:<14} {p.description}")
+    return 0
+
+
+def cmd_project_packs_list(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    lib, err = _packs_library()
+    if err:
+        print(err, file=sys.stderr)  # still list the selection — the registry is the truth
+        lib = {}
+    print(f"language: {project.language or '(none — common tier only)'}")
+    if not project.packs:
+        print("(no packs selected — `project packs defaults` applies the library defaults)")
+        return 0
+    for name in project.packs:
+        pack = lib.get(name)
+        if pack is None:
+            print(f"  {name:<20} ⚠ not in the library (skipped at materialize)")
+        else:
+            print(f"  {name:<20} [{pack.tier}] {pack.summary:<14} {pack.description}")
+    return 0
+
+
+def cmd_project_packs_add(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    lib, err = _packs_library()
+    if lib is None:
+        print(err, file=sys.stderr)
+        return 1
+    if args.name not in lib:  # fail typos early — a stored name may outlive the library, a NEW one may not
+        print(f"no pack {args.name!r} in the library (see `claudemanctl packs list`)", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    if args.name in project.packs:
+        print(f"{args.slug}: pack {args.name!r} already selected")
+        return 0
+    res = lifecycle.set_packs(args.slug, project.packs + (args.name,))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_packs_rm(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    if args.name not in project.packs:
+        print(f"{args.slug}: pack {args.name!r} is not selected")  # idempotent no-op
+        return 0
+    res = lifecycle.set_packs(args.slug, tuple(n for n in project.packs if n != args.name))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_packs_defaults(args) -> int:
+    from . import lifecycle
+    from .packs import library as packs_library
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    try:
+        defaults = packs_library.defaults_for(project.language)
+    except packs_library.LibraryError as exc:
+        print(f"pack library error: {exc}", file=sys.stderr)
+        return 1
+    res = lifecycle.set_packs(args.slug, defaults)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
 
@@ -1035,6 +1139,9 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--profile", type=_slug_arg)
     pc.add_argument("--overlay", choices=config.OVERLAYS)
     pc.add_argument("--egress", choices=config.EGRESS_MODES)
+    pc.add_argument("--language", type=_slug_arg,
+                    help="pack-library language tier (e.g. node/python/rust) — selects that tier's "
+                         "default packs alongside the common ones; omit for common only")
     pc.set_defaults(func=cmd_project_create)
     pup = proj.add_parser("up", help="create-if-needed + start (checks for a newer claude first)")
     pup.add_argument("slug", type=_slug_arg)
@@ -1143,6 +1250,24 @@ def build_parser() -> argparse.ArgumentParser:
     pls = ports.add_parser("list", help="list a project's published ports")
     pls.add_argument("slug", type=_slug_arg)
     pls.set_defaults(func=cmd_project_ports_list)
+    # project packs (list / add / rm / defaults) — curated skills + CLAUDE.md fragments (docs/PACKS.md)
+    pkp = proj.add_parser(
+        "packs", help="curated packs — skills + CLAUDE.md fragments (applies immediately, no recreate)"
+    ).add_subparsers(dest="packscmd", required=True)
+    pka = pkp.add_parser("add", help="select a library pack (materializes + syncs in at once)")
+    pka.add_argument("slug", type=_slug_arg)
+    pka.add_argument("name", type=_slug_arg)
+    pka.set_defaults(func=cmd_project_packs_add)
+    pkr = pkp.add_parser("rm", help="deselect a pack (removes its managed files from source + binds)")
+    pkr.add_argument("slug", type=_slug_arg)
+    pkr.add_argument("name", type=_slug_arg)
+    pkr.set_defaults(func=cmd_project_packs_rm)
+    pkl = pkp.add_parser("list", help="show the project's selection (and library status of each)")
+    pkl.add_argument("slug", type=_slug_arg)
+    pkl.set_defaults(func=cmd_project_packs_list)
+    pkd = pkp.add_parser("defaults", help="re-apply the library defaults for the project's language")
+    pkd.add_argument("slug", type=_slug_arg)
+    pkd.set_defaults(func=cmd_project_packs_defaults)
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
     prs.add_argument("slug", type=_slug_arg)
     prs.set_defaults(func=cmd_project_resync)
@@ -1156,6 +1281,14 @@ def build_parser() -> argparse.ArgumentParser:
     psy.add_argument("--in", dest="in_", action="store_true",
                      help="force sync-IN (asset source -> binds; source wins)")
     psy.set_defaults(func=cmd_project_sync)
+
+    # packs (browse the curated library — per-project selection lives under `project packs`)
+    pk = sub.add_parser("packs", help="the curated pack library (docs/PACKS.md)").add_subparsers(
+        dest="cmd", required=True
+    )
+    pkls = pk.add_parser("list", help="list library packs (name, tier, default, contents)")
+    pkls.add_argument("--tier", help="filter by tier (common, or a language like node/python)")
+    pkls.set_defaults(func=cmd_packs_list)
 
     # sync
     sy = sub.add_parser("sync", help="config sync-back").add_subparsers(dest="cmd", required=True)

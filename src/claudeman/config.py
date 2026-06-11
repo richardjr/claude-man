@@ -240,6 +240,15 @@ def backups_dir(slug: str) -> Path:
     return project_state_dir(slug) / "backups"
 
 
+def packs_manifest_path(slug: str) -> Path:
+    """JSON manifest of the pack-managed asset paths + content hashes (state tier, never synced).
+
+    What separates "ours to re-stamp" from operator-authored files: deselecting a pack removes
+    exactly the manifest-listed paths, and an existing un-manifested file is never overwritten
+    (operator wins). See docs/PACKS.md."""
+    return project_state_dir(slug) / "packs-manifest.json"
+
+
 def profile_state_dir(name: str) -> Path:
     return state_home() / "profiles" / name
 
@@ -310,6 +319,14 @@ def repo_root() -> Path:
     config.py lives at ``src/claudeman/config.py``; ``parents[2]`` is the checkout root.
     """
     return Path(__file__).resolve().parents[2]
+
+
+def library_packs_dir() -> Path:
+    """The curated pack library shipped in this repo (``library/packs/<tier>/<pack>/``).
+
+    Repo-relative like ``images/`` — the operator runs claude-man from the checkout, and curation
+    is "edit the file, commit". See docs/PACKS.md."""
+    return repo_root() / "library" / "packs"
 
 
 def image_tag(overlay: str) -> str:

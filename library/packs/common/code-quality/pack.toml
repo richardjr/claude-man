@@ -1,0 +1,2 @@
+description = "Code-quality discipline: match the codebase, no drive-by churn, honest comments"
+default = true

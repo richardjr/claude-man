@@ -1,0 +1,2 @@
+description = "Node/TypeScript conventions: yarn-only, respect packageManager, workspace-aware"
+default = true

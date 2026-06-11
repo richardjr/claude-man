@@ -1,0 +1,2 @@
+description = "Never-do rules: commits/pushes, destructive git, secrets, dependencies"
+default = true
