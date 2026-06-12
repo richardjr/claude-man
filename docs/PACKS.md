@@ -1,9 +1,9 @@
 # Curated packs — skills + CLAUDE.md injectors (Phase 6 design)
 
-Status: **6a implemented** (2026-06-11 — library + schema + materializer + CLI verbs + the
-`/workspace` launch default). Remaining: **6b** (TUI Packs screen + create-modal Language field)
-and **6c** (deeper curation — port the operator's existing skills). Tracking:
-[`ROADMAP.md`](../ROADMAP.md) Phase 6.
+Status: **6a + 6b implemented** (6a 2026-06-11 — library + schema + materializer + CLI verbs +
+the `/workspace` launch default; 6b 2026-06-12 — TUI Packs screen + drift surfacing +
+create-modal Language field). Remaining: **6c** (deeper curation — port the operator's existing
+skills). Tracking: [`ROADMAP.md`](../ROADMAP.md) Phase 6.
 
 ## Concept
 
@@ -193,9 +193,36 @@ Everything in the design above is implemented as described; the concrete map:
 lone-repo projects now launch at `/workspace` — set `workdir = "<repo-dir>"` to restore the old
 landing spot.
 
-**6b sketch:** a `PacksScreen` modal (mirror `ports.py`/`env_mounts.py`) listing the library
-grouped Common / `<language>` with checkboxes + drift indicator, saving via
-`lifecycle.set_packs`; add a Language field to `screens/create.py` and thread it through
-`NewProject` → `create_project`. **6c:** port the operator's real skills into
-`library/packs/common/<pack>/skills/…` (remember: the repo is public) and verify in-container
-that claude reports the imported memory (`/memory` shows the `@` imports).
+## Implementation notes — 6b as built (2026-06-12)
+
+- **`tui/screens/packs.py`** — `PacksScreen`, opened from the Project… submenu (`p` → `p`),
+  mirroring `ports.py`/`env_mounts.py`. A `DataTable` checklist grouped *Common* /
+  *<language>* / *Other (selected)* — the last section catches cross-tier CLI adds and names
+  that have outlived the library, so the FULL stored selection is always visible and
+  de-selectable (a toggle saves the whole list; a hidden entry would be silently dropped).
+  Space/enter toggles; `d` re-applies `defaults_for(project.language)`; both go through
+  `lifecycle.set_packs` (registry → materialize → sync-in — applies immediately, no recreate),
+  run inline (host-local file I/O on small trees, no subprocess). Library faults are fail-soft:
+  any library fault (malformed `pack.toml` → `LibraryError`, or an unreadable tree → raw
+  `OSError`) still renders the selection so packs can be deselected, and per-file I/O faults
+  inside `pack_states` degrade to a state instead of raising.
+- **`tui/packsview.py`** — the PURE view model behind the screen (no textual/rich imports —
+  the `splash`/`rowfx` pattern), so grouping/toggle semantics are unit-tested dependency-free.
+- **Drift surfacing** — read-only `packsview.pack_states(project)`: selected pack →
+  worst-file state via the manifest's ours/theirs boundary (consuming materialize's public
+  `load_manifest`/`desired_files` + `library.file_hash`; the materializer stays the only
+  writer). ``stale`` (unmaterialized, or the library moved on), ``drifted`` (managed copy
+  edited — will be re-stamped + backed up), ``operator`` (un-manifested collision — operator
+  file wins), ``unknown`` (not in the library). Rendered as the State column.
+- **Create modal** — `screens/create.py` gained a Language `Select` (options =
+  `library.tiers()` minus common, discovered not hardcoded; fail-soft on a malformed library).
+  Picking an Overlay pre-fills the matching tier as a suggestion until the operator picks a
+  language themselves (the programmatic-echo bookkeeping lives in the screen; the stored value
+  is always the explicit selection). `NewProject` is now a 5-tuple ending in `language`,
+  threaded through `app._create_project_worker` → `lifecycle.create_project(language=…)`.
+- **Tests:** `tests/test_packsview.py` — the `pack_states` state matrix (incl. worst-wins)
+  plus grouping, marks, state threading, and toggle order.
+
+**6c:** port the operator's real skills into `library/packs/common/<pack>/skills/…` (remember:
+the repo is public) and verify in-container that claude reports the imported memory
+(`/memory` shows the `@` imports).

@@ -186,6 +186,30 @@ class RefreshTest(unittest.TestCase):
         self.assertIn("claude/skills/rev/ref/data.md", files)
         self.assertEqual(notes, ())
 
+    def test_adopts_content_equal_unmanifested_file(self) -> None:
+        # The manifest self-repair arm: a content-equal file that isn't manifested (manifest
+        # lost/corrupt — load_manifest fails soft to {}; or a new host, since the manifest is
+        # state-tier and never synced) is adopted as ours, NOT skipped as an operator collision.
+        src = self.root / "common" / "guardrails" / "claude-md" / "no-secrets.md"
+        dst = self._asset("workspace", ".claude-man", "guardrails", "no-secrets.md")
+        dst.parent.mkdir(parents=True)
+        dst.write_text(src.read_text())
+        rep = materialize.refresh(self._project("guardrails"), root=self.root)
+        self.assertTrue(rep.ok)
+        self.assertFalse(any("operator file wins" in n for n in rep.notes))
+        self.assertIn("workspace/.claude-man/guardrails/no-secrets.md",
+                      materialize.load_manifest(self.slug))
+
+    def test_block_lines_in_selection_order(self) -> None:
+        # The @-import block follows SELECTION order (this is why the TUI toggle appends on
+        # re-add), with fragments sorted within a pack and unknown names contributing nothing.
+        _mk_pack(self.root, "common", "zeta")
+        lib = library.discover(self.root)
+        lines = materialize.block_lines(("zeta", "guardrails", "ghost"), lib)
+        self.assertEqual(lines, ["@.claude-man/zeta/rule.md",
+                                 "@.claude-man/guardrails/no-autocommit.md",
+                                 "@.claude-man/guardrails/no-secrets.md"])
+
 
 if __name__ == "__main__":
     unittest.main()

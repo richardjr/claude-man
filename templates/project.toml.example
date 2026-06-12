@@ -10,8 +10,16 @@ extra_apt = ["jq"]          # optional: thin per-project apt layer baked at crea
 # claude_version = "2.1.169"  # optional: pin this project's claude to an exact version (overrides the
 #                             # global channel/pin from `config image`). Omit to track the global setting.
 # env_file = "~/projects/my-project.env"   # alternative to [project.env]
-# workdir = "my-app-backend"     # where claude/shell launch (docker exec -w). Omit to use a lone
-#                                # repo's dir automatically; a multi-repo project defaults to /workspace.
+# workdir = "my-app-backend"     # where claude/shell launch (docker exec -w). Omit to launch at
+#                                # /workspace (the uniform anchor — see docs/PACKS.md).
+
+# Curated packs (docs/PACKS.md): bundles of CLAUDE.md fragments + skills from the in-repo library,
+# materialized into the asset source and synced into the binds on every start. `language` picks the
+# tier whose `default = true` packs are applied at CREATE (resolved once, written here explicitly —
+# no silent creep). Manage with `project packs add/rm/list/defaults` or TUI Project menu -> Packs…
+# (changes apply immediately; no recreate).
+language = "node"               # pack tier: common-only when omitted ("" = none)
+packs    = ["guardrails", "code-quality", "node-conventions"]
 
 [project.egress]
 mode      = "open"          # "open" (default) or "strict"

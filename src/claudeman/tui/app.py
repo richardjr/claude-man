@@ -33,6 +33,7 @@ from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
+from .screens.packs import PacksScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.shutdown import ShutdownScreen
@@ -80,7 +81,7 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Egress-log, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers are reused
+    # Ports, Packs, Egress-log, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers are reused
     # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
@@ -117,6 +118,7 @@ class ClaudeManApp(App):
     _PROJECT_MENU = [
         ("e", "Env mounts", "env_mounts"),
         ("o", "Ports", "ports"),
+        ("p", "Packs…", "packs"),
         ("g", "Egress log (denied)", "egress_log"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
@@ -853,6 +855,7 @@ class ClaudeManApp(App):
             "pull_all": self.action_pull_all,
             "env_mounts": self.action_env_mounts,
             "ports": self.action_ports,
+            "packs": self.action_packs,
             "egress_log": self.action_egress_log,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
@@ -924,15 +927,15 @@ class ClaudeManApp(App):
     def _on_new_project(self, data: NewProject | None) -> None:
         if not data:
             return  # cancelled
-        slug, profile, overlay, egress = data
+        slug, profile, overlay, egress, language = data
         if not self._reserve(slug, "create"):
             return
         self._log(f"creating {slug} …")
-        self._create_project_worker(slug, profile, overlay, egress)
+        self._create_project_worker(slug, profile, overlay, egress, language)
 
     @work(thread=True, group="create")
     def _create_project_worker(
-        self, slug: str, profile: str | None, overlay: str, egress: str
+        self, slug: str, profile: str | None, overlay: str, egress: str, language: str
     ) -> None:
         """Run the blocking create (image build + registry write + seed + `docker create`) off the
         UI thread, streaming build progress to the log.
@@ -946,7 +949,7 @@ class ClaudeManApp(App):
         """
         try:
             res = lifecycle.create_project(
-                slug, profile=profile, overlay=overlay, egress=egress,
+                slug, profile=profile, overlay=overlay, egress=egress, language=language or None,
                 on_progress=self._thread_log,
             )
         except schema.ValidationError as exc:
@@ -1108,6 +1111,15 @@ class ClaudeManApp(App):
             return
         self._log(f"managing published ports for {slug} (add/remove need a recreate to apply)")
         self.push_screen(PortsScreen(slug))
+
+    # -- curated packs ------------------------------------------------------
+    def action_packs(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]packs: select a defined project (orphan rows aren't managed)[/]")
+            return
+        self._log(f"managing curated packs for {slug} (toggles apply immediately — no recreate)")
+        self.push_screen(PacksScreen(slug))
 
     def action_egress_log(self) -> None:
         """Show the destinations a locked project tried to reach but the allowlist blocked (Phase 4)."""

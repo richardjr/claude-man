@@ -638,8 +638,8 @@ def create_project(
     else:
         try:
             default_packs = packs_library.defaults_for(language or "")
-        except packs_library.LibraryError as exc:
-            default_packs = ()
+        except (packs_library.LibraryError, OSError) as exc:  # OSError: an unreadable library
+            default_packs = ()                                # tree raises raw, not LibraryError
             if on_progress:
                 on_progress(f"pack library unreadable — no default packs applied: {exc}")
         project = Project(

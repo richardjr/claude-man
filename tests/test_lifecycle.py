@@ -566,5 +566,38 @@ class LifecyclePortsTest(unittest.TestCase):
         self.assertEqual(preg.load("svc").ports, ())
 
 
+class SetPacksTest(unittest.TestCase):
+    """``set_packs`` REPLACES the whole selection — the seam behind the CLI verbs and the TUI
+    toggle/defaults. Replace-not-merge is load-bearing and destructive: re-applying defaults
+    after a manual ``packs add`` must drop the extra pack AND remove its materialized files
+    (host file I/O only, no docker — runs against the real shipped library)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None)
+        os.environ.pop("CLAUDE_MAN_STATE_HOME", None)
+        for tmp in (self.cfg, self.state):
+            tmp.cleanup()
+
+    def test_set_packs_replaces_and_removes_dropped_files(self) -> None:
+        from claudeman.registry import projects as preg
+        preg.save(Project(slug="demo"))
+        res = lifecycle.set_packs("demo", ("guardrails", "python-uv"))
+        self.assertTrue(res.ok, res.detail)
+        extra = config.project_assets_dir("demo") / "workspace" / ".claude-man" / "python-uv"
+        self.assertTrue(extra.is_dir())
+
+        # The defaults path passes defaults_for() verbatim: a reset, never a union/merge.
+        res = lifecycle.set_packs("demo", ("guardrails",))
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual(preg.load("demo").packs, ("guardrails",))
+        self.assertFalse(extra.exists())  # dropped pack's files removed, not orphaned
+
+
 if __name__ == "__main__":
     unittest.main()

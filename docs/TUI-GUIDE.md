@@ -81,7 +81,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `g` Egress log · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress log · `r` Recreate · `d` Delete |
 | `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
 
 **`global` row** — acts app-wide:
@@ -101,7 +101,7 @@ opens the editor.)
 
 ## 2. Create a project (`n`)
 
-Press `n`. The **New project** form has four fields:
+Press `n`. The **New project** form has five fields:
 
 - **Slug** — lowercase letters/digits/hyphens, ≤ 64 chars (validated inline; duplicates
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
@@ -109,6 +109,10 @@ Press `n`. The **New project** form has four fields:
   inherit the default. Only existing profiles are listed (step 0).
 - **Overlay (image)** — `base`, `python`, `rust`, or `node`: the toolchain baked into the
   project's image.
+- **Language (pack tier)** — picks which language tier's *default* curated packs are applied
+  at create, alongside the common ones (see *Curated packs* below). Choosing an overlay
+  pre-fills the matching tier as a suggestion; pick a language yourself and the suggestion
+  stops. Leave `(none)` for common-tier packs only.
 - **Egress** — `open` or `strict`. `strict` runs the project behind the allowlist egress
   proxy (a squid sidecar on a no-route internal network — see the README's strict-egress
   section); it can also be toggled later with `claudemanctl project lock|unlock <slug>`.
@@ -250,6 +254,19 @@ Container port must be **≥ 1024** (the hardened profile drops the privileged-p
 capability); host port defaults to the same; bind IP defaults to `127.0.0.1` (host-only) —
 type `0.0.0.0` to expose on the LAN, which the table then flags. The service inside must
 listen on `0.0.0.0`, not container-localhost. As with mounts: **recreate to apply**.
+
+**Curated packs** (`p` → `p`): a checklist of the in-repo pack library — bundles of
+CLAUDE.md fragments and skills (guardrails, code-quality, language conventions…) curated in
+the claude-man repo ([`docs/PACKS.md`](PACKS.md)). Rows are grouped *Common* / your
+project's language tier, with anything else you've selected (cross-tier or stale names)
+listed under *Other (selected)*. `space`/`enter` toggles a pack, `d` re-applies the library
+defaults for the project's language — every change saves, materializes into the asset
+source, and syncs into the binds **immediately** (claude picks it up at its next session
+launch; no recreate). The **State** column flags copies that differ from the library:
+`stale` (refreshed on next start), `⚠ drifted` (an in-container edit — re-stamped from the
+library + backed up; upstream improvements belong in the library), `operator file wins`
+(your own same-named file blocks the pack entry), `not in library` (a selection that
+outlived the library).
 
 ## 8. Day to day
 
