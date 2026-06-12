@@ -56,6 +56,35 @@ uv run claudemanctl image smoke base   # the hardened-profile gate — run it af
 - Commit messages: short, factual subject ("what changed", not "why"); optional one-paragraph
   body; no marketing language or emojis.
 
+## Adding or editing a curated pack
+
+The pack library (`library/packs/`) is part of the codebase — curation is "edit the file, commit"
+(freshness is content-hashed; there are no version bumps). See [`docs/PACKS.md`](docs/PACKS.md)
+for the full design.
+
+```
+library/packs/<tier>/<pack>/
+  pack.toml             # description = "…" (required); default = true|false (default false)
+  claude-md/*.md        # CLAUDE.md fragments — one concern per file
+  skills/<name>/        # full skill dirs (SKILL.md + support files)
+```
+
+- **Tiers are directories** — `common/` plus language names (`node/`, `python/`, …). Adding a new
+  language tier is just adding the directory; nothing else to register.
+- **Names are slug-shaped and library-unique** across tiers (they become directory names inside
+  the container). The shipped library is linted by `tests/test_packs_library.py`, which imports
+  the real tree — a malformed pack (missing description, empty pack, duplicate name, invalid
+  skill name) fails the suite.
+- `default = true` means the pack is auto-selected for **new** projects in the tier's scope
+  (common defaults apply to everyone; a language default applies to projects created with that
+  `--language`). Defaults are resolved at create and written explicitly, so flipping the flag
+  never changes existing projects.
+- **The repo is public** — house rules and generic conventions belong in the library; anything
+  client- or project-specific stays in the per-project asset source, never here. No secrets, no
+  symlinks (skill-tree symlinks are refused at materialize).
+- Keep fragments small and single-concern: they're linked into the project `CLAUDE.md` via `@`
+  imports, so each file should stand alone.
+
 ## Pull requests
 
 1. One logical change per PR, with tests (new behaviour pinned, regressions covered).

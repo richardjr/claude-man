@@ -111,6 +111,32 @@ What crosses each way, and what must never cross:
   rate-limits hard. Every failure folds into a short note (`re-mint`/`auth`/`offline`/`http NNN`) —
   no token or response detail is surfaced.
 
+### Curated packs (host-side materialization — no new container surfaces)
+- Pack delivery **adds no mount, env var, or docker flag**: materialization writes into the
+  per-project asset source (`~/.config/claude-man/assets/<slug>/`, config tier, secret-free), and
+  the existing asset sync carries it into the already-declared binds with all its guards — the
+  claude-side **default-deny allowlist** (only `skills/agents/commands` may land in
+  `~/.claude`), denylisted-name filtering, escape/denylist-targeting **symlink refusal**, and
+  backup-before-overwrite. The one direct bind write is the **deselection-removal pass** (sync
+  merges and never propagates deletions, so a deselected skill would otherwise linger active);
+  it is manifest-bounded and backed up first. The hardened floor is byte-identical with or
+  without packs (invariant 2).
+- A state-tier **manifest** bounds the files packs materialize and remove: deselection removes
+  only manifested paths, and an operator file at a pack's target path always wins the collision
+  (skipped with a note) — pack materialization cannot clobber operator-authored config. (The
+  one pack-managed surface outside the manifest is the fenced `@`-import block inside the
+  workspace `CLAUDE.md`; operator content outside the block is never touched.)
+- The library is **repo content, public by design** — packs carry house rules and generic
+  conventions, never secrets or client-specific material (that stays in the per-project asset
+  source). Pack/tier/skill names are slug-validated (they become directory names in the
+  container), pack names must be library-unique (lint-tested), and skill trees are copied
+  per-file with symlinks refused — a malicious library entry can't path-escape, but the real
+  control is that the library ships in this reviewed, versioned repo.
+- The drift probe (`pack_states`) is **read-only**; the start-time refresh writes to the
+  container side only to remove manifested files the selection no longer wants (backed up
+  first). An agent that edits an injected file only triggers curated-wins re-stamping (with a
+  backup) — in-container edits cannot propagate into the library or other projects.
+
 ### Sync-back safety (defence against exfiltration into host config / the setups git repo)
 - The **denylist is enforced before any read** and **re-asserted at git-staging time** — it refuses
   to stage if `.credentials.json`/`oauthAccount`/`userID` ever slipped through.

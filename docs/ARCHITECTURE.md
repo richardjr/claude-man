@@ -132,7 +132,8 @@ surfaced). The fetch is **read-only and does not consume quota** — it's a stat
 ## Persistence + container lifecycle
 
 - **Definition:** `projects/<slug>.toml` — slug, profile, overlay (image variant), egress mode,
-  `[env]` (or `env_file`), `extra_apt`, and a `[[repos]]` array.
+  `language` + `packs` (the curated-pack selection — see *Curated packs* below), `[env]` (or
+  `env_file`), `extra_apt`, and a `[[repos]]` array.
 - **State:** `~/.local/state/claude-man/projects/<slug>/` with `workspace/` (the checked-out
   repos → bind `/workspace`) and `claude-config/` (per-project `CLAUDE_CONFIG_DIR` → bind
   `/home/agent/.claude`, `0700`), plus sibling `baseline.json` and `backups/`.
@@ -306,6 +307,50 @@ at load** (`EnvMount.lenient`): a mount valid when saved but invalidated by a la
 the case-typo guard) loads **flagged** (`error` set) — visible/removable in the env screen, round-tripped
 on save, and skipped by the render/lifecycle — rather than crashing `projects.load` (and the TUI).
 
+## Curated packs (skills + CLAUDE.md injectors — Phase 6, implemented)
+
+Full design: [`PACKS.md`](PACKS.md). The short version of the delivery rail it rides on: every
+project has an **asset source** at `~/.config/claude-man/assets/<slug>/` (config tier, secret-free,
+git-versionable) holding its `CLAUDE.md` + skills/agents/commands. `assets.sync_in` copies it into
+the live binds on every start (asset wins, backup-before-overwrite, claude-side default-deny
+allowlist, symlink containment) and `sync_out` carries bind-side edits back on stop. Packs are a
+**producer into that source** — container delivery needs no new mount, so the hardened floor is
+byte-identical (invariant 2).
+
+- **The library lives in this repo** (`library/packs/<tier>/<pack>/`): tiers are `common/` plus
+  per-language dirs **discovered from the layout** (adding a `typescript/` tier is just a
+  directory). A **pack is a bundle** — `pack.toml` (description, `default` flag) plus any mix of
+  `claude-md/*.md` fragments and `skills/<name>/` dirs that travel together; selection operates at
+  pack granularity. Pack names are library-unique (a lint test imports the real tree), so a
+  project's stored selection stays a flat list. Freshness identity is a **content hash** —
+  curation is "edit the file, commit", no version bumps. `packs/library.py` is the pure read side.
+- **Selection is explicit registry state**: `Project.language` (an explicit field, never inferred
+  from the overlay) and `Project.packs`. Defaults — every `default = true` pack in `common/` +
+  `<language>/` — are resolved **once at create** and written into the TOML, so a new library
+  default never creeps into existing projects; `project packs defaults` re-applies on demand.
+- **Materialization** (`packs/materialize.py::refresh`, run before `sync_in` on every `up` of a
+  project with packs selected, and immediately by `lifecycle.set_packs` on any selection change —
+  including deselecting the last pack): writes missing/stale copies into
+  the asset source, patches a **fenced block of `@`-import lines** into the workspace `CLAUDE.md`
+  (operator content outside the block is never touched — the settings.json field-patch
+  philosophy), and records every managed path + hash in a state-tier **manifest**
+  (`packs-manifest.json`). The manifest is the ours/theirs boundary: un-manifested files are
+  operator-owned and win collisions; a drifted managed copy is **curated-wins** (backed up, then
+  re-stamped from the library); deselection removes exactly the manifested paths — from the asset
+  source **and** the binds, since `sync_in` merges and never propagates deletions. Failure is
+  soft throughout: a broken or unreadable library skips with a note and never blocks a start or
+  create.
+- **Because the binds are live host dirs, a selection change applies to a running container
+  immediately** (claude reads it at its next session launch) — packs need no recreate, ever.
+- **Surfaces**: CLI `packs list`, `project packs add|rm|list|defaults`, `project create
+  --language`; TUI Project… → **Packs…** — a checklist grouped Common / `<language>` with a
+  **State** column (`tui/packsview.py::pack_states`, a read-only freshness probe: stale /
+  drifted / operator-collision / not-in-library) and a re-apply-defaults action. The create modal
+  has a Language field pre-filled from the Overlay choice.
+- Relatedly, `launch_workdir` now defaults to **`/workspace` always** (the injected CLAUDE.md is
+  what you see where you land; multi- and single-repo projects behave identically); an explicit
+  `[project] workdir` still wins.
+
 ## Network / egress (Phase 4 — implemented)
 
 **Open by default.** Strict mode is per-project, opt-in (`project lock <slug>` / create
@@ -397,7 +442,7 @@ Last commit), repainted on cursor-move from the same cache. The bottom **key bar
 `S` stop-all · `v` View… · `,` settings (ssh keys + git identity; `g` there opens the git-identity
 edit modal) · `q` quit. Lower-frequency verbs live behind the g/p/v submenus
 (`tui/screens/menu.py`): Repos… = add/remove-repo · refresh-git (fetch-ful) · pull-all;
-Project… = env-mounts · ports · egress-log · recreate · delete; View… = refresh-usage ·
+Project… = env-mounts · ports · packs · egress-log · recreate · delete; View… = refresh-usage ·
 focus-logs. Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
@@ -412,8 +457,8 @@ the fast registry mutations run inline, `resync` (docker exec) on a thread worke
   `--class=claude-man-<slug>` so a Hyprland `windowrulev2` can place it:
   `ghostty --class=claude-man-<slug> -e docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude|nvim}`.
   `claude`/shell/nvim open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
-  `[project] workdir`, else a **lone repo's checkout dir** (so a single-repo project drops you straight
-  into it), else `/workspace`.
+  `[project] workdir`, else **`/workspace`** (the uniform anchor since Phase 6 — the lone-repo auto-cd
+  was dropped so the pack-injected workspace `CLAUDE.md` is what you land on).
 
 ## Open risks
 

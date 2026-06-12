@@ -5,7 +5,7 @@ manages **hardened Docker containers**, each running **Claude Code** under a cho
 profile** (e.g. work / home), for a set of long-lived **git-checkout projects** on a single
 host.
 
-It exists to solve four things at once:
+It exists to solve five things at once:
 
 1. **Multiple accounts** — launch each Claude instance under a chosen profile. A profile is one
    OAuth identity minted once with `claude setup-token` and injected per-launch as
@@ -17,20 +17,26 @@ It exists to solve four things at once:
    all capabilities dropped, no-new-privileges, non-root, pid-limited), loadable with project
    environment variables and extra software via image overlays. Egress is open by default and
    **lockable** to a strict per-project allowlist.
-4. **Config sync-back** — when you close a session, changes the agent made to its Claude config
+4. **Curated packs** — an in-repo library of guidance templates (focused `CLAUDE.md` fragments +
+   skills, bundled as **packs**: guardrails, code-quality, per-language conventions) that
+   projects opt into. Selections materialize into each project's config automatically, so house
+   rules are versioned, reviewed, and improved in **one place** instead of drifting per project.
+5. **Config sync-back** — when you close a session, changes the agent made to its Claude config
    (agents, skills, slash-commands, `settings.json`, MCP servers, memory, `CLAUDE.md`) are
    diffed against a baseline and offered back to your host config behind an **accept/reject
    gate**. Credentials and identity are **never** synced.
 
-> Status: **alpha — phases 0–4 working, 5 planned** (2026-06-10). Mint work/home profiles; create /
+> Status: **alpha — phases 0–4 + 6 working, 5 planned** (2026-06-12). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
 > (mismatch-guarded); watch per-account token usage **and live 5-hour / weekly subscription-limit
 > bars**; commit + push from inside a container (inherited git identity + `gh` baked into every image);
 > add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
 > files into a container; publish service ports; **lock a project to strict egress** (a squid
-> allowlist proxy on a no-direct-route network) — all from both the CLI and the TUI.
+> allowlist proxy on a no-direct-route network); select **curated packs** of CLAUDE.md guidance +
+> skills per project (defaults by language, drift-tracked, applied live) — all from both the CLI
+> and the TUI.
 > **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 440 dependency-free tests; the hardened image is
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 533 dependency-free tests; the hardened image is
 > `image smoke`-gated.
 
 ## Platform support
@@ -51,6 +57,8 @@ large `yarn`/`npm` installs in `/workspace` take noticeably longer.
 ~/.config/claude-man/         durable, secret-free definitions (git-versionable)
   profiles/<name>.toml          one account identity (display name, email, default flag)
   projects/<slug>.toml          a project EXISTS iff this file exists
+  assets/<slug>/                per-project asset source (CLAUDE.md, skills) — synced into the
+                                binds on start; curated packs materialize here
 
 ~/.local/state/claude-man/    durable runtime state (some secret; never committed)
   profiles/<name>/token         0600 long-lived OAuth token (from `claude setup-token`)
@@ -58,7 +66,11 @@ large `yarn`/`npm` installs in `/workspace` take noticeably longer.
   profiles/<name>/seed/         allowlisted ~/.claude assets new projects inherit
   projects/<slug>/workspace/    the checked-out repos  ->  bind /workspace
   projects/<slug>/claude-config/ per-project CLAUDE_CONFIG_DIR  ->  bind /home/agent/.claude
+  projects/<slug>/packs-manifest.json  which files the pack system manages (ours/theirs boundary)
   sync-audit/                   git repo: per-session commit of accepted sync-back
+
+<the claude-man checkout>/    the install is the clone
+  library/packs/<tier>/<pack>/  the curated pack library (versioned with the code)
 
 docker                        the live status oracle
   one named container per project: claude-man-<slug>, labelled claude-man.*
@@ -215,10 +227,11 @@ usage). Newly added profiles already get both scopes.
 ## Managing projects
 
 ```bash
-# Create a project, choosing its account, image overlay, and egress mode:
-uv run claudemanctl project create demo --profile work --overlay python --egress open
+# Create a project, choosing its account, image overlay, pack language, and egress mode:
+uv run claudemanctl project create demo --profile work --overlay python --language python --egress open
 #   --profile <name>             account to run under   (default: the default profile)
 #   --overlay base|python|rust|node   toolchain baked into the image (default: base)
+#   --language <tier>            curated-pack tier whose defaults apply (see Curated packs below)
 #   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
 
 uv run claudemanctl project up demo         # create-if-needed + start
@@ -272,8 +285,48 @@ uv run claudemanctl project resync demo        # re-validate sources + re-seed s
 uv run claudemanctl project env rm demo /home/agent/.netrc            # by container dst or 'ssh'
 ```
 
-A single-repo project launches `claude`/shell **in the repo dir** by default (`docker exec -w`); set
-`[project] workdir = "<subdir>"` in the TOML to override (a multi-repo project defaults to `/workspace`).
+Projects launch `claude`/shell at **`/workspace`** (`docker exec -w`) — the uniform anchor where the
+workspace `CLAUDE.md` (and any pack-injected guidance) lives; set `[project] workdir = "<subdir>"` in
+the TOML to land in a repo dir instead.
+
+### Curated packs (guidance templates)
+
+A library of **packs** ships in this repo (`library/packs/`): each pack bundles focused `CLAUDE.md`
+fragments and/or skills that travel together — `guardrails` (never commit unasked, no destructive
+git, no secrets), `code-quality`, `workflow`, plus per-language convention packs (`node-conventions`,
+`python-uv`, `rust-cargo`). Projects **select** packs; claude-man **materializes** the selection into
+the project's asset source and syncs it into the live binds, so the agent picks it up at its next
+session launch — changes apply **immediately, no recreate**. Because the library is versioned here,
+improving a rule once improves it for every project on the next start.
+
+```bash
+uv run claudemanctl packs list                       # browse the library (--tier common|node|python|rust)
+uv run claudemanctl project create demo --language node   # defaults: common + node tier packs
+uv run claudemanctl project packs list demo          # the project's selection
+uv run claudemanctl project packs add demo workflow  # select a pack (applies immediately)
+uv run claudemanctl project packs rm demo workflow   # deselect (files removed from source + binds)
+uv run claudemanctl project packs defaults demo      # re-apply the library defaults (REPLACES the selection)
+```
+
+How it behaves (full design: [`docs/PACKS.md`](docs/PACKS.md)):
+
+- **Defaults are explicit, not creeping** — resolved once at `project create` from the `common` +
+  `--language` tiers and written into the project TOML. A new default added to the library later
+  never silently lands in existing projects (`packs defaults` re-applies on demand).
+- **Fragments are linked, not inlined** — they land under `/workspace/.claude-man/<pack>/` and are
+  referenced from the workspace `CLAUDE.md` via a fenced block of `@` imports; everything you write
+  outside that block is never touched. Skills land under `~/.claude/skills/`.
+- **Yours vs theirs is tracked** — a manifest records what the pack system manages. Your own files
+  always win collisions; deselecting removes only pack-managed files; an in-container edit to a
+  pack file is **curated-wins** (re-stamped from the library on next start, backed up first —
+  improvements belong upstream in the library).
+- **TUI**: select a project, `p` → `p` (Project… → Packs…) — a checklist grouped *Common* / your
+  language tier, with a **State** column showing drift (`stale` / `⚠ drifted` / `operator file
+  wins`); `d` re-applies defaults. The create form (`n`) has a Language field, pre-filled from the
+  Overlay choice.
+- The library is **public content** (this repo is public) — house rules and generic conventions go
+  in; anything client- or project-specific stays in the per-project asset source
+  (`~/.config/claude-man/assets/<slug>/`).
 
 ### Strict egress (lock a project to an allowlist)
 
@@ -370,7 +423,8 @@ uv run claudemanctl image smoke base                  # gate an image against th
 See [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) for the TUI walkthrough (profile → project →
 GitHub → ssh), [`CLAUDE.md`](CLAUDE.md) for the invariants any contributor (human or Claude)
 must keep, [`ROADMAP.md`](ROADMAP.md) for the phase plan,
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design,
+[`docs/PACKS.md`](docs/PACKS.md) for the curated-pack system, and
 [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and hardening rationale.
 
 ## Host requirements

@@ -133,9 +133,9 @@ Flow on `project up`:
 
 ## Launch workdir change
 
-`Project.launch_workdir` currently defaults a lone-repo project into the repo's checkout dir.
-This changes to **always `/workspace`** (an explicit `workdir` still wins; the lone-repo
-auto-cd is dropped). Note for honesty: Claude Code already traverses upward from cwd, so
+`Project.launch_workdir` used to default a lone-repo project into the repo's checkout dir.
+It now defaults to **always `/workspace`** (an explicit `workdir` still wins; the lone-repo
+auto-cd was dropped in 6a). Note for honesty: Claude Code already traverses upward from cwd, so
 `/workspace/CLAUDE.md` is loaded either way — the change is for consistency, not pickup:
 `/workspace` becomes the uniform anchor (the injected CLAUDE.md is what you see where you
 land), multi- and single-repo projects behave identically, and the agent can see sibling
@@ -158,9 +158,10 @@ repos. Operators who prefer landing in the repo set `workdir = "<dir>"` once.
   dependency-free: pack discovery/parse, name-uniqueness lint, fenced-block patch idempotence,
   manifest diff, deselection/collision safety.
 - **6b** — TUI Packs screen + drift surfacing + create-modal Language field.
-- **6c** — curate the initial library content: guardrails / code-quality / workflow /
-  review-skills (common) + node / python / rust convention packs; smoke that a launched claude
-  actually reports the imported memory.
+- **6c** — deeper curation: port the operator's existing skills (e.g. a common `review-skills`
+  pack — the fragment starter library, guardrails / code-quality / workflow + node / python /
+  rust conventions, shipped in 6a); smoke that a launched claude actually reports the imported
+  memory.
 
 ## Implementation notes — 6a as built (2026-06-11)
 

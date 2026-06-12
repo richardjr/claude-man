@@ -162,8 +162,9 @@ Then:
   profile). Both auto-start a stopped project first (this path skips the update prompt).
 - `b` opens the workspace directory in your file manager.
 
-Terminal windows open in the repo dir for a single-repo project, else `/workspace` (a
-`workdir` setting in the project TOML overrides both). The terminal program is auto-detected
+Terminal windows open at `/workspace` — the uniform anchor where the workspace `CLAUDE.md`
+and any pack-injected guidance live (a `workdir` setting in the project TOML lands you in a
+repo dir instead). The terminal program is auto-detected
 per platform (Linux: ghostty → alacritty → kitty → …; macOS falls back to Terminal.app; WSL2
 picks up Windows Terminal); change it in Settings (`,` → `e`) or with
 `claudemanctl config terminal`.
@@ -236,7 +237,7 @@ does **not** apply mount add/removes (only recreate does).
 agent — Settings → `l` does exactly that. On Linux/WSL2, claude-man falls back to starting a
 managed agent if your session has none.
 
-## 7. Other env mounts and published ports
+## 7. Other env mounts, published ports, and curated packs
 
 **File mounts and env vars** (`p` → `e`, then `a`):
 
@@ -303,5 +304,6 @@ chosen at create; the TUI surfaces the Egress column and Project… → Egress l
 | Boot splash toggle | `claudemanctl config splash on\|off` |
 | Clone missing repos (fetch-all is `g` → `r` in the TUI) | `claudemanctl project sync-repos <slug>` |
 | Claude release channel / version pin | `claudemanctl config image --channel …` |
+| Browse the whole pack library across tiers (the Packs… screen shows your project's tiers) | `claudemanctl packs list [--tier …]` |
 
 Everything else in this guide has a CLI equivalent too — see [`README.md`](../README.md).

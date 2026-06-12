@@ -31,7 +31,8 @@ bypass, plus the ssh tmpfs, the hardened tmpfs mountpoints, and the baked claude
 operator-owned) with a `cp`-style trailing-slash dst; src must be absolute (else docker makes a named
 volume); `openssh-client` added to the base image. The **TUI** adds an `e` env-mounts manager screen
 (list / add / remove / resync). A **`workdir`** option (`Project.launch_workdir`) makes `claude`/shell
-open via `docker exec -w` in a lone repo's dir by default (else `/workspace`). **Per-account
+open via `docker exec -w` in an explicit `[project] workdir`, else `/workspace` — always, since
+Phase 6a dropped the lone-repo auto-cd. **Per-account
 subscription usage bars** — `usage_api.py` reads `GET /api/oauth/usage` (5-hour + weekly utilization
 %, account-wide) host-side per profile; surfaced as coloured mini-bars in the TUI usage panel (`5h` +
 `Week` columns, `u` refreshes) + `profile limits` CLI (see Phase 2). **In-container git identity + gh**
@@ -55,7 +56,7 @@ neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeSc
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
-Commits from fugitive/gitsigns carry the injected git identity. 341 dependency-free
+Commits from fugitive/gitsigns carry the injected git identity. 533 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git + nvim probes).
 
@@ -264,7 +265,7 @@ new mounts, floor byte-identical (invariant 2)._
 
 - [x] **6a (landed 2026-06-11):** `library/packs/<tier>/<pack>/` layout + `pack.toml` (description, `default`); `packs/library.py` (pure discovery/parse/hash + name-uniqueness lint); `packs/materialize.py` (asset-source writes + fenced CLAUDE.md block patch + manifest); `Project.packs`/`Project.language` schema + `projects.set_packs` + `lifecycle.set_packs` (immediate apply); lifecycle `up` hook before `sync_in` (fail-soft); CLI (`packs list`, `project packs add|rm|list|defaults`, `project create --language`); `launch_workdir` default → always `/workspace` (explicit `workdir` still wins; lone-repo auto-cd dropped). Starter library: guardrails/code-quality (default) + workflow (opt-in) + node/python/rust convention packs. 34 new tests (discovery lint, block-patch idempotence, ours/theirs manifest boundary, drift/collision/deselect) + a live CLI smoke
 - [x] **6b (landed 2026-06-12):** TUI Packs… checklist screen (`tui/screens/packs.py`, opened Project… → `p`): grouped *Common* / *<language>* / *Other (selected)* rows from the pure `tui/packsview.py` row model (splash/rowfx no-textual pattern, unit-tested), space/enter toggle + `d` re-apply-defaults through `lifecycle.set_packs` (immediate apply), and a State column from the new `packsview.pack_states` (read-only freshness map: stale / drifted / operator-collision / not-in-library; the materializer stays the only writer). Create modal gained a Language Select (tiers discovered from the library; the Overlay choice pre-fills the matching tier until the operator picks one) threaded `NewProject` → `create_project`. 31 new tests + a headless pilot smoke
-- [ ] **6c:** curate the initial library: `guardrails` / `code-quality` / `workflow` / `review-skills` (common) + `node-conventions` / `python-uv` / `rust-cargo`; launch smoke (claude reports the imported memory). Templates are PUBLIC (repo is public) — house rules in, client/project-specific content stays in per-project assets
+- [ ] **6c:** deeper curation — port the operator's existing skills into `library/packs/` (e.g. a common `review-skills` pack; the fragment starter library — guardrails / code-quality / workflow + node/python/rust conventions — shipped in 6a); launch smoke (claude reports the imported memory via `/memory`). Templates are PUBLIC (repo is public) — house rules in, client/project-specific content stays in per-project assets
 
 ---
 
