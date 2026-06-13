@@ -229,6 +229,84 @@ class ParseDeniedTest(unittest.TestCase):
         self.assertEqual(egress.parse_denied("not a squid line at all\n"), [])
 
 
+class ParseAccessTest(unittest.TestCase):
+    """The richer parser backing the TUI Network panel: BOTH allowed and denied requests, with port,
+    bytes, method and status — and parse_denied is now a thin filter over it (regression above)."""
+
+    SAMPLE = ParseDeniedTest.SAMPLE
+
+    def test_records_cover_allowed_and_denied_no_dedup(self) -> None:
+        recs = egress.parse_access(self.SAMPLE)
+        # The garbage/short line is dropped; the two example.com rows are BOTH kept (no dedup).
+        self.assertEqual([(r.host, r.allowed) for r in recs], [
+            ("example.com", False),
+            ("api.anthropic.com", True),
+            ("evil.test", False),
+            ("example.com", False),
+        ])
+
+    def test_port_method_status(self) -> None:
+        recs = egress.parse_access(self.SAMPLE)
+        connect_denied = recs[0]
+        self.assertEqual((connect_denied.port, connect_denied.method, connect_denied.status),
+                         (443, "CONNECT", "403"))
+        tunnel = recs[1]
+        self.assertEqual((tunnel.port, tunnel.method, tunnel.status, tunnel.allowed),
+                         (443, "CONNECT", "200", True))
+        # A plain-HTTP url with no explicit port -> port is None (not mis-parsed as a host:port split).
+        plain_http = recs[2]
+        self.assertEqual((plain_http.host, plain_http.port, plain_http.method), ("evil.test", None, "GET"))
+
+    def test_bytes_parsed_int_with_fallback(self) -> None:
+        recs = egress.parse_access(self.SAMPLE)
+        self.assertEqual(recs[0].bytes, 3897)
+        self.assertEqual(recs[1].bytes, 5000)
+        # A non-digit bytes field (squid logs "-" for some entries) falls back to 0, never crashes.
+        edge = egress.parse_access(
+            "1700000002.0 0 172.18.0.3 TCP_TUNNEL/200 - CONNECT host.test:443 - HIER_DIRECT/9 -\n")
+        self.assertEqual((edge[0].bytes, edge[0].host, edge[0].port), (0, "host.test", 443))
+
+    def test_empty_and_garbage(self) -> None:
+        self.assertEqual(egress.parse_access(""), [])
+        self.assertEqual(egress.parse_access("not a squid line at all\n"), [])
+
+    def test_denied_is_a_filter_over_access(self) -> None:
+        # The whole point of the refactor: the denied view is exactly the not-allowed hosts, deduped.
+        recs = egress.parse_access(self.SAMPLE)
+        derived = []
+        seen = set()
+        for r in recs:
+            if not r.allowed and r.host not in seen:
+                seen.add(r.host)
+                derived.append(r.host)
+        self.assertEqual(derived, egress.parse_denied(self.SAMPLE))
+
+
+class SummarizeAccessTest(unittest.TestCase):
+    SAMPLE = ParseDeniedTest.SAMPLE
+
+    def _summary(self):
+        return egress.summarize_access(egress.parse_access(self.SAMPLE))
+
+    def test_per_host_counts_ports_bytes_lastseen(self) -> None:
+        summary = self._summary()
+        stats = {s.host: s for s in summary}
+        # first-seen host order is preserved
+        self.assertEqual([s.host for s in summary], ["example.com", "api.anthropic.com", "evil.test"])
+        ex = stats["example.com"]
+        self.assertEqual((ex.allowed_count, ex.denied_count, ex.total_bytes), (0, 2, 3897 * 2))
+        self.assertEqual(ex.ports, (443,))
+        self.assertEqual((ex.last_seen, ex.last_allowed), ("1700000001.000", False))
+        anth = stats["api.anthropic.com"]
+        self.assertEqual((anth.allowed_count, anth.denied_count, anth.total_bytes, anth.last_allowed),
+                         (1, 0, 5000, True))
+        evil = stats["evil.test"]
+        self.assertEqual((evil.denied_count, evil.ports), (1, ()))  # plain-HTTP, no port captured
+
+    def test_empty(self) -> None:
+        self.assertEqual(egress.summarize_access(egress.parse_access("")), [])
+
+
 class SmokeVerdictTest(unittest.TestCase):
     def test_pass_requires_allowed_reachable_and_denied_blocked(self) -> None:
         ok, _ = egress.smoke_verdict(allowed_reachable=True, denied_reachable=False)

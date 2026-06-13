@@ -64,6 +64,14 @@ bottom:
 - **Usage panel** — one row per profile: token totals from container transcripts plus the
   account-wide `5h` / `Week` subscription bars (green < 70 % < yellow < 90 % < red). A `re-mint`
   note means the token predates the usage scope — `profile renew` fixes it.
+- **Network panel** — one row per project: `Project · Egress · Blocked · Allowed · Traffic`.
+  **Traffic** is the whole-container network I/O since the container started (`docker stats`
+  NetIO, RX / TX) and shows for **every** running project, locked or open. **Blocked** /
+  **Allowed** are the distinct destinations the squid sidecar denied / permitted and apply
+  to **locked** projects only (open projects have no sidecar, so they read `—`); a non-zero
+  Blocked count turns red. Stopped projects read `—`. Refreshed on the same 10 s cycle as the
+  projects table. For the per-destination detail (which hosts were blocked), use the CLI
+  `claudemanctl project egress-log <slug>`.
 - **Log pane** — every action's result lands here (green ok / red failure / yellow advisory),
   including streamed docker-build progress.
 
@@ -81,7 +89,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress log · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
 
 **`global` row** — acts app-wide:
@@ -292,7 +300,12 @@ outlived the library).
 Not in the TUI yet, honestly stubbed: the `y` sync-back review gate (Phase 5 — distinct from
 the automatic asset sync above) and live container logs in `v` → `l` (the pane it focuses is
 the TUI's own event log). Strict egress is toggled from the CLI (`project lock|unlock`) or
-chosen at create; the TUI surfaces the Egress column and Project… → Egress log.
+chosen at create; the TUI surfaces the Egress column and the always-on **Network panel** (above).
+Its Traffic figures are whole-container `docker stats` NetIO since the container started; the
+Blocked/Allowed counts come from the squid access log and apply to locked projects only. Note the
+counts reflect **completed** connections — squid logs a CONNECT (HTTPS) tunnel only when it closes,
+so an in-flight transfer isn't counted until it ends. For the per-destination detail behind a count,
+use the CLI `project egress-log <slug>`.
 
 ## Quick reference — what stays CLI-only
 

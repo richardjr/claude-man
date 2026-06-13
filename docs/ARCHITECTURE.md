@@ -367,9 +367,12 @@ byte-identical (invariant 2).
 - **The squid sidecar** (`claude-man-proxy-<slug>`, image `claude-man:proxy`) sits on that internal
   network **and** the default bridge (attached via `docker network connect bridge` after run), so it
   is the **only** path out. squid enforces the `dstdomain` allowlist over **CONNECT tunnels — no
-  MITM, no CA install** (HTTPS stays end-to-end); `http_access deny all` otherwise, and denials are
-  logged to stdout so `project egress-log` / the TUI Project-menu **Egress log** can surface them for
-  allowlist tuning.
+  MITM, no CA install** (HTTPS stays end-to-end); `http_access deny all` otherwise. squid logs every
+  request — allowed and denied — to stdout, so `project egress-log` surfaces the **blocked**
+  destinations for allowlist tuning, and the TUI's always-on **Network panel** shows per-project
+  blocked/allowed **counts** (via the pure `egress.parse_access`/`summarize_access` parsers over the
+  same access log) alongside Traffic. The counts reflect completed connections — a CONNECT tunnel is
+  logged only at close, so in-flight HTTPS isn't counted until it ends.
 - **Allowlist** (`network/allowlist.py`, rendered to squid.conf by the pure `network/squid.py`):
   `api.anthropic.com`, `.anthropic.com`, **`claude.ai`** (OAuth refresh — critical),
   `statsig.anthropic.com`, `sentry.io`, the registries (`registry.npmjs.org`, PyPI,
@@ -435,14 +438,19 @@ worker tailing `docker events`. The **Repos column** is the live git-state summa
 `1 uncloned`) from a separate **8 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
 thread, cached between scans — host-FS state, distinct from the never-cached container liveness); a
 **repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·
-Last commit), repainted on cursor-move from the same cache. The bottom **key bar** is a two-row
+Last commit), repainted on cursor-move from the same cache. A per-project **Network panel**
+(Project · Egress · Blocked · Allowed · Traffic) is repainted on the projects-poll cycle by
+`refresh_net`: Traffic is the whole-container `docker stats` NetIO (since container start — shown for
+every running project, open or locked), while Blocked/Allowed are the distinct denied/permitted
+destinations from the squid access log (locked projects only — open ones have no sidecar). The bottom
+**key bar** is a two-row
 `Static` (replacing the stock Footer) so the scope of every key is explicit — row 1 `project`
 (acts on the cursor's row): `enter` shell · `c` claude · `e` editor (nvim) · `b` browse ·
 `s` start/stop · `g` Repos… · `p` Project… · `y` sync-review; row 2 `global`: `n` new ·
 `S` stop-all · `v` View… · `,` settings (ssh keys + git identity; `g` there opens the git-identity
 edit modal) · `q` quit. Lower-frequency verbs live behind the g/p/v submenus
 (`tui/screens/menu.py`): Repos… = add/remove-repo · refresh-git (fetch-ful) · pull-all;
-Project… = env-mounts · ports · packs · egress-log · recreate · delete; View… = refresh-usage ·
+Project… = env-mounts · ports · packs · recreate · delete; View… = refresh-usage ·
 focus-logs. Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).

@@ -13,9 +13,9 @@ firewall is a network-layer boundary, not a rule inside the agent:
     tunnels (no MITM); everything else is denied + logged.
 
 The agent-side flags live in ``runner``; this module manages the network + sidecar they point at.
-PURE argv renderers (``*_argv``) + ``parse_denied`` are unit-tested without a daemon; the thin
-wrappers reuse ``docker/runner._run`` (which maps a missing docker / a wedged daemon to a non-zero
-result rather than raising).
+PURE argv renderers (``*_argv``) + the access-log parsers (``parse_access`` / ``parse_denied`` /
+``summarize_access``) are unit-tested without a daemon; the thin wrappers reuse ``docker/runner._run``
+(which maps a missing docker / a wedged daemon to a non-zero result rather than raising).
 """
 
 from __future__ import annotations
@@ -36,6 +36,47 @@ from . import squid
 class Result:
     ok: bool
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class AccessRecord:
+    """One parsed squid access-log line (the default ``squid`` logformat).
+
+    ``allowed`` is False for a blocked request (``TCP_DENIED`` / a ``/403`` status) — the SAME test
+    ``parse_denied`` has always applied, just retained per-record. ``port`` is the destination port
+    (the agent's HTTPS egress is always ``CONNECT host:port``); ``None`` for a plain-HTTP url with no
+    explicit port. ``ts`` carries the raw ``%ts.%03tu`` epoch.ms field so ``summarize_access`` can report
+    last-seen without re-splitting.
+
+    BYTE CAVEAT: squid writes a CONNECT tunnel's access-log line only when the tunnel CLOSES, so an
+    in-flight HTTPS transfer contributes 0 bytes until it ends — ``bytes`` (download direction, ``%<st``)
+    reflects CLOSED connections, not live throughput. Denials are logged promptly, so the blocked view
+    stays live; only allowed-tunnel byte totals lag to close.
+    """
+
+    ts: str
+    host: str
+    port: int | None
+    allowed: bool
+    bytes: int
+    method: str
+    status: str
+
+
+@dataclass(frozen=True)
+class HostStat:
+    """Per-host aggregate over the access records: how many requests were allowed vs blocked, the
+    distinct destination ports seen, the summed (closed-connection) bytes, and the timestamp + verdict
+    of the most recent request. The operator view for allowlist tuning and for seeing what a locked
+    project actually talks to."""
+
+    host: str
+    ports: tuple[int, ...]
+    allowed_count: int
+    denied_count: int
+    total_bytes: int
+    last_seen: str
+    last_allowed: bool
 
 
 # ---------------------------------------------------------------------------
@@ -81,39 +122,118 @@ def bridge_connect_argv(slug: str) -> list[str]:
     return ["docker", "network", "connect", "bridge", config.proxy_container_name(slug)]
 
 
+# squid's default ``squid`` logformat is a fixed, whitespace-separated field layout — the single
+# source of truth for the magic indices used below (one place so the two parsers can't drift):
+#   [0] %ts.%03tu  epoch.ms timestamp      [1] %6tr   elapsed ms      [2] %>a   client IP
+#   [3] %Ss/%03Hs  result/status           [4] %<st   bytes to client [5] %rm   method
+#   [6] %ru        URL (host:port for CONNECT)        [7] %un user     [8] %Sh/%<A hier/server
+#   [9] %mt        content type
+# result(3)+bytes(4)+method(5)+url(6) must all be present for a line to be an access record; user/
+# hier/type may be absent on some lines, so the guard is the same ``< 7`` the original used.
+_SQUID_MIN_FIELDS = 7
+
+
+def _split_squid_fields(line: str) -> list[str] | None:
+    """Whitespace-split a squid access-log line, or ``None`` if it is too short to carry
+    result/bytes/method/url (a ``cache.log`` / entrypoint line, not an access line — skip, don't
+    mis-index)."""
+    parts = line.split()
+    return parts if len(parts) >= _SQUID_MIN_FIELDS else None
+
+
+def _host_port_from_url(url: str) -> tuple[str, int | None]:
+    """Normalise a squid-logged URL to ``(host, port)``.
+
+    Strips a scheme + path, then splits a CONNECT ``host:port`` into a bare host + int port (so the
+    host pastes straight into ``egress.allowlist`` — a ``dstdomain host:port`` is invalid). Returns
+    ``(host, None)`` for a plain-HTTP url with no explicit port (and ``('', None)`` for an empty url so
+    callers can skip it). Shared by ``parse_denied`` + ``parse_access`` so the host normalisation can
+    never diverge between them. Bracketed IPv6 literals (``[::1]:443``) split correctly — the final
+    ``:`` precedes the numeric port.
+    """
+    host = url.split("://", 1)[-1]     # strip scheme for a plain-HTTP url
+    host = host.split("/", 1)[0]       # drop any path
+    h, sep, port = host.rpartition(":")
+    if sep and h and port.isdigit():
+        return h, int(port)
+    return host, None
+
+
+def parse_access(log: str) -> list[AccessRecord]:
+    """Parse squid's access log (``docker logs <proxy>`` output) into structured records.
+
+    Captures BOTH allowed and denied requests — host, port, allow/deny verdict, bytes, method,
+    status — feeding ``summarize_access`` for the TUI Network panel's per-project counts. One
+    ``AccessRecord`` per parseable line, in
+    first-seen (chronological) order, with NO de-duplication (callers aggregate). PURE (string in →
+    records out, no daemon) so it is unit-tested against sample log text, exactly like the denied-only
+    view it now backs. See ``AccessRecord`` for the field layout + the tunnel-byte caveat.
+    """
+    out: list[AccessRecord] = []
+    for line in log.splitlines():
+        parts = _split_squid_fields(line)
+        if parts is None:
+            continue
+        result_status = parts[3]
+        host, port = _host_port_from_url(parts[6])
+        if not host:
+            continue
+        # Allow/deny is orthogonal to HTTP status: a permitted-but-upstream-failed tunnel
+        # (TCP_TUNNEL/503) is still allowed. This is the EXACT predicate parse_denied used, so the
+        # wrapper below reproduces today's output byte-for-byte.
+        denied = "TCP_DENIED" in result_status or result_status.endswith("/403")
+        out.append(AccessRecord(
+            ts=parts[0],
+            host=host,
+            port=port,
+            allowed=not denied,
+            bytes=int(parts[4]) if parts[4].isdigit() else 0,
+            method=parts[5],
+            status=result_status.partition("/")[2],
+        ))
+    return out
+
+
 def parse_denied(log: str) -> list[str]:
-    """Extract denied destinations from squid's access log (``docker logs <proxy>`` output).
+    """Destinations a locked project tried to reach but the allowlist BLOCKED — deduped, first-seen
+    order, CONNECT port stripped (paste-able into ``egress.allowlist``).
 
-    squid's default ``squid`` logformat is::
-
-        <ts> <elapsed> <client> <result>/<status> <bytes> <method> <url> <user> <hier>/<srv> <type>
-
-    A blocked request is ``TCP_DENIED/403`` (or any ``/403``). Returns the requested hosts in first-
-    seen order, de-duplicated — the list the operator would add to ``egress.allowlist`` if legitimate.
-    PURE so it is unit-tested against sample log text.
+    A thin filter over ``parse_access`` so the field layout + host normalisation live in exactly one
+    place; the public contract is unchanged (the existing tests pin it). PURE, unit-tested.
     """
     out: list[str] = []
     seen: set[str] = set()
-    for line in log.splitlines():
-        parts = line.split()
-        if len(parts) < 7:
-            continue
-        result = parts[3]
-        if "TCP_DENIED" not in result and not result.endswith("/403"):
-            continue
-        url = parts[6]                     # method is parts[5]; url is parts[6]
-        host = url.split("://", 1)[-1]     # strip scheme for a plain-HTTP url
-        host = host.split("/", 1)[0]       # drop any path
-        # CONNECT targets are host:port (e.g. `example.com:443`) — strip the port so the result is a
-        # bare host the operator can paste straight into egress.allowlist (a `dstdomain host:port` is
-        # invalid). HTTPS (the common case) is always CONNECT, so this matters.
-        h, sep, port = host.rpartition(":")
-        if sep and h and port.isdigit():
-            host = h
-        if host and host not in seen:
-            seen.add(host)
-            out.append(host)
+    for rec in parse_access(log):
+        if not rec.allowed and rec.host not in seen:
+            seen.add(rec.host)
+            out.append(rec.host)
     return out
+
+
+def summarize_access(records: list[AccessRecord]) -> list[HostStat]:
+    """Fold access records into a per-host aggregate (allowed/denied counts, distinct ports, summed
+    bytes, most-recent timestamp + verdict), in first-seen host order — the caller sorts if it wants.
+    PURE. Takes records (not log text) so the TUI Network panel reads the sidecar once via
+    ``access_log`` and reuses this aggregation without a second log read."""
+    order: list[str] = []
+    agg: dict[str, dict] = {}
+    for rec in records:
+        a = agg.get(rec.host)
+        if a is None:
+            a = {"allowed": 0, "denied": 0, "bytes": 0, "ports": set(),
+                 "last_seen": rec.ts, "last_allowed": rec.allowed}
+            agg[rec.host] = a
+            order.append(rec.host)
+        a["allowed" if rec.allowed else "denied"] += 1
+        a["bytes"] += rec.bytes
+        if rec.port is not None:
+            a["ports"].add(rec.port)
+        a["last_seen"] = rec.ts          # records arrive in chronological order, so the last wins
+        a["last_allowed"] = rec.allowed
+    return [HostStat(host=h, ports=tuple(sorted(agg[h]["ports"])),
+                     allowed_count=agg[h]["allowed"], denied_count=agg[h]["denied"],
+                     total_bytes=agg[h]["bytes"], last_seen=agg[h]["last_seen"],
+                     last_allowed=agg[h]["last_allowed"]) for h in order]
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +383,34 @@ def smoke(slug: str) -> tuple[bool, list[str]]:
     return ok, lines
 
 
+# `docker logs --tail N` (non-follow) returns promptly in the normal case; the timeout only guards a
+# wedged daemon so the repeating TUI Network-panel poll can't pile up blocked reader threads.
+_LOGS_TIMEOUT_S = 15
+
+
+def _proxy_logs(slug: str, *, tail: int) -> str | None:
+    """Newest ``tail`` lines of the sidecar's combined stdout+stderr, or ``None`` if it can't be read
+    (no sidecar / wedged daemon). squid logs every request — allowed and denied — to stdout."""
+    cp = runner._run(["docker", "logs", "--tail", str(tail), config.proxy_container_name(slug)],
+                     timeout=_LOGS_TIMEOUT_S)
+    if cp.returncode != 0:
+        return None
+    return (cp.stdout or "") + "\n" + (cp.stderr or "")
+
+
 def denied_requests(slug: str, *, tail: int = 500) -> list[str]:
     """The hosts the locked project tried to reach but the allowlist blocked (newest log tail).
 
     Reads ``docker logs`` of the sidecar (squid logs denials to stdout) and parses them. Empty when the
     sidecar isn't running / has logged nothing — the operator surfaces this in the TUI to tune the
     allowlist."""
-    cp = runner._run(["docker", "logs", "--tail", str(tail), config.proxy_container_name(slug)])
-    if cp.returncode != 0:
-        return []
-    return parse_denied((cp.stdout or "") + "\n" + (cp.stderr or ""))
+    log = _proxy_logs(slug, tail=tail)
+    return parse_denied(log) if log is not None else []
+
+
+def access_log(slug: str, *, tail: int = 500) -> list[AccessRecord]:
+    """All recent proxy access records (allowed + denied) for a locked project — the data source for
+    the TUI Network panel's Blocked/Allowed counts. Reads ``docker logs --tail`` of the sidecar and
+    parses it; empty when the sidecar isn't running / has logged nothing."""
+    log = _proxy_logs(slug, tail=tail)
+    return parse_access(log) if log is not None else []

@@ -22,7 +22,7 @@ from textual.widgets import DataTable, Header, Label, RichLog, Static
 from .. import config, lifecycle, usage, usage_api
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
-from ..docker import status
+from ..docker import stats, status
 from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
@@ -47,6 +47,9 @@ from . import splash as splash_mod
 
 _COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
+# Per-project network panel. Traffic = whole-container NetIO since start (docker stats). Blocked/Allowed
+# = distinct destinations from the squid access log — locked projects only (open ones have no sidecar).
+_NET_COLUMNS = ("Project", "Egress", "Blocked", "Allowed", "Traffic")
 # "5h"/"Week" are ACCOUNT-wide subscription windows from /api/oauth/usage (not container-scoped).
 _USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", "5h", "Week")
 # Bar colour by utilization band (usage_api.level): green < 70% < yellow < 90% < red.
@@ -72,6 +75,7 @@ class ClaudeManApp(App):
     /* 13 = 10 repo rows + 1 header + 2 border — sized to show a full realistic repo list. */
     #repos { height: auto; max-height: 13; border: round $panel; }
     #profiles { height: auto; max-height: 10; border: round $panel; }
+    #netactivity { height: auto; max-height: 8; border: round $panel; }
     .panel-title { color: $text-muted; padding: 0 1; }
     RichLog { height: 8; border: round $panel; }
     /* height: auto — on a narrow terminal the project row wraps onto a second line; a fixed
@@ -81,7 +85,7 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Packs, Egress-log, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers are reused
+    # Ports, Packs, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
     # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
@@ -119,7 +123,6 @@ class ClaudeManApp(App):
         ("e", "Env mounts", "env_mounts"),
         ("o", "Ports", "ports"),
         ("p", "Packs…", "packs"),
-        ("g", "Egress log (denied)", "egress_log"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -137,6 +140,9 @@ class ClaudeManApp(App):
             yield Label("Token usage per profile (containers) · 5h/Week = account subscription limits",
                         classes="panel-title")
             yield DataTable(id="profiles")
+            yield Label("Network · Traffic since container start · Blocked/Allowed = locked projects "
+                        "(g for live detail)", classes="panel-title")
+            yield DataTable(id="netactivity")
             yield RichLog(id="log", highlight=True, markup=True)
         yield Static(_KEYBAR, id="keybar")
 
@@ -179,6 +185,7 @@ class ClaudeManApp(App):
         self._repos_col = self._proj_cols[_COLUMNS.index("Repos")]
         self._repo_cols = self.query_one("#repos", DataTable).add_columns(*_REPO_COLUMNS)
         self.query_one("#profiles", DataTable).add_columns(*_USAGE_COLUMNS)
+        self.query_one("#netactivity", DataTable).add_columns(*_NET_COLUMNS)
         self.refresh_projects()
         self.refresh_usage()
         self.refresh_utilization()
@@ -261,6 +268,54 @@ class ClaudeManApp(App):
             slugs = [r.slug for r in rows]
             if prev_slug in slugs:
                 table.move_cursor(row=slugs.index(prev_slug))
+        # Repaint the Network panel from the SAME fresh join — it reads `_last_rows` for running-state +
+        # egress, so driving it from here (rather than its own timer) means it never reads a stale set,
+        # and it tracks every status flip / post-action refresh automatically. `exclusive` drops overlaps.
+        self.refresh_net()
+
+    # -- network activity panel (per-project traffic + blocked/allowed) ----
+    @work(thread=True, exclusive=True, group="net")
+    def refresh_net(self) -> None:
+        """Build the per-project Network panel off the UI thread (mirrors refresh_usage/refresh_gitstate).
+
+        Traffic is the whole-container NetIO since start, read for every RUNNING agent in ONE
+        ``docker stats`` call. Blocked/Allowed are the distinct denied/allowed destinations from the
+        squid access log — only for running *locked* projects (open ones have no sidecar). Both reads
+        are time-bounded so a wedged daemon can't stall the worker; failures degrade to ``—``/``?``.
+        """
+        from ..network import egress
+
+        rows_snapshot = list(self._last_rows)  # bind the reference; it's replaced wholesale on the UI thread
+        running = [r for r in rows_snapshot if r.kind == status.UP]
+        netio = stats.container_net_io([config.container_name(r.slug) for r in running])
+
+        dim = lambda s: Text(s, style="dim")  # noqa: E731
+        out: list[tuple] = []
+        for r in rows_snapshot:
+            if r.kind != status.UP:
+                out.append((r.slug, r.egress, dim("—"), dim("—"), dim("—")))
+                continue
+            traffic = netio.get(config.container_name(r.slug)) or dim("—")
+            if r.egress != "strict":
+                out.append((r.slug, r.egress, dim("—"), dim("—"), traffic))
+                continue
+            try:
+                summary = egress.summarize_access(egress.access_log(r.slug))
+                n_blocked = sum(1 for s in summary if s.denied_count)
+                n_allowed = sum(1 for s in summary if s.allowed_count)
+            except Exception:  # noqa: BLE001 - a log read must never tear down the worker
+                out.append((r.slug, r.egress, dim("?"), dim("?"), traffic))
+                continue
+            blocked_cell = Text(str(n_blocked), style="red bold") if n_blocked else dim("0")
+            allowed_cell = Text(str(n_allowed), style="green") if n_allowed else dim("0")
+            out.append((r.slug, r.egress, blocked_cell, allowed_cell, traffic))
+        self.call_from_thread(self._render_net, out)
+
+    def _render_net(self, rows: list[tuple]) -> None:
+        table = self.query_one("#netactivity", DataTable)
+        table.clear()
+        for row in rows:
+            table.add_row(*row)
 
     @work(thread=True, exclusive=True, group="usage")
     def refresh_usage(self) -> None:
@@ -856,7 +911,6 @@ class ClaudeManApp(App):
             "env_mounts": self.action_env_mounts,
             "ports": self.action_ports,
             "packs": self.action_packs,
-            "egress_log": self.action_egress_log,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1120,36 +1174,6 @@ class ClaudeManApp(App):
             return
         self._log(f"managing curated packs for {slug} (toggles apply immediately — no recreate)")
         self.push_screen(PacksScreen(slug))
-
-    def action_egress_log(self) -> None:
-        """Show the destinations a locked project tried to reach but the allowlist blocked (Phase 4)."""
-        slug = self._current_slug()
-        if not slug or not projects.exists(slug):
-            self._log("[red]egress log: select a defined project (orphan rows aren't managed)[/]")
-            return
-        if projects.load(slug).egress != "strict":
-            self._log(f"{slug}: open egress (not locked) — recreate with strict egress to enforce "
-                      "an allowlist")
-            return
-        self._log(f"reading denied egress for {slug} …")
-        self._egress_log_worker(slug)
-
-    @work(thread=True, group="egress")
-    def _egress_log_worker(self, slug: str) -> None:
-        from ..network import egress
-
-        try:
-            denied = egress.denied_requests(slug)
-        except Exception as exc:  # noqa: BLE001 - a log read must never crash the worker
-            self._thread_log(f"[red]egress log for {slug} failed: {exc!r}[/]")
-            return
-        if not denied:
-            self._thread_log(f"{slug}: no denied egress requests logged")
-            return
-        self._thread_log(f"[yellow]{slug}: {len(denied)} denied destination(s) "
-                         "(add legitimate ones to egress.allowlist):[/]")
-        for host in denied:
-            self._thread_log(f"  {host}")
 
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")
