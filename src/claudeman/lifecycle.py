@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from . import assets, config, env_secrets, gh_token, gitconfig, hostplatform, ssh_agent, updates
 from .checkout import gitstate, repos
 from .docker import images, runner, status
+from .network import allowlist as allowlist_mod
 from .network import egress
 from .packs import library as packs_library
 from .packs import materialize as packs_materialize
@@ -616,6 +617,58 @@ def lock(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
 def unlock(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
     """Unlock a project back to open egress and recreate it (tears down the sidecar). See ``set_egress``."""
     return set_egress(slug, "open", on_progress=on_progress)
+
+
+def _allowlist_apply_hint(slug: str) -> str:
+    """The recreate-to-apply reminder tail for an allowlist edit, by the project's egress mode: a
+    locked project needs a recreate to re-render squid.conf; an open one isn't filtered until it's
+    locked. Read fresh AFTER the write so the hint reflects the just-saved state."""
+    strict = projects_registry.load(slug).egress == "strict"
+    return "`recreate` to apply" if strict else "open egress — `lock` the project to enforce"
+
+
+def add_allow(slug: str, host: str) -> Result:
+    """Add a domain to a project's egress allowlist extras (the ``g`` Egress screen / allowlist tuning).
+
+    Registry-only + flocked, like ``add_port`` — fast, so the TUI calls it inline; the recreate that
+    re-renders squid.conf is a separate explicit step (the Result reminds). Validates the host with
+    ``allowlist.is_valid_dstdomain`` so an over-broad/malformed entry (``.``/a bare TLD/a value with a
+    scheme/port/path) is REJECTED with feedback here rather than silently dropped at render. Idempotent:
+    a host already present is a no-op ok. Base-allowlist domains (always permitted) need no extra."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    host = host.strip()
+    if not allowlist_mod.is_valid_dstdomain(host):
+        return Result(False, f"invalid allowlist entry {host!r}: a bare or dotted hostname "
+                             "(no scheme, port, or path; not a bare TLD or '.')")
+    project = projects_registry.load(slug)
+    if host in project.allowlist:
+        return Result(True, f"{host} already in {slug} allowlist (nothing to do)")
+    try:
+        with _slug_lock(slug):
+            projects_registry.set_allowlist(slug, project.allowlist + (host,))
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    return Result(True, f"added {host} to {slug} allowlist — {_allowlist_apply_hint(slug)}")
+
+
+def remove_allow(slug: str, host: str) -> Result:
+    """Remove a domain from a project's egress allowlist extras (idempotent). Registry-only + flocked,
+    like ``remove_port``; the Result reminds that a recreate re-renders squid.conf. A host that isn't an
+    extra (e.g. a base-allowlist domain, which can't be removed) is a no-op ok."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    host = host.strip()
+    project = projects_registry.load(slug)
+    if host not in project.allowlist:
+        return Result(True, f"{host} not in {slug} allowlist extras (nothing to do)")
+    kept = tuple(h for h in project.allowlist if h != host)
+    try:
+        with _slug_lock(slug):
+            projects_registry.set_allowlist(slug, kept)
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    return Result(True, f"removed {host} from {slug} allowlist — {_allowlist_apply_hint(slug)}")
 
 
 def create_project(

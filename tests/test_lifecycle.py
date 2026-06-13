@@ -566,6 +566,67 @@ class LifecyclePortsTest(unittest.TestCase):
         self.assertEqual(preg.load("svc").ports, ())
 
 
+class LifecycleAllowlistTest(unittest.TestCase):
+    """add_allow/remove_allow: registry-only (no recreate inline), validated, idempotent, with a
+    mode-aware recreate/lock reminder — the seam the TUI Egress screen calls inline."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = str(Path(self.tmp.name) / "config")
+        os.environ["CLAUDE_MAN_STATE_HOME"] = str(Path(self.tmp.name) / "state")
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None))
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_STATE_HOME", None))
+        from claudeman.registry import projects as preg
+        preg.save(Project(slug="openp", egress="open"))
+        preg.save(Project(slug="lockp", egress="strict"))
+
+    @staticmethod
+    def _load(slug: str):
+        from claudeman.registry import projects as preg
+        return preg.load(slug)
+
+    def test_add_rejects_invalid_host(self) -> None:
+        for bad in ("http://x.test/y", "x.test:443", ".", "com", "no spaces here"):
+            res = lifecycle.add_allow("lockp", bad)
+            self.assertFalse(res.ok, bad)
+            self.assertIn("invalid", res.detail.lower())
+        self.assertEqual(self._load("lockp").allowlist, ())  # nothing written on reject
+
+    def test_add_open_persists_and_reminds_to_lock(self) -> None:
+        res = lifecycle.add_allow("openp", "a.example.com")
+        self.assertTrue(res.ok)
+        self.assertIn("lock", res.detail.lower())  # open egress -> applies when locked
+        self.assertEqual(self._load("openp").allowlist, ("a.example.com",))
+
+    def test_add_strict_reminds_to_recreate(self) -> None:
+        res = lifecycle.add_allow("lockp", "a.example.com")
+        self.assertTrue(res.ok)
+        self.assertIn("recreate", res.detail.lower())  # locked -> recreate re-renders squid.conf
+        self.assertEqual(self._load("lockp").allowlist, ("a.example.com",))
+
+    def test_add_is_idempotent_noop(self) -> None:
+        lifecycle.add_allow("openp", "a.example.com")
+        res = lifecycle.add_allow("openp", "a.example.com")
+        self.assertTrue(res.ok)
+        self.assertIn("already", res.detail)
+        self.assertEqual(self._load("openp").allowlist, ("a.example.com",))  # not duplicated
+
+    def test_remove_and_idempotent(self) -> None:
+        lifecycle.add_allow("openp", "a.example.com")
+        res = lifecycle.remove_allow("openp", "a.example.com")
+        self.assertTrue(res.ok)
+        self.assertIn("removed", res.detail)
+        again = lifecycle.remove_allow("openp", "a.example.com")
+        self.assertTrue(again.ok)
+        self.assertIn("nothing to do", again.detail)
+        self.assertEqual(self._load("openp").allowlist, ())
+
+    def test_unknown_project(self) -> None:
+        self.assertFalse(lifecycle.add_allow("nope", "a.example.com").ok)
+        self.assertFalse(lifecycle.remove_allow("nope", "a.example.com").ok)
+
+
 class SetPacksTest(unittest.TestCase):
     """``set_packs`` REPLACES the whole selection — the seam behind the CLI verbs and the TUI
     toggle/defaults. Replace-not-merge is load-bearing and destructive: re-applying defaults

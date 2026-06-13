@@ -89,7 +89,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
 
 **`global` row** — acts app-wide:
@@ -297,15 +297,29 @@ outlived the library).
   (`claudemanctl project recreate <slug> --profile <other>` for an account switch; it's
   mismatch-guarded).
 
+**Egress (`p` → `g` Egress…)** — the screen where you *change* the network policy the Network panel
+reflects. It shows the mode (OPEN / STRICT) and the project's allowlist extras on top of the always-on
+base set, with three things to do:
+
+- **`l` Lock / Unlock** — flip strict egress on or off. This recreates the container (the firewall is a
+  squid sidecar fixed at create), so it streams build/recreate progress to the log like a recreate, and
+  unlock tears the sidecar + network down.
+- **`a` Add / `x` Remove** an allowlist domain — a bare host (`api.example.com`) or a leading-dot
+  wildcard (`.example.com`). These are instant; a malformed or over-broad value (`.`, a bare TLD, a
+  scheme/port/path) is rejected with feedback. They take effect on the next recreate (or when you lock).
+- **`b` Promote blocked** — pick a destination the sidecar actually *denied* (read from its access log)
+  straight into the allowlist. The common loop: see a Blocked count in the Network panel → open Egress…
+  → `b` → add the legitimate host → `l`/recreate to apply.
+
+For the raw per-destination blocked list there's still the CLI `project egress-log <slug>`.
+
 Not in the TUI yet, honestly stubbed: the `y` sync-back review gate (Phase 5 — distinct from
 the automatic asset sync above) and live container logs in `v` → `l` (the pane it focuses is
-the TUI's own event log). Strict egress is toggled from the CLI (`project lock|unlock`) or
-chosen at create; the TUI surfaces the Egress column and the always-on **Network panel** (above).
-Its Traffic figures are whole-container `docker stats` NetIO since the container started; the
-Blocked/Allowed counts come from the squid access log and apply to locked projects only. Note the
-counts reflect **completed** connections — squid logs a CONNECT (HTTPS) tunnel only when it closes,
-so an in-flight transfer isn't counted until it ends. For the per-destination detail behind a count,
-use the CLI `project egress-log <slug>`.
+the TUI's own event log). Beyond the Egress screen, the TUI surfaces the Egress column and the
+always-on **Network panel** (above): its Traffic figures are whole-container `docker stats` NetIO since
+the container started; the Blocked/Allowed counts come from the squid access log and apply to locked
+projects only. Note the counts reflect **completed** connections — squid logs a CONNECT (HTTPS) tunnel
+only when it closes, so an in-flight transfer isn't counted until it ends.
 
 ## Quick reference — what stays CLI-only
 

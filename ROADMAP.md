@@ -222,6 +222,7 @@ base allowlist; verify offline in `image smoke <overlay>`._
 - [x] `network/allowlist.py` base set (incl. `claude.ai` for OAuth refresh + GitHub + npm + PyPI + yarn + Debian apt) + project extras
 - [x] `network/squid.py` (pure squid.conf renderer) + `network/egress.py` orchestration: per-project `--internal` agent net + a `claude-man:proxy` squid sidecar (also on the bridge for egress); agent gets `HTTP(S)_PROXY` → the sidecar (additive flags in `runner._render_egress`; hardened floor byte-identical)
 - [x] `project lock`/`unlock` verbs (`lifecycle.set_egress`, recreate-to-apply); `project egress-log` surfaces denied requests for allowlist tuning, and the TUI's always-on **Network panel** shows per-project blocked/allowed counts + Traffic (via the pure `egress.parse_access`/`summarize_access` parsers over the sidecar's access log)
+- [x] TUI **Egress screen** (Project… → `g`): lock/unlock toggle (off-thread `set_egress`) + allowlist extras add/remove (`lifecycle.add_allow`/`remove_allow`, `is_valid_dstdomain`-validated, registry-only) + promote-a-blocked-host picker over `summarize_access` — the allowlist-tuning loop without hand-editing TOML
 - [x] Smoke: `image smoke proxy` builds the sidecar; `project egress-smoke <slug>` checks an allowlisted host reaches + a non-allowlisted host is blocked (daemon-gated, like `image smoke`)
 
 _Implementation notes (2026-06-10): orchestrated with explicit `docker network`/`docker run` argv

@@ -450,13 +450,23 @@ destinations from the squid access log (locked projects only — open ones have 
 `S` stop-all · `v` View… · `,` settings (ssh keys + git identity; `g` there opens the git-identity
 edit modal) · `q` quit. Lower-frequency verbs live behind the g/p/v submenus
 (`tui/screens/menu.py`): Repos… = add/remove-repo · refresh-git (fetch-ful) · pull-all;
-Project… = env-mounts · ports · packs · recreate · delete; View… = refresh-usage ·
+Project… = env-mounts · ports · packs · egress · recreate · delete; View… = refresh-usage ·
 focus-logs. Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
 Project… → `e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` + `add_mount.py`): a modal listing the
 project's ssh/file mounts with in-screen add (validated against the dest-denylist) / remove / resync —
 the fast registry mutations run inline, `resync` (docker exec) on a thread worker.
+
+Project… → `g` opens the **Egress screen** (`tui/screens/egress.py` + `add_allow.py`): the single place
+to *change* the network policy the always-on Network panel reflects. It shows the mode (OPEN/STRICT) and
+the project's allowlist extras on top of the base set, with: **lock/unlock** (the heavy part — it
+recreates, so the screen dismisses the target mode `'strict'`/`'open'` and the app runs `lifecycle.set_egress`
+off-thread, mirroring the recreate worker); **allowlist add/remove** (fast flocked registry writes via
+`lifecycle.add_allow`/`remove_allow`, validated with `is_valid_dstdomain`, run inline — each reminds that a
+recreate re-renders squid.conf); and **promote-blocked** (a picker over `egress.summarize_access` of the
+sidecar's access log — pick a destination the proxy actually denied straight into the allowlist, the common
+tuning loop). The per-destination CLI readout stays at `project egress-log`.
 
 - **Logs:** a `RichLog` fed by a worker running `docker logs -f --tail 200 --timestamps`; the
   follower is reaped on container switch and app shutdown.

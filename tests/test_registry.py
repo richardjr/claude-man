@@ -128,6 +128,29 @@ class RegistryTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             projects.set_packs("packed", ("Bad Name",))
 
+    def test_set_allowlist_patches_clears_and_keeps_comments(self) -> None:
+        commented = (
+            '[project]\n'
+            'slug = "cmt"\n\n'
+            '[project.egress]\n'
+            '# locked-down egress policy\n'
+            'mode = "strict"\n'
+            'allowlist = ["old.test"]\n'
+        )
+        (Path(self.tmp.name) / "projects" / "cmt.toml").write_text(commented)
+        p = projects.set_allowlist("cmt", ("new.test", ".cdn.test"))
+        self.assertEqual(p.allowlist, ("new.test", ".cdn.test"))
+        self.assertEqual(projects.load("cmt").allowlist, ("new.test", ".cdn.test"))
+        text = (Path(self.tmp.name) / "projects" / "cmt.toml").read_text()
+        self.assertIn('mode = "strict"', text)               # sibling key untouched
+        self.assertIn("# locked-down egress policy", text)   # in-place patch, not a save() rebuild
+        # An empty selection drops the key entirely (mode + comment survive).
+        projects.set_allowlist("cmt", ())
+        cleared = (Path(self.tmp.name) / "projects" / "cmt.toml").read_text()
+        self.assertNotIn("allowlist", cleared)
+        self.assertIn('mode = "strict"', cleared)
+        self.assertEqual(projects.load("cmt").allowlist, ())
+
     def test_ports_roundtrip_and_terse_defaults(self) -> None:
         from claudeman.registry.schema import PortMapping
         projects.save(Project(slug="svc", ports=(

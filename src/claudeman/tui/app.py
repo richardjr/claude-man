@@ -31,6 +31,7 @@ from . import terminals
 from .screens.add_repo import AddRepoScreen
 from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
+from .screens.egress import EgressScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.menu import MenuScreen
 from .screens.packs import PacksScreen
@@ -85,7 +86,7 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Packs, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
+    # Ports, Packs, Egress, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
     # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
@@ -123,6 +124,7 @@ class ClaudeManApp(App):
         ("e", "Env mounts", "env_mounts"),
         ("o", "Ports", "ports"),
         ("p", "Packs…", "packs"),
+        ("g", "Egress…", "egress"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -911,6 +913,7 @@ class ClaudeManApp(App):
             "env_mounts": self.action_env_mounts,
             "ports": self.action_ports,
             "packs": self.action_packs,
+            "egress": self.action_egress,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1174,6 +1177,38 @@ class ClaudeManApp(App):
             return
         self._log(f"managing curated packs for {slug} (toggles apply immediately — no recreate)")
         self.push_screen(PacksScreen(slug))
+
+    # -- egress (strict firewall + allowlist) -----------------------------
+    def action_egress(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]egress: select a defined project (orphan rows aren't managed)[/]")
+            return
+        # Allowlist add/remove apply inline (fast registry writes); lock/unlock/apply recreate, so the
+        # screen dismisses the TARGET mode and the worker below runs the heavy recreate off-thread.
+        self._log(f"managing egress for {slug} (allowlist edits inline; lock/unlock recreate to apply)")
+        self.push_screen(EgressScreen(slug), lambda mode: self._on_egress(slug, mode))
+
+    def _on_egress(self, slug: str, mode) -> None:
+        if mode is None:  # closed after inline allowlist edits only — nothing to recreate
+            self.refresh_projects()
+            return
+        if not self._reserve(slug, "egress"):
+            return
+        verb = "locking" if mode == "strict" else "unlocking"
+        self._log(f"{verb} {slug} (recreating to apply egress) …")
+        self._egress_worker(slug, mode)
+
+    @work(thread=True, group="create")
+    def _egress_worker(self, slug: str, mode: str) -> None:
+        """Apply an egress mode change off the UI thread (set_egress recreates + re-renders squid.conf;
+        unlock also tears the sidecar/net down). Streams build progress to the log, like the recreate
+        worker."""
+        try:
+            res = lifecycle.set_egress(slug, mode, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
 
     def action_sync_review(self) -> None:
         self._log("(phase 5) sync-back review gate — see screens/sync_review.py")

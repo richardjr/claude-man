@@ -493,6 +493,38 @@ def set_packs(slug: str, names: tuple[str, ...]) -> Project:
     return updated
 
 
+def set_allowlist(slug: str, hosts: tuple[str, ...]) -> Project:
+    """Replace the project's egress allowlist extras (comment-preserving scalar patch, atomic write).
+
+    Pure registry edit — re-rendering squid.conf + recreating to apply it is the caller's job
+    (``lifecycle.add_allow``/``remove_allow``). Entries are stored verbatim; the lifecycle layer
+    validates each host on input (``network.allowlist.is_valid_dstdomain``) and over-broad/malformed
+    values are dropped fail-closed at render time (``build_allowlist``), so a bad host can never widen
+    egress. Patches only the ``allowlist`` key inside ``[project.egress]`` (creating the table if a
+    bare project somehow lacks it), leaving ``mode`` + operator comments intact; an empty list drops
+    the key entirely."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, allowlist=tuple(hosts))
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    egress = proj.get("egress")
+    if egress is None:
+        egress = tomlkit.table()
+        proj["egress"] = egress
+    if updated.allowlist:
+        egress["allowlist"] = list(updated.allowlist)
+    elif "allowlist" in egress:
+        del egress["allowlist"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
 def delete_definition(slug: str) -> bool:
     path = config.project_toml_path(slug)
     if path.exists():
