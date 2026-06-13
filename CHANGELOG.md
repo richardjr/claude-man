@@ -6,6 +6,16 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Lockable strict egress** (Phase 4, invariant 3): per-project squid allowlist sidecar
+  (`claude-man:proxy`) on a no-route `--internal` network — the agent's only path out is the
+  CONNECT-tunnel allowlist proxy (no MITM); the hardened agent floor is byte-identical (the
+  strict flags are additive). `up` is fail-closed. CLI: `project lock|unlock`, `project
+  egress-log` (denied destinations, for allowlist tuning), `project egress-smoke` (daemon-gated
+  allow/deny verification), `project create --egress`, `image build proxy`. TUI: Project… →
+  Egress… (`g`) for lock/unlock + inline allowlist add/remove + promote a blocked host, and an
+  always-on Network panel (per-project Blocked/Allowed distinct-destination counts from the squid
+  access log on locked projects + whole-container Traffic from `docker stats` NetIO on every
+  project).
 - **Curated packs** (Phase 6a+6b, [`docs/PACKS.md`](docs/PACKS.md)): an in-repo library of
   task-focused CLAUDE.md fragments + skills (`library/packs/<tier>/<pack>/`) that projects
   select as packs, materialized into the per-project asset source and carried into the
@@ -17,7 +27,7 @@ may land in minor versions until 1.0).
   the Overlay choice). Lone-repo projects now launch at `/workspace` (set `workdir` to
   restore the old landing spot).
 - **TUI boot splash**: a terracotta block-letter logo with a reveal + highlight sweep that
-  scrolls up to reveal the live projects table (~1s, any key skips). Disable with
+  scrolls up to reveal the live projects table (~2s, any key skips). Disable with
   `config splash off`. Frame generation is pure and unit-tested (`tui/splash.py`).
 - **Open-source release hygiene**: MIT `LICENSE`, root `SECURITY.md` (private disclosure policy),
   `CONTRIBUTING.md`, CI (unit tests + ruff on Linux/macOS × Python 3.11/3.12; gitleaks history
@@ -42,9 +52,14 @@ may land in minor versions until 1.0).
   the container for a live `claude` process and refuses to start a second (fails open on probe
   errors so a wedged daemon can't lock the operator out).
 
+### Changed
+- **`project recreate` now offers the on-start claude update** (same prompt as `project up`): it
+  checks the configured channel and, on a TTY, prompts before rebuilding the image to a newer
+  claude. `--update-yes` skips the prompt; `--no-update` skips the check.
+
 ## [0.1.0] — unreleased baseline
 
 Phases 0–3 of [`ROADMAP.md`](ROADMAP.md): profiles (multi-account OAuth tokens), hardened
 per-project containers, repos/env-mounts/ports lifecycle, asset sync, usage + subscription-limit
-bars, on-start claude update checks, baked git/gh/neovim. Phase 4 (strict egress) and Phase 5
-(review-gated sync-back) are honest stubs.
+bars, on-start claude update checks, baked git/gh/neovim. Phase 5 (review-gated sync-back) is an
+honest stub; Phase 4 (strict egress) was a stub at this baseline and is delivered in [Unreleased].

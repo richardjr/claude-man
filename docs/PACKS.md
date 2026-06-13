@@ -46,9 +46,6 @@ library/packs/
       pack.toml                    # default = false
       claude-md/commit-style.md    # short factual subjects, no trailers/emoji
       claude-md/notes-sync.md
-    review-skills/
-      pack.toml
-      skills/<name>/SKILL.md …     # ported from the skills the operator already uses
   node/                            # language tiers — discovered, not a hardcoded list
     node-conventions/
       pack.toml                    # default = true (within the node tier)
@@ -149,7 +146,7 @@ repos. Operators who prefer landing in the repo set `workdir = "<dir>"` once.
 - **CLI**: `claudemanctl packs list [--tier common|node|…]` to browse the library;
   `project packs add|rm|list|defaults <slug>`.
 - Start detail reports it:
-  `packs: 2 skills, 4 claude-md (1 refreshed, 1 drift overwritten+backed up)`.
+  `packs: 2 refreshed, 1 removed; <path>: drifted from the curated copy — overwritten (backed up)`.
 
 ## Phasing
 

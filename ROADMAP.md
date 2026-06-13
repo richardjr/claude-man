@@ -19,8 +19,8 @@ token-usage in the CLI + TUI), and **Phase 3 (repos — CLI + TUI)** — `projec
 `sync-repos`, and live per-repo git state (branch, clean/dirty, ahead/behind, branch-vs-config drift)
 via the new `checkout/gitstate.py` porcelain-v2 parser; add clones live into the running container
 (no recreate), with dir-containment, credential-masking, a per-slug `flock`, and the BUG-5/BUG-6 fixes.
-The **TUI** surfaces it as a live Repos column + a per-project repo-detail panel (8 s fetch-less gitstate
-worker, `g` for a fetch-ful rescan) plus `a` Add-repo / `R` Remove-repo modal screens. A
+The **TUI** surfaces it as a live Repos column + a per-project repo-detail panel (30 s fetch-less gitstate
+worker, `g` for a fetch-ful rescan) plus the Repos submenu (`g`) with `a` Add-repo / `x` Remove-repo modal screens. A
 **workspace-ownership pre-flight** (`_ensure_workspace_owned`) stops Docker auto-creating `workspace/`
 as root. **Env-mounts (CLI, ssh + files)** — `project env add ssh|file`/`rm`/`list` + `project resync`:
 read-only file binds at arbitrary container paths + ssh **agent-forwarding** (keys stay on the host) +
@@ -56,7 +56,7 @@ neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeSc
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
-Commits from fugitive/gitsigns carry the injected git identity. 533 dependency-free
+Commits from fugitive/gitsigns carry the injected git identity. 553 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git + nvim probes).
 
@@ -159,8 +159,10 @@ SEC-2, IMG-2/5, IMG-3.)
   `GH_CONFIG_DIR=/home/agent/.cache/gh` (baked in `runner._BAKED_ENV` + the Dockerfile) redirect
   git/gh config onto the writable `.cache` tmpfs. The base image installs pinned `gh 2.93.0`
   (`config.DEFAULT_GH_VERSION` + `ARG GH_VERSION`, arch-aware upstream `.deb` — `gh` isn't in Debian
-  repos); `gh auth` is the operator's job (no token injected — `gh auth login` in-container, or supply
-  `GH_TOKEN` via an env-mount). Settings: `Settings.git_user_name/git_user_email` + `[git]` in
+  repos); by default no `GH_TOKEN` is injected (`gh auth login` in-container writes the writable
+  `GH_CONFIG_DIR`), with an opt-in managed token via `config gh-token` (0600 state-tier, injected
+  pass-through as `-e GH_TOKEN` when set — `gh_token.py`; never in `config.toml`, invariant 1).
+  Settings: `Settings.git_user_name/git_user_email` + `[git]` in
   `config.toml`; TUI Settings screen (`,`) shows the resolved identity, `g` opens a `GitIdentityScreen`
   edit modal (blank = inherit host); CLI `config git [--name … --email … | --clear]` (`config show`
   also prints the resolved identity). `image smoke` adds `gh` present + writable git/gh-config probes.
@@ -205,7 +207,7 @@ _Review notes: **BUG-2** read labels via `docker inspect --format '{{json .Confi
 on label divergence (invariant 4); **BUG-6** concise `fetch_all` detail instead of raw git fatal;
 **TUI-6** gate actions on orphan rows (container with no registry entry)._
 
-- [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (8 s fetch-less gitstate worker, `g` fetch-ful) + `a`/`R` Add/Remove-repo modal screens.
+- [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (30 s fetch-less gitstate worker, `g` fetch-ful) + Repos-menu (`g`) `a`/`x` Add/Remove-repo modal screens.
 - [x] Idempotent `project delete` (`rm -f` container + `rm -rf` state dir + `rm` toml, registry removed LAST so a partial failure stays retry-able); start/stop/recreate verbs in TUI + ctl. **Sync-gated:** `lifecycle.delete_plan` scans each repo (fetch-less) via `gitstate.delete_risk` and the TUI `DeleteProjectScreen` / CLI surface the per-repo unsynced-work assessment before the irreversible delete — risky repos require an explicit "Delete anyway" (TUI) / `--force` (ctl), and `--keep-workspace` / the "keep workspace" toggle preserves the `/workspace` checkout as a non-destructive exit.
 - [ ] Version-bump-by-recreate flow + running-version status column; `backups/` convention
 - [ ] DEFINED/STOPPED/UP JOIN hardened; **BUG-2** second `docker inspect` per-label read for robust multi-label parsing (still latent — values are comma-free today)
@@ -221,7 +223,7 @@ base allowlist; verify offline in `image smoke <overlay>`._
 
 - [x] `network/allowlist.py` base set (incl. `claude.ai` for OAuth refresh + GitHub + npm + PyPI + yarn + Debian apt) + project extras
 - [x] `network/squid.py` (pure squid.conf renderer) + `network/egress.py` orchestration: per-project `--internal` agent net + a `claude-man:proxy` squid sidecar (also on the bridge for egress); agent gets `HTTP(S)_PROXY` → the sidecar (additive flags in `runner._render_egress`; hardened floor byte-identical)
-- [x] `project lock`/`unlock` verbs (`lifecycle.set_egress`, recreate-to-apply); `project egress-log` surfaces denied requests for allowlist tuning, and the TUI's always-on **Network panel** shows per-project blocked/allowed counts + Traffic (via the pure `egress.parse_access`/`summarize_access` parsers over the sidecar's access log)
+- [x] `project lock`/`unlock` verbs (`lifecycle.set_egress`, recreate-to-apply); `project egress-log` surfaces denied requests for allowlist tuning, and the TUI's always-on **Network panel** shows per-project blocked/allowed counts (via the pure `egress.parse_access`/`summarize_access` parsers over the sidecar's access log) + Traffic (whole-container NetIO from `docker/stats.py`'s `container_net_io`, i.e. `docker stats`)
 - [x] TUI **Egress screen** (Project… → `g`): lock/unlock toggle (off-thread `set_egress`) + allowlist extras add/remove (`lifecycle.add_allow`/`remove_allow`, `is_valid_dstdomain`-validated, registry-only) + promote-a-blocked-host picker over `summarize_access` — the allowlist-tuning loop without hand-editing TOML
 - [x] Smoke: `image smoke proxy` builds the sidecar; `project egress-smoke <slug>` checks an allowlisted host reaches + a non-allowlisted host is blocked (daemon-gated, like `image smoke`)
 

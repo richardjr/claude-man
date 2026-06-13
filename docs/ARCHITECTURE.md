@@ -175,8 +175,10 @@ rootfs; claude-man owns version bumps).
 **Overlays** (`images/overlays/<name>.Dockerfile`, `FROM` the base) add toolchains: `python` (uv),
 `rust` (rustup), `node` (extra node). Project-specific lightweight packages come from
 `project.toml`'s `extra_apt = [...]`, baked into a thin per-project layer at create time. Project
-**env vars are injected at run time** (`-e KEY=VAL` or `--env-file`), never baked, so secrets never
-enter an image layer.
+**env vars are injected at run time** (declared `project.env` as `-e KEY=VAL`; any `env_file` is
+parsed and `ANTHROPIC_*`-scrubbed host-side, then injected pass-through as `-e KEY` name-only with
+the value supplied via the subprocess env — docker is never given `--env-file`, which would bypass
+the scrub, per review SEC-2 / invariant 1), never baked, so secrets never enter an image layer.
 
 Every image is gated by `claudemanctl image smoke`: `claude doctor` + a one-shot `claude -p` inside
 the **fully hardened profile**, watching for `EROFS`/`getpwuid`/ripgrep failures before the image is
@@ -262,11 +264,17 @@ the per-project and per-profile TOMLs, holding cross-cutting operator preference
 project-scoped. It is **secret-free** (ssh key *paths* and a git name/email only), so like the other
 definitions it round-trips through git. `registry/settings.py` reads it with stdlib `tomllib` and writes
 it comment-preserving with `tomlkit`; a missing file is not an error (it resolves to a default
-`Settings()`). Today it carries `[ssh] keys`/`auto_load` (host keys to forward) and `[git]
-user_name`/`user_email` (the identity override above; `set_git_identity` clears it with empty strings).
-The TUI opens a Settings screen with `,` (showing the resolved git identity, edited via a `GitIdentityScreen`
-where a blank field means *inherit host*); the CLI surface is `claudemanctl config git [--name … --email … |
---clear]` and `config show` (which now also prints the resolved git identity).
+`Settings()`). It currently carries `[ssh] keys`/`auto_load` (host keys to forward), `[git]
+user_name`/`user_email` (the identity override above; `set_git_identity` clears it with empty strings),
+`[image] image_update_check`/`claude_channel`/`claude_version_pin` (the on-start "newer claude?" check
++ the tracked release channel/pin), `[terminal] terminal_program`/`terminal_command` (the emulator that
+opens detached shell/claude/nvim windows), `[opener] opener_command` (the file-manager command for
+Browse), and `[ui] ui_splash` (the boot splash toggle). All stay non-secret — note the GitHub token
+surfaced via `config gh-token` is deliberately **not** a `config.toml` section: it lives `0600` in the
+state tier (never synced; invariant 1). The TUI opens a Settings screen with `,` (managing ssh keys plus
+`g` git identity, `t` GH token, and `e` terminal launcher; the git identity is edited via a
+`GitIdentityScreen` where a blank field means *inherit host*); the CLI surface is `claudemanctl config
+show` plus the `config git`, `gh-token`, `terminal`, `opener`, `splash`, `image`, and `ssh` verbs.
 
 ## Environment mounts (ssh + files)
 
@@ -374,10 +382,14 @@ byte-identical (invariant 2).
   same access log) alongside Traffic. The counts reflect completed connections — a CONNECT tunnel is
   logged only at close, so in-flight HTTPS isn't counted until it ends.
 - **Allowlist** (`network/allowlist.py`, rendered to squid.conf by the pure `network/squid.py`):
-  `api.anthropic.com`, `.anthropic.com`, **`claude.ai`** (OAuth refresh — critical),
-  `statsig.anthropic.com`, `sentry.io`, the registries (`registry.npmjs.org`, PyPI,
-  `registry.yarnpkg.com`), Debian apt mirrors, GitHub (`.github.com`, `codeload.github.com`,
-  `.githubusercontent.com`) + the project's `egress.allowlist[]` extras.
+  `.anthropic.com` (the wildcard covers `api.anthropic.com` / `statsig.anthropic.com`),
+  **`claude.ai`** (OAuth refresh — critical), `downloads.claude.ai`, `sentry.io`, the registries
+  (`registry.npmjs.org`, PyPI `pypi.org` / `files.pythonhosted.org`, yarn `registry.yarnpkg.com` /
+  `repo.yarnpkg.com`), Debian apt mirrors (`deb.debian.org`, `security.debian.org`), GitHub
+  (`.github.com`, `.githubusercontent.com` — the wildcards cover `codeload.github.com` /
+  `raw.githubusercontent.com`) + the project's `egress.allowlist[]` extras. Bare hosts already
+  covered by a leading-dot wildcard are NOT listed separately (squid rejects such an overlap inside
+  one `dstdomain` ACL — `build_allowlist` drops them).
 - **Orchestration** lives in `network/egress.py` (explicit `docker network`/`docker run` argv — no
   compose, so the agent stays on the single unit-tested `build_create_argv` renderer). The sidecar is
   trusted infra (our fixed image + rendered config, no agent code, sees only CONNECT hostnames) so it
@@ -395,7 +407,13 @@ design; a `dnsmasq` forwarder for direct-DNS support and an in-container `iptabl
 defence-in-depth layer (its `NET_ADMIN` phase would run as a separate pre-start init) remain future
 work.
 
-## Sync-back (review-gated three-way merge)
+## Sync-back (review-gated three-way merge — Phase 5, NOT yet implemented / design only)
+
+> **Status:** design only — Phase 5 is not yet implemented. The `syncback/` engine modules
+> (`baseline.py`/`detect.py`/`diff.py`/`merge.py`) raise `NotImplementedError("phase 5: …")`,
+> there is no `SyncReviewScreen` (`tui/screens/sync_review.py` is a stub; `app.py`'s
+> `action_sync_review` only logs a phase-5 notice), and the `sync review` / `sync plan` CLI
+> verbs are `_todo(5, …)` stubs. The steps below describe the intended flow. See ROADMAP Phase 5.
 
 Engine: a stdlib **three-way manifest reconcile** with the **denylist enforced before any read**.
 Git is the audit layer only (accepted changes are committed to a `sync-audit/` repo for free
@@ -431,18 +449,22 @@ host-absolute paths, and the live `.claude.json` wholesale.
 ## TUI
 
 Textual app (`tui/app.py`). The **projects screen** is a `DataTable`
-(Project · Status · Profile · Egress · Repos · Version) populated by an async worker running
+(Project · Status · Profile · Egress · Repos · Version · Detail) populated by an async worker running
 `docker ps -a --filter label=claude-man.slug --format '{{json .}}'`, JOINed with the registry so
-DEFINED projects with no container still show. A `set_interval` refresh upgrades to an event-driven
-worker tailing `docker events`. The **Repos column** is the live git-state summary (`3 ✓`, `2 ✓ client:~↑1`,
-`1 uncloned`) from a separate **8 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
+DEFINED projects with no container still show. A 10 s `set_interval` poll drives the refresh (a
+`docker events` event-driven worker is deferred to Phase 2). The **Repos column** is the live git-state summary (`3 ✓`, `2 ✓ client:~↑1`,
+`1 uncloned`) from a separate **30 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
 thread, cached between scans — host-FS state, distinct from the never-cached container liveness); a
 **repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·
 Last commit), repainted on cursor-move from the same cache. A per-project **Network panel**
 (Project · Egress · Blocked · Allowed · Traffic) is repainted on the projects-poll cycle by
 `refresh_net`: Traffic is the whole-container `docker stats` NetIO (since container start — shown for
 every running project, open or locked), while Blocked/Allowed are the distinct denied/permitted
-destinations from the squid access log (locked projects only — open ones have no sidecar). The bottom
+destinations from the squid access log (locked projects only — open ones have no sidecar). The Traffic
+figure carries a load-bearing semantic (`docker/stats.py`): for an **open** project it is real internet
+RX/TX, but for a **locked** project the agent sits on the `--internal` net only, so its NetIO is the
+agent↔sidecar (proxied) traffic — NOT a per-destination egress total (per-destination detail comes only
+from the squid access log / `project egress-log`). It resets to zero on each recreate. The bottom
 **key bar** is a two-row
 `Static` (replacing the stock Footer) so the scope of every key is explicit — row 1 `project`
 (acts on the cursor's row): `enter` shell · `c` claude · `e` editor (nvim) · `b` browse ·
@@ -471,9 +493,16 @@ tuning loop). The per-destination CLI readout stays at `project egress-log`.
 - **Logs:** a `RichLog` fed by a worker running `docker logs -f --tail 200 --timestamps`; the
   follower is reaped on container switch and app shutdown.
 - **Terminal spawn** (`tui/terminals.py`): a **separate OS window** (not `suspend()`), launched
-  detached via `Popen(..., start_new_session=True)`. `ghostty` preferred, `alacritty` fallback, with
-  `--class=claude-man-<slug>` so a Hyprland `windowrulev2` can place it:
-  `ghostty --class=claude-man-<slug> -e docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude|nvim}`.
+  detached via `Popen(..., start_new_session=True)`. The emulator is chosen from a **settings-driven
+  per-platform launcher table**: on Linux 8 built-ins (`ghostty`, `alacritty`, `kitty`, `wezterm`,
+  `foot`, `gnome-terminal`, `konsole`, `xterm`), on macOS `kitty`/`alacritty`/`wezterm` plus iTerm2
+  and the always-present Terminal.app (via `osascript`), and on WSL2 the Linux table plus `wt.exe`.
+  The `[terminal] program`/`command` settings (`config terminal`) pick a named launcher or a
+  `program = "custom"` `{argv}` template; absent a setting, auto-detection walks the table in
+  preference order (`ghostty` then `alacritty` first on Linux — the historical default). On
+  Linux/Wayland the launcher's `--class`/`--app-id` carries `claude-man-<slug>` so a compositor rule
+  (e.g. a Hyprland `windowrulev2`) can place the window. The inner command is
+  `docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude|nvim}`.
   `claude`/shell/nvim open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
   `[project] workdir`, else **`/workspace`** (the uniform anchor since Phase 6 — the lone-repo auto-cd
   was dropped so the pack-injected workspace `CLAUDE.md` is what you land on).

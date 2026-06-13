@@ -306,10 +306,14 @@ base set, with three things to do:
   unlock tears the sidecar + network down.
 - **`a` Add / `x` Remove** an allowlist domain — a bare host (`api.example.com`) or a leading-dot
   wildcard (`.example.com`). These are instant; a malformed or over-broad value (`.`, a bare TLD, a
-  scheme/port/path) is rejected with feedback. They take effect on the next recreate (or when you lock).
+  scheme/port/path) is rejected with feedback. They take effect on the next recreate — `r` Apply here
+  re-renders a *locked* project's allowlist (or `l` to lock an open one).
 - **`b` Promote blocked** — pick a destination the sidecar actually *denied* (read from its access log)
   straight into the allowlist. The common loop: see a Blocked count in the Network panel → open Egress…
   → `b` → add the legitimate host → `l`/recreate to apply.
+- **`r` Apply (recreate)** — re-create a *locked* project so the squid sidecar re-renders `squid.conf`
+  and your inline `a`/`x` allowlist edits take effect. Like `l`, it streams recreate progress to the
+  log. On an *open* project it's a no-op with a hint — press `l` to lock first.
 
 For the raw per-destination blocked list there's still the CLI `project egress-log <slug>`.
 

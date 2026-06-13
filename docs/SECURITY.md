@@ -22,7 +22,7 @@ What crosses each way, and what must never cross:
 
 | Direction | Allowed | Forbidden |
 |---|---|---|
-| host → container | the **one** profile's OAuth token (env), the non-secret git author identity (name/email), project env vars, the checked-out repos | `.credentials.json`, the `gh` PAT/`GH_TOKEN`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
+| host → container | the **one** profile's OAuth token (env), an opt-in `GH_TOKEN` when the operator configures one (`config gh-token`, injected pass-through), the non-secret git author identity (name/email), project env vars, the checked-out repos | `.credentials.json`, the host `gh` PAT / `~/.config/gh`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
 | container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (auth is env-injected — no token file exists in the bind to refresh back), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
 
 ## Controls
@@ -67,11 +67,18 @@ What crosses each way, and what must never cross:
   (`gitconfig.resolve_identity`); a blank/unset identity emits nothing. `GIT_CONFIG_GLOBAL` and
   `GH_CONFIG_DIR` are baked to point at the writable `.cache` tmpfs so any further `git config
   --global` / `gh` writes land somewhere writable instead of hitting `EROFS`.
-- **`gh` ships as a binary, with no token injected** — invariant 1 is preserved. The base image bakes
-  a pinned GitHub CLI (`config.DEFAULT_GH_VERSION`), but claude-man never injects a `gh` credential:
-  authenticating is the **operator's job**, done in-container via `gh auth login` (writing the
-  agent-writable `GH_CONFIG_DIR`) or by supplying `GH_TOKEN` through an explicit `[[project.env_mount]]`.
-  No host `gh` PAT or host `~/.config/gh` is mounted.
+- **`gh` ships as a binary; no token is injected by default.** The base image bakes a pinned GitHub
+  CLI (`config.DEFAULT_GH_VERSION`). With nothing configured, claude-man injects no `gh` credential —
+  the operator can authenticate in-container via `gh auth login` (writing the agent-writable
+  `GH_CONFIG_DIR`). An operator may instead **opt in** to a managed token via `config gh-token`
+  (TUI: Settings → `t`), which stores it `0600` in the **state tier** (`gh_token.py` →
+  `config.gh_token_path()`; never in the secret-free `config.toml`, never synced) and injects it
+  **pass-through** as `-e GH_TOKEN` (the name in argv, the value via the child env — `runner.py`
+  `inject_gh_token`), only into containers, recreate-to-apply. This is safe under invariant 1
+  because `GH_TOKEN` cannot outrank Claude auth or mis-bill an account. `config show` reports only
+  set/none, never the value. No host `gh` PAT or host `~/.config/gh` is mounted, and `GH_TOKEN` is a
+  `FORBIDDEN_ENV_NAME` — it can never be sourced from a `[[project.env_mount]]`, `project.env`, or an
+  `env_file` (only the dedicated state-tier token is its source).
 - **A managed ssh-agent socket forward is ownership-guarded.** Only a socket owned by the host
   operator is adopted into the container, so a hostile world-writable socket left in the agent's
   reach can't be smuggled in as the forwarded agent.
@@ -79,11 +86,22 @@ What crosses each way, and what must never cross:
 ### Network containment (Phase 4 — implemented)
 - Open egress by default; per-project **strict** mode (`project lock <slug>`) routes all egress
   through a squid sidecar on a per-project `--internal` network (no gateway → no direct route, so the
-  proxy can't be bypassed). The agent attaches to that network only; the sidecar is also on the
+  proxy can't be bypassed). `ensure_network` verifies the `--internal` flag itself (not mere
+  existence) and removes + recreates a same-named-but-non-internal network — failing **closed** if it
+  can't (e.g. a container is attached) — so a leaky reused network can't silently grant a route out
+  while the project still reports `Egress=strict`. The agent attaches to that network only; the sidecar is also on the
   default bridge (its sole egress path) and enforces a `dstdomain` allowlist over CONNECT tunnels (no
   MITM). `up` is **fail-closed** — a locked project never starts if the sidecar can't come up. The
   allowlist always includes `claude.ai` (token refresh) + the Anthropic API, GitHub, and the package
-  registries; denied requests are logged (`project egress-log`). Recommended for untrusted project
+  registries; allowlist extras are validated **fail-closed** (`network/allowlist.is_valid_dstdomain`
+  drops over-broad/malformed entries — a bare TLD, `.`, ports or paths — so an extra can never widen
+  egress) and managed via `lifecycle.add_allow`/`remove_allow` or the TUI Egress screen. Enforcement
+  is verifiable end-to-end and observable: `project egress-smoke` is a daemon-gated check that an
+  allowlisted host reaches **and** a non-allowlisted host is blocked (`egress.smoke`/`smoke_verdict` —
+  a proxy that lets everything, or nothing, through fails), and per-project blocked/allowed
+  distinct-destination counts are surfaced from the squid access log via `project egress-log` (denied
+  only) and the always-on TUI Network panel (`egress.parse_access`/`summarize_access`, with
+  whole-container traffic from `docker/stats.container_net_io`). Recommended for untrusted project
   code — this is the primary control against a compromised dependency exfiltrating the OAuth/`GH`
   token or any env-mount secret, or opening a reverse shell. The agent's strict flags are additive in
   `runner._render_egress`, so the hardened floor is byte-identical to an open project (invariant 2).

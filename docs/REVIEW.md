@@ -153,9 +153,13 @@ severity-bearing findings, recorded here for the audit trail:
   host operator's own `git config --global user.{name,email}`. Name/email are **non-secret**, rendered
   as plain `-e KEY=value`; no token of any kind is injected. Changing identity needs a **recreate**.
 - **GitHub CLI.** The base image pins `gh 2.93.0` via the upstream `.deb` (arch-aware; `gh` is not in
-  Debian repos). `gh auth` is the **operator's** job — no `GH_TOKEN` is injected; `gh auth login`
-  writes the writable `GH_CONFIG_DIR`, or the operator supplies `GH_TOKEN` via an env-mount. Picking up
-  `gh` needs an **image rebuild** (`image build base`, then `image build node`/…) **+ recreate**.
+  Debian repos). `gh auth` is the **operator's** job — by default no `GH_TOKEN` is injected.
+  **(Update 2026-06-10: GH_TOKEN opt-in injection was added later — `config gh-token` stores a `0600`
+  state-tier token (`gh_token.py` → `config.gh_token_path()`, never in `config.toml`) injected
+  pass-through as `-e GH_TOKEN` (`runner.py` `inject_gh_token`); see invariant 1.)** With no token
+  configured, `gh auth login` writes the writable `GH_CONFIG_DIR`, or the operator supplies `GH_TOKEN`
+  via an env-mount. Picking up `gh` needs an **image rebuild** (`image build base`, then
+  `image build node`/…) **+ recreate**.
 - `docker/smoke.py` gained probes for `gh` present + `git config --global` writable. End-to-end in a
   fresh hardened node container: `git commit` → correct inherited identity, `gh --version` → 2.93.0,
   `git config --global` → OK, `mkdir ~/.cache/node` → OK.

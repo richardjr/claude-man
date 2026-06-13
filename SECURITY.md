@@ -25,7 +25,12 @@ it demonstrates a way to:
   non-root user, the fixed writable-mount set) through configuration the tool accepts;
 - make sync-back / asset-sync read or write something the denylist says it never touches;
 - escape the workspace / config containment guards (path traversal, symlink tricks, mount
-  targeting).
+  targeting);
+- bypass the strict-egress firewall — reach a destination outside the allowlist from a
+  `project lock`'d (strict-egress) container, or otherwise defeat the squid-sidecar /
+  `--internal`-network boundary (the primary control against a compromised dependency
+  exfiltrating the OAuth/`GH` token — see invariant 3 in `CLAUDE.md` and the Network
+  containment section of `docs/SECURITY.md`).
 
 Known, intentionally-documented limitations (e.g. roadmap phases that are still stubs) are
 listed in [`ROADMAP.md`](ROADMAP.md) and [`docs/REVIEW.md`](docs/REVIEW.md) — checking there

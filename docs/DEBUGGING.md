@@ -175,3 +175,59 @@ BROWSER=false timeout 12 claude setup-token 2>&1 | grep -ao 'scope=[^&]*'
 # fixed ⇒ the authorize URL requests user:profile (or setup-token grows a --scopes flag)
 ```
 
+## Locked project (strict egress) troubleshooting
+
+Strict egress (invariant 3) is the most failure-prone subsystem: a locked project routes ALL traffic
+through a squid sidecar on a no-route `--internal` network. When a locked project misbehaves, the
+fault is almost always the allowlist or the sidecar — not claude itself.
+
+### `up` aborts with a sidecar / network error
+
+`project up` is **fail-closed** for a locked project (`lifecycle.up` → `egress.ensure_network` then
+`egress.ensure_proxy`): if the per-project network can't be made `--internal`, or the squid sidecar
+can't build / start / connect to the bridge, the start **aborts and the agent never runs** — a locked
+project must never come up with broken or absent egress enforcement.
+
+- *"egress network … exists but is NOT --internal and can't be recreated (in use?)"* —
+  `ensure_network` found a same-named network that isn't internal (a silent route out) and couldn't
+  remove it because something is attached. Stop the attached container, then
+  `docker network rm claude-man-net-<slug>` and retry `up`.
+- *"squid sidecar failed to start"* / *"could not connect sidecar to egress bridge"* — inspect the
+  sidecar: `docker logs claude-man-proxy-<slug>`. A bad rendered config or a missing
+  `claude-man:proxy` image (auto-built on first lock; rebuild with `image build proxy`) is the usual
+  cause. `ensure_proxy` removes a half-wired sidecar on failure, so a retry starts clean.
+
+### A locked project can't reach an allowlisted host
+
+Run the daemon-gated end-to-end check first — it probes an allowlisted host (must reach) and a
+non-allowlisted host (must be blocked):
+
+```bash
+claudemanctl project egress-smoke <slug>   # PASS ⇒ allowlist enforces; FAIL names which side broke
+```
+
+If the smoke FAILs on *"allowlisted host … was NOT reachable"*, the allowlist is too strict. See what
+the project actually tried to reach and got BLOCKED:
+
+```bash
+claudemanctl project egress-log <slug>     # blocked destinations, paste-able into egress.allowlist
+```
+
+Add the missing host in the TUI `g` Egress screen (allowlist extras, or promote a blocked
+destination straight from the log), then **recreate** — `egress.render_conf` only re-renders
+squid.conf on the next recreate, so an allowlist edit doesn't apply to a running sidecar. The base
+allowlist always includes `claude.ai` (the OAuth refresh path, invariant 3); if token refresh fails
+opaquely under lock, confirm that host is present.
+
+### By design under lock: ssh-git over a custom host, and direct DNS
+
+Strict egress today covers **proxy-aware traffic only** (`HTTP(S)_PROXY` → the squid CONNECT
+allowlist). Two things are NOT reachable from a locked project and that is expected, not a bug:
+
+- **Direct (non-proxy) DNS / TCP** — the agent is on an `--internal` net with no gateway, so anything
+  that bypasses `HTTP(S)_PROXY` (raw sockets, a tool that ignores the proxy env) has no route out. The
+  deferred `dnsmasq` direct-DNS layer + in-container default-DROP are ROADMAP Phase 4 defence-in-depth.
+- **ssh-based git** (`git@github.com:…`) — ssh does not honour `HTTP(S)_PROXY`, so it can't traverse
+  the squid sidecar. Use HTTPS remotes for git under lock (the `egress-smoke` probe itself uses
+  `git ls-remote https://…`), or leave the project unlocked while it needs ssh-git.
+

@@ -36,7 +36,7 @@ It exists to solve five things at once:
 > skills per project (defaults by language, drift-tracked, applied live) — all from both the CLI
 > and the TUI.
 > **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 533 dependency-free tests; the hardened image is
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 553 dependency-free tests; the hardened image is
 > `image smoke`-gated.
 
 ## Platform support
@@ -117,7 +117,10 @@ sidecar** is the only path to the internet. Only allowlisted domains are reachab
 always includes `claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the package registries;
 everything else is **denied and logged** so you can tune the list. HTTPS stays end-to-end (CONNECT
 tunnels, no MITM, no CA install). Lock a project with `project lock <slug>` (or create it
-`--egress strict`); the denied-request log surfaces in the TUI for allowlist tuning.
+`--egress strict`); the denied-request log surfaces in the TUI for allowlist tuning. The TUI also
+carries an always-on **Network panel** with a row per project: **Traffic** (whole-container network
+I/O since start, from `docker stats`, for every running project) plus distinct **Blocked/Allowed**
+destination counts for locked projects (from the squid access log).
 
 This is the single biggest lever against the *exfiltration* and *command-and-control* steps that
 nearly every one of the attacks above depends on. See [`docs/SECURITY.md`](docs/SECURITY.md) for
@@ -344,9 +347,14 @@ uv run claudemanctl project egress-smoke demo    # verify enforcement: an allowl
 uv run claudemanctl image build proxy            # (re)build the claude-man:proxy squid sidecar image by hand
 ```
 
-Add project-specific allowlist domains under `[project.egress]` `allowlist = [...]` in the project's
-TOML, then `project lock demo` again to re-render and recreate. In the TUI, the **Project** menu
-(`p`) → **Egress log** (`g`) shows blocked destinations. Today's lock covers proxy-aware traffic
+Add project-specific allowlist domains either inline from the TUI — the **Project** menu (`p`) →
+**Egress…** (`g`) opens the Egress screen, which locks/unlocks the project (`l`), adds/removes
+allowlist extras (`a`/`x` — a fast, validated registry-only write; `recreate` to apply), and
+promotes a destination the proxy actually blocked straight into the allowlist (`b`) — or by hand
+under `[project.egress]` `allowlist = [...]` in the project's TOML, then `project lock demo` again to
+re-render and recreate. The always-on **Network panel** is the surface that shows per-project
+**Blocked/Allowed** distinct-destination counts (locked projects) alongside whole-container
+**Traffic**. Today's lock covers proxy-aware traffic
 (claude, `git` over HTTPS, npm/pip/apt); `ssh`-based git and direct-DNS tools are intentionally not
 reachable under lock — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § *Network / egress*.
 
