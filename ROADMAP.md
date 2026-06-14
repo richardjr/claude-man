@@ -8,7 +8,7 @@ subsystem. Each phase lists its goal and concrete deliverables. Checkboxes track
 > the hardened profile) plus the `--env-file` credential-scrub gap are addressed in the new
 > **Phase 0.5**. Lower-severity findings are folded into the phase that owns them (tagged inline).
 
-## Current status — 2026-06-05
+## Current status — 2026-06-14
 
 **Done & verified:** Phase 0, **Phase 0.5** (hardened image runs `claude` under `--read-only
 --user`; `image smoke` gate; native `~/.local` install so `claude doctor` is clean; `env_file`
@@ -56,7 +56,7 @@ neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeSc
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
-Commits from fugitive/gitsigns carry the injected git identity. 553 dependency-free
+Commits from fugitive/gitsigns carry the injected git identity. 593 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git + nvim probes).
 
@@ -71,17 +71,22 @@ and **publish container service ports** (`project ports` / Project menu -> Ports
 test endpoint inside a container is reachable on the host, and **edit/commit in a baked neovim**
 (TypeScript + Markdown LSP, treesitter, git-from-nvim) — all from both the CLI and the TUI.
 
-**Next up (small polish):** auto-capture the token in `profile add` (skip the paste); move the projects
-table to an async `docker ps`/`docker events` worker (TUI-2). The one-claude-per-container guard
-(SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10, with the open-sourcing pass).
-**Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
-incl. routing in-container ssh-git when egress is locked). **Phase 5 (sync-back): LANDED 2026-06-13**
-(review-gated three-way merge into the host `~/.claude` — `sync plan`/`sync review` + the TUI gate).
-**Phase 6 (curated packs — [`docs/PACKS.md`](docs/PACKS.md)): 6a LANDED 2026-06-11, 6b LANDED 2026-06-12**
-(library + schema + materializer + CLI + the /workspace launch default, then the TUI Packs…
-checklist screen + create-modal Language field — see the Phase 6 checklist); **next bite is 6c**
-(deeper curation — port the operator's existing skills into `library/packs/`). Tracked
-lower-severity items live in [`docs/REVIEW.md`](docs/REVIEW.md).
+**Done since:** **Phase 4 (strict egress): LANDED** (squid allowlist sidecar on a no-route
+`--internal` net + lock/unlock + the TUI Egress screen + Network panel). **Phase 5 (sync-back):
+LANDED 2026-06-13, committed 2026-06-14** (review-gated three-way merge into the host `~/.claude` —
+`sync plan`/`sync review` + the TUI gate). **Phase 6 (curated packs — [`docs/PACKS.md`](docs/PACKS.md)):
+6a LANDED 2026-06-11, 6b LANDED 2026-06-12** (library + schema + materializer + CLI + the /workspace
+launch default, then the TUI Packs… checklist screen + create-modal Language field). The
+one-claude-per-container guard (SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10).
+
+**Next up:** **TUI-5 (live log streaming)** — a `docker logs -f` follower pane, the last true
+Phase-1 stub. **Then:** Phase 6c (deeper curation — port the operator's existing skills into
+`library/packs/`); the projects-table `docker events` push-refresh (the async off-UI-thread `docker
+ps` worker (TUI-2) is DONE — only the event-driven trigger remains); and the deferred hardening
+items — **BUG-2** (per-label `docker inspect`, latent today) and **IMG-4** (`COREPACK_HOME`/uv-cache
+offline pinning + per-overlay offline smoke). Auto-capturing the token in `profile add` (skip the
+paste) is the remaining small polish. Tracked lower-severity items live in
+[`docs/REVIEW.md`](docs/REVIEW.md).
 
 **Operator note:** containers built before the native-install image change show stale `claude
 doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
@@ -143,7 +148,7 @@ SEC-2, IMG-2/5, IMG-3.)
 
 - [x] `registry/projects.py` read/write/save a single `projects/<slug>.toml`; one-repo checkout (BUG-1 env coercion done)
 - [x] `docker/runner.py` create/start/stop + `docker/status.py` live JOIN, wired into the CLI/TUI via `lifecycle.py` (WIRE-1/WIRE-7); `claude-config` seeded first via `profiles/seed.py` (WIRE-3)
-- [~] `tui/app.py`: live JOIN + DEFINED→create+start with surfaced errors (TUI-1), `enter`→shell (TUI-3), cursor-by-slug (TUI-7); **still TODO:** async `docker ps` worker (TUI-2), drop the redundant re-query (TUI-4)
+- [x] `tui/app.py`: live JOIN + DEFINED→create+start with surfaced errors (TUI-1), `enter`→shell (TUI-3), cursor-by-slug (TUI-7), async off-UI-thread `docker ps` worker (TUI-2 — `@work(thread=True, exclusive)`), single post-action refresh (TUI-4). The only remaining bit is the `docker events` push-refresh (tracked under Phase 2)
 - [x] `tui/screens/create.py`: `n`→new-project modal (slug/profile/overlay/egress; inline slug validation + duplicate guard; runs `lifecycle.create_project` in a thread worker that converts every failure to a red `Result`). **Repos/env/allowlist capture deferred** — `create_project` has no `repos` param yet (see Phase 3)
 - [x] `tui/terminals.py`: detached terminal spawn — settings-driven launcher table (ghostty/alacritty/kitty/wezterm/foot/gnome-terminal/konsole/xterm + macOS Terminal.app/iTerm2 + WSL2 wt, or a custom template) (**SEC-6** done: slug validated at the CLI argparse boundary *and* in `_inner_exec` before the keep-open shell string)
 - [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (TUI-5)
@@ -198,7 +203,7 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
   **TUI:** the usage panel gains `5h` + `Week` coloured mini-bars (green <70% / yellow <90% / red),
   fed by a 60 s off-thread `refresh_utilization` worker cached in `self._util` (`u` refreshes both).
   **CLI:** `profile limits [name]` prints per-account 5h/weekly bars + reset.
-- [~] docker-events-driven refresh — the projects table still polls (TUI-2); the usage panel already uses a thread worker
+- [~] docker-events-driven refresh — the async off-UI-thread worker (TUI-2) is **DONE** (projects/usage/util/gitstate/net panels all run off-thread); what remains is replacing the 10 s poll with a `docker events` push trigger
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle
 **Goal:** projects own a set of repos, persist across restarts, and tear down cleanly.
@@ -210,8 +215,8 @@ on label divergence (invariant 4); **BUG-6** concise `fetch_all` detail instead 
 
 - [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (30 s fetch-less gitstate worker, `g` fetch-ful) + Repos-menu (`g`) `a`/`x` Add/Remove-repo modal screens.
 - [x] Idempotent `project delete` (`rm -f` container + `rm -rf` state dir + `rm` toml, registry removed LAST so a partial failure stays retry-able); start/stop/recreate verbs in TUI + ctl. **Sync-gated:** `lifecycle.delete_plan` scans each repo (fetch-less) via `gitstate.delete_risk` and the TUI `DeleteProjectScreen` / CLI surface the per-repo unsynced-work assessment before the irreversible delete — risky repos require an explicit "Delete anyway" (TUI) / `--force` (ctl), and `--keep-workspace` / the "keep workspace" toggle preserves the `/workspace` checkout as a non-destructive exit.
-- [ ] Version-bump-by-recreate flow + running-version status column; `backups/` convention
-- [ ] DEFINED/STOPPED/UP JOIN hardened; **BUG-2** second `docker inspect` per-label read for robust multi-label parsing (still latent — values are comma-free today)
+- [x] Version-bump-by-recreate flow (`check_update` → `up`/`recreate(rebuild_to=…)`, `--update-yes`/`--no-update`) + running-version status column (stamped from the image's baked `claude-man.claude-version` label); `backups/` convention (`config.backups_dir`, used by asset-sync, sync-back merge, and delete teardown)
+- [~] DEFINED/STOPPED/UP JOIN hardened — **DONE** (full outer join: DEFINED-with-no-container rows, registry-wins repo count + drift marker (BUG-5), orphan-container note (TUI-6)); the one remaining bit is **BUG-2** — a second `docker inspect --format '{{json .Config.Labels}}'` per-label read for robust multi-label parsing (still latent — current label values are comma-free)
 - [x] **Per-project asset sync** (`assets.py`): a synced config-tier source `~/.config/claude-man/assets/<slug>/{workspace,claude}/` mirrors CLAUDE.md (→ `/workspace`) + skills/agents/commands (→ `~/.claude`, USER scope) to/from the host binds. `sync_in` on `up` (asset wins, runs after the profile seed so per-project assets layer on top, before `runner.start`); `sync_out` on `stop` (bind wins); **back up the target before every overwrite** (`backups/<ts>/{in,out}/`) and refuse on backup failure — last-write-wins, nothing lost. The claude side is a **default-deny allowlist** (only `skills`/`agents`/`commands` — a blocklist can't safely enumerate sensitive paths like `projects/` transcripts) with a filtered recursive copy that drops denylisted-named nested entries and refuses symlinks that escape the source or target a denylisted path; the workspace side is containment-checked (`is_within`). Bootstraps a stub `CLAUDE.md` if none exists. **TUI** `q` quits immediately and leaves containers running (it never stops/syncs — that previously blocked the close behind a serial, unabortable per-container `docker stop`); the end-of-day "stop + sync all running containers" is the separate top-level `S` (stop-all) command (`StopAllConfirmScreen` → `ShutdownScreen` progress modal → off-thread stop-all worker, offering stop-sync-&-quit or stop-sync-&-stay; `_busy`/`_stopping_all` guarded). **ctl:** `project stop-all` (batch stop+sync via `lifecycle.stop_all`), `project assets [--bootstrap]`, `project sync [--in]`. `[project.sync]` TOML block (enabled/workspace/claude). Distinct from the Phase-5 review-gated sync-back (this targets an isolated per-project dir, so it's safe to run automatically). Migration: drop a project's `~/Work/CLAUDE.md` `file` env-mount (it shadows the synced file) and recreate.
 
 ## Phase 4 — Lockable strict egress
