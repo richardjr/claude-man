@@ -6,6 +6,10 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Multi-agent provider abstraction design** ([`docs/AGENTS.md`](docs/AGENTS.md), ROADMAP Phase 7):
+  a plan for running a different coding agent (e.g. the OpenAI Codex CLI) in the same hardened
+  container model via an `AgentProvider` seam, with the security floor enforced identically for every
+  provider. Design only — not started.
 - **Live container-log viewer** (Phase 1 / TUI-5): View… → **Logs** opens a near-full-screen
   `LogsScreen` that streams a project's `docker logs --tail 200 --timestamps -f` into a `RichLog`
   via an off-UI-thread follower worker. The argv is a pure, unit-tested `runner.build_logs_argv`;
@@ -77,6 +81,19 @@ may land in minor versions until 1.0).
 - **`project recreate` now offers the on-start claude update** (same prompt as `project up`): it
   checks the configured channel and, on a TTY, prompts before rebuilding the image to a newer
   claude. `--update-yes` skips the prompt; `--no-update` skips the check.
+
+### Fixed
+- From a critical-review pass ([`docs/REVIEW.md`](docs/REVIEW.md) 2026-06-14): a **TOCTOU** in the
+  OAuth-token write (created world-readable then chmod'd — now one audited `config.write_secret_file`
+  shared by the token / `GH_TOKEN` / per-project env stores, `O_CREAT` at `0600`); git
+  clone/fetch/ff-merge now run **non-interactively + time-bounded** (a missing credential fails fast
+  instead of hanging on a prompt); `projects._atomic_write` uses a **unique** temp name (concurrent
+  same-file writers can't clobber each other before `os.replace`); `status.query_containers` guards
+  on `docker` being absent; the usage parser tolerates a non-numeric token field; the squid log
+  parser drops the literal `-` host of an early-denied request.
+
+### Removed
+- Dead code: `projects.load_path`, `config.profile_identity_path`, `gh_token.ENV_NAME` (no callers).
 
 ## [0.1.0] — unreleased baseline
 

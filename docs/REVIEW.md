@@ -176,3 +176,42 @@ severity-bearing findings, recorded here for the audit trail:
 
 All 193 unittests pass, `ruff` clean, and `claudemanctl image smoke base` PASSED including the new
 `.cache`/`gh`/git-config-writable probes.
+
+# Critical review — 2026-06-14
+
+A whole-codebase critical review (5 dimensions — duplication/generic-opportunities, correctness,
+dead code, conventions/invariants, test/perf — each finding adversarially re-verified against the
+actual code) plus a map of every Claude-specific coupling seam (which became [`AGENTS.md`](AGENTS.md)
+/ ROADMAP Phase 7). **36 findings → 33 confirmed, 3 refuted.** The 3 refutals were earned: a claimed
+`Path.rglob` symlink-dir-follow in `packs/materialize` (rglob does NOT descend symlinked dirs), a
+`set_egress` teardown-ordering claim, and a "missing `read_env_file` test" that already exists.
+
+## Applied this pass (commits 2026-06-14)
+
+| ID | Fix | Status |
+|----|-----|--------|
+| dup-0600-secret-write / token-file-chmod-toctou / env-secrets-parent-mode | `config.write_secret_file()` — one audited 0600-under-0700 writer (O_CREAT at 0600, no world-readable window); routed the OAuth token + `GH_TOKEN` + per-project env stores through it. Fixes a real TOCTOU in `setup_token` (`write_text`-then-`chmod`) and a missing 0700 parent in `env_secrets` | DONE |
+| git-no-timeout-no-prompt | `checkout/repos._run_git` — git clone/fetch/ff-merge now non-interactive (`GIT_TERMINAL_PROMPT=0`) + time-bounded (timeout→124), so a missing credential fails fast instead of hanging | DONE |
+| atomic-write-pid-only-tmp | `projects._atomic_write` temp name made unique (pid + uuid) — concurrent same-file writers can't clobber each other's temp before `os.replace` | DONE |
+| status-no-docker-guard | `status.query_containers` guards on `shutil.which("docker")` like every other docker call | DONE |
+| perf-usage-rescan / usage-int-cast | `usage` mtime/size scan cache (the 15s poll no longer re-parses every transcript) + `_as_int` tolerates a non-numeric token field | DONE |
+| squid-denied-dash-url | `egress._host_port_from_url` drops the literal `-` host squid logs for an early-denied no-URL request | DONE |
+| summarize-double-glyphs | `gitstate.summarize` computes `_glyphs` once per repo (was up to 3×) | DONE |
+| magic-oauth-token-env | `setup_token` uses `config.OAUTH_TOKEN_ENV` not the literal | DONE |
+| dead-load-path / dead-profile-identity-path / dead-gh-token-env-name | removed dead `projects.load_path`, `config.profile_identity_path`, `gh_token.ENV_NAME` | DONE |
+| test-status-join / test-parse-label-csv / test-mask-url-creds / test-iswithin | +13 tests on previously-untested security/correctness-critical helpers (609 total) | DONE |
+
+## Deferred backlog (confirmed, not yet applied)
+
+| ID | Finding | Severity | Note |
+|----|---------|----------|------|
+| settings-no-atomic-write | `settings.py`/`profiles.py` write config TOML non-atomically while the 2s TUI poll reads it (the torn-read race `projects.py` already solved) | should-fix (bug) | needs `_atomic_write` factored into a shared `registry/_io.py` |
+| dup-cli-result-emit | `cli._emit(res)` would collapse 23 identical print/return pairs | quality | mechanical, large-touch |
+| dup-selected-row-key | `tui/_dt.selected_row_key()` — 8 byte-identical cursor-row-key copies | quality (generic) | small |
+| dup-tui-worker-tail | `_run_lifecycle` wrapper for 9 identical `@work` worker bodies | quality | medium |
+| dup-slug-lock-error | `lifecycle._locked(slug, fn)` for 14 flock/error sites | quality | medium |
+| dup-tomlkit-scalar-patch | `projects._patch_doc` (tomlkit guard+parse+patch+write triplicated) | quality | small |
+| dup-modal-list-screen | a `ListManagementModal` base (Ports/EnvMounts screens are near-twins) | quality | large |
+| egress-private-run-coupling | promote `runner._run` to public (egress reaches the private helper 12×) | nit | pure rename |
+| dead-default-gh-version | `config.DEFAULT_GH_VERSION` unread by Python — wire through `images.build_argv` or delete | nit | — |
+| user-agent-stale-version / egress-untyped-project / perf-apply-gitstate-recompute / test-fsmerge-symlink-depth | UA-version provenance comment, 2 type-hint gaps, a double `_repo_cells` recompute, a symlink-chain-depth test | nit | low priority |

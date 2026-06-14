@@ -86,8 +86,10 @@ validation (SEC-6) are DONE (2026-06-10).
 ps` worker (TUI-2) is DONE — only the event-driven trigger remains); and the deferred hardening
 items — **BUG-2** (per-label `docker inspect`, latent today) and **IMG-4** (`COREPACK_HOME`/uv-cache
 offline pinning + per-overlay offline smoke). Auto-capturing the token in `profile add` (skip the
-paste) is the remaining small polish. Tracked lower-severity items live in
-[`docs/REVIEW.md`](docs/REVIEW.md).
+paste) is the remaining small polish. **The larger architectural effort on deck is Phase 7
+(multi-agent provider abstraction — run Codex/others in the same hardened model; designed in
+[`docs/AGENTS.md`](docs/AGENTS.md), not started).** Tracked lower-severity items + the 2026-06-14
+critical-review backlog live in [`docs/REVIEW.md`](docs/REVIEW.md).
 
 **Operator note:** containers built before the native-install image change show stale `claude
 doctor` warnings until `claudemanctl project recreate <slug>` rebuilds them on the current image.
@@ -279,6 +281,28 @@ new mounts, floor byte-identical (invariant 2)._
 - [x] **6a (landed 2026-06-11):** `library/packs/<tier>/<pack>/` layout + `pack.toml` (description, `default`); `packs/library.py` (pure discovery/parse/hash + name-uniqueness lint); `packs/materialize.py` (asset-source writes + fenced CLAUDE.md block patch + manifest); `Project.packs`/`Project.language` schema + `projects.set_packs` + `lifecycle.set_packs` (immediate apply); lifecycle `up` hook before `sync_in` (fail-soft); CLI (`packs list`, `project packs add|rm|list|defaults`, `project create --language`); `launch_workdir` default → always `/workspace` (explicit `workdir` still wins; lone-repo auto-cd dropped). Starter library: guardrails/code-quality (default) + workflow (opt-in) + node/python/rust convention packs. 34 new tests (discovery lint, block-patch idempotence, ours/theirs manifest boundary, drift/collision/deselect) + a live CLI smoke
 - [x] **6b (landed 2026-06-12):** TUI Packs… checklist screen (`tui/screens/packs.py`, opened Project… → `p`): grouped *Common* / *<language>* / *Other (selected)* rows from the pure `tui/packsview.py` row model (splash/rowfx no-textual pattern, unit-tested), space/enter toggle + `d` re-apply-defaults through `lifecycle.set_packs` (immediate apply), and a State column from the new `packsview.pack_states` (read-only freshness map: stale / drifted / operator-collision / not-in-library; the materializer stays the only writer). Create modal gained a Language Select (tiers discovered from the library; the Overlay choice pre-fills the matching tier until the operator picks one) threaded `NewProject` → `create_project`. 31 new tests + a headless pilot smoke
 - [ ] **6c:** deeper curation — port the operator's existing skills into `library/packs/` (e.g. a common `review-skills` pack; the fragment starter library — guardrails / code-quality / workflow + node/python/rust conventions — shipped in 6a); launch smoke (claude reports the imported memory via `/memory`). Templates are PUBLIC (repo is public) — house rules in, client/project-specific content stays in per-project assets
+
+## Phase 7 — Multi-agent provider abstraction
+**Goal:** a seam that lets claude-man run a *different* coding agent (e.g. the OpenAI Codex CLI)
+inside the same hardened-container model, without forking the project or weakening any security
+invariant. Full design: [`docs/AGENTS.md`](docs/AGENTS.md) (planned 2026-06-14).
+
+_Key decisions: the security floor is ALREADY agent-agnostic (the hardened argv, egress sidecar,
+labels, ports, env-mount/secret passthrough know nothing about the binary inside); the Claude
+coupling clusters in 8 seams (auth, image-bake, process-spawn, updates, usage, paths, sync-back,
+packs). Localize them in an `agents/` package — one `AgentProvider` value object resolved through one
+module (the `hostplatform.py` "all branches go through here" pattern), selected per project via a new
+`Project.agent` field (default `claude`). A provider parameterizes BEHAVIOUR, never SECURITY:
+invariants 1–3 are enforced BY the layer for every provider, not exposed as per-provider knobs (no
+`.credentials.json` copy, no `ANTHROPIC_*`/misbilling-key injection, floor byte-identical, locked =
+no route out but the allowlist proxy — for any agent). The 3-way sync-back ENGINE, masking, backup,
+flock, audit-commit, the update semver compare, and the usage render helpers are all reused; only the
+provider's policy DATA varies._
+
+- [ ] **7a:** introduce `agents/` + a `claude` provider reproducing today's behaviour byte-for-byte (pure refactor, zero behaviour change); route the soft seams through it (spawn binary/comm, config-dir path+env, version-label key+build-arg, release URL/UA, required egress hosts, context-file name + import syntax, sync-back policy data). A unit test pins the hardened argv byte-identical (invariant 2)
+- [ ] **7b:** `Project.agent` field (default `claude`) threaded through lifecycle/runner/terminals/images; split `BASE_ALLOWLIST` into a neutral toolchain set + `provider.required_hosts`; key `schema._MANAGED_MOUNTS` on `provider.config_dir`; generalize the one-per-container comm probe
+- [ ] **7c:** a `codex` provider + image overlay, validated against the hardened floor (`image smoke`); resolve the auth-kind divergence (single bearer vs refreshable JSON cred — needs research on Codex's auth/login flow; invariant 1 must still hold). `project create --agent codex`
+- [ ] **7d:** Codex sync-back policy (adversarially reviewed, like the Claude denylist) + pack content (`AGENTS.md` vs `CLAUDE.md`, its own config taxonomy)
 
 ---
 
