@@ -272,6 +272,14 @@ def sync_audit_dir() -> Path:
     return state_home() / "sync-audit"
 
 
+def syncback_lock_path() -> Path:
+    """GLOBAL advisory lock serialising sync-back merges.
+
+    The merge TARGET is the operator's singular host ``~/.claude`` (one config regardless of profile),
+    so the lock is global — NOT per-project/per-profile. Lives in the state tier (holds no secret)."""
+    return state_home() / ".syncback-merge.lock"
+
+
 def gh_token_path() -> Path:
     """0600 file holding the optional GitHub token injected as ``GH_TOKEN`` into every container.
 

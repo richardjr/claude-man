@@ -235,7 +235,27 @@ class AddEnvVarTest(unittest.TestCase):
 class SyncHooksTest(unittest.TestCase):
     """up() syncs assets IN before start; stop() syncs OUT only after a successful stop. Both fold the
     note into the Result and never let a sync fault break start/stop. Seams (runner, ensure_created,
-    assets, registry) are mocked so the test stays dependency-free."""
+    assets, registry) are mocked so the test stays dependency-free. State/HOME are isolated to tempdirs
+    so the real Phase-5 baseline/pending-note hooks run harmlessly against empty trees."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        self.home = tempfile.TemporaryDirectory()
+        self._old_home = os.environ.get("HOME")
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        os.environ["HOME"] = self.home.name
+
+    def tearDown(self) -> None:
+        for k in ("CLAUDE_MAN_CONFIG_HOME", "CLAUDE_MAN_STATE_HOME"):
+            os.environ.pop(k, None)
+        os.environ["HOME"] = self._old_home if self._old_home is not None else ""
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+        self.home.cleanup()
 
     @staticmethod
     def _cp(rc: int = 0) -> subprocess.CompletedProcess:
@@ -658,6 +678,77 @@ class SetPacksTest(unittest.TestCase):
         self.assertTrue(res.ok, res.detail)
         self.assertEqual(preg.load("demo").packs, ("guardrails",))
         self.assertFalse(extra.exists())  # dropped pack's files removed, not orphaned
+
+
+class SyncBackWiringTest(unittest.TestCase):
+    """lifecycle's Phase-5 wiring: only-if-absent baseline capture, the stop-time pending nudge, and
+    the sync_plan/sync_apply entry points. State + HOME isolated to tempdirs (no docker)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        self.home = tempfile.TemporaryDirectory()
+        self._old_home = os.environ.get("HOME")
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        os.environ["HOME"] = self.home.name
+        lifecycle.projects_registry.save(Project(slug="demo"))
+        self.bind = config.claude_config_dir("demo")
+        self.hostc = Path(self.home.name) / ".claude"
+        for d in (self.bind, self.hostc):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        for k in ("CLAUDE_MAN_CONFIG_HOME", "CLAUDE_MAN_STATE_HOME"):
+            os.environ.pop(k, None)
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._old_home
+        self.cfg.cleanup()
+        self.state.cleanup()
+        self.home.cleanup()
+
+    def _add_agent_skill(self) -> None:
+        (self.bind / "skills" / "new.md").parent.mkdir(parents=True, exist_ok=True)
+        (self.bind / "skills" / "new.md").write_text("agent-made")
+
+    def test_write_baseline_if_absent_is_one_shot(self) -> None:
+        lifecycle._write_baseline_if_absent("demo")
+        self.assertTrue(config.baseline_path("demo").exists())
+        self._add_agent_skill()
+        lifecycle._write_baseline_if_absent("demo")  # must NOT refresh (drift would be lost)
+        # the change is still detectable ⇒ the baseline was not overwritten
+        self.assertTrue(any(c.label == "skills/new.md" for c in lifecycle.syncback_detect.detect_changes("demo")))
+
+    def test_pending_note_counts_then_clears(self) -> None:
+        lifecycle._write_baseline_if_absent("demo")
+        self.assertEqual(lifecycle._pending_syncback_note("demo"), "")
+        self._add_agent_skill()
+        note = lifecycle._pending_syncback_note("demo")
+        self.assertIn("1 sync-back change(s) pending", note)
+        self.assertIn("sync review demo", note)
+
+    def test_sync_plan_lists_changes_with_diffs(self) -> None:
+        lifecycle._write_baseline_if_absent("demo")
+        self._add_agent_skill()
+        plan = lifecycle.sync_plan("demo")
+        self.assertEqual(plan.pending, 1)
+        row = plan.changes[0]
+        self.assertEqual(row.change.label, "skills/new.md")
+        self.assertTrue(row.diff)  # a masked diff was rendered
+
+    def test_sync_apply_writes_accepted(self) -> None:
+        lifecycle._write_baseline_if_absent("demo")
+        self._add_agent_skill()
+        res = lifecycle.sync_apply("demo", {"skills/new.md": "accept"})
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual((self.hostc / "skills" / "new.md").read_text(), "agent-made")
+
+    def test_sync_apply_missing_project(self) -> None:
+        res = lifecycle.sync_apply("ghost", {})
+        self.assertFalse(res.ok)
+        self.assertIn("no project", res.detail)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ from .screens.stop_all_confirm import StopAllConfirmScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
 from .screens.splash import SplashScreen
+from .screens.sync_review import SyncReviewScreen
 from .screens.update_confirm import UpdateConfirmScreen
 from ..registry import settings as settings_registry
 from . import splash as splash_mod
@@ -1210,8 +1211,58 @@ class ClaudeManApp(App):
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
+    # -- sync-back (review-gated three-way merge into the host ~/.claude) --
     def action_sync_review(self) -> None:
-        self._log("(phase 5) sync-back review gate — see screens/sync_review.py")
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            self._log("[red]sync-back: select a defined project (orphan rows aren't managed)[/]")
+            return
+        # Reserve up-front (like delete): the plan worker scans, then the modal sits open — claim the
+        # slug so a second sync-review/recreate can't stack behind it. Released on every exit path
+        # (plan error, no-changes, cancel, and _after_action on apply).
+        if not self._reserve(slug, "sync-review"):
+            return
+        self._log(f"scanning {slug} for sync-back changes …")
+        self._sync_plan_worker(slug)
+
+    @work(thread=True, group="sync")
+    def _sync_plan_worker(self, slug: str) -> None:
+        """Compute the plan (detect + per-change masked diffs) off the UI thread, then raise the gate."""
+        try:
+            plan = lifecycle.sync_plan(slug)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            self.call_from_thread(self._sync_plan_failed, slug, exc)
+            return
+        self.call_from_thread(self._show_sync_review, plan)
+
+    def _sync_plan_failed(self, slug: str, exc: Exception) -> None:
+        self._busy.discard(slug)
+        self._log(f"[red]sync-back plan failed for {slug!r}: {exc!r}[/]")
+
+    def _show_sync_review(self, plan: lifecycle.SyncPlan) -> None:
+        if not plan.changes:
+            self._busy.discard(plan.slug)
+            self._log(f"{plan.slug}: no sync-back changes pending")
+            return
+        self.push_screen(SyncReviewScreen(plan),
+                         lambda decisions: self._on_sync_review(plan.slug, decisions))
+
+    def _on_sync_review(self, slug: str, decisions) -> None:
+        if decisions is None:  # escape/cancel — nothing written (an all-reject map is still an apply)
+            self._busy.discard(slug)
+            self._log(f"{slug}: sync-back review cancelled")
+            return
+        self._log(f"applying sync-back for {slug} …")
+        self._sync_apply_worker(slug, decisions)
+
+    @work(thread=True, group="sync")
+    def _sync_apply_worker(self, slug: str, decisions: dict) -> None:
+        """Apply accepted decisions off the UI thread (global merge lock → host ~/.claude write)."""
+        try:
+            res = lifecycle.sync_apply(slug, decisions)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"sync-back apply failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
 
     # -- delete (sync-checked teardown) -----------------------------------
     def action_delete_project(self) -> None:

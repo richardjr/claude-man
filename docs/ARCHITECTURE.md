@@ -407,17 +407,12 @@ design; a `dnsmasq` forwarder for direct-DNS support and an in-container `iptabl
 defence-in-depth layer (its `NET_ADMIN` phase would run as a separate pre-start init) remain future
 work.
 
-## Sync-back (review-gated three-way merge — Phase 5, NOT yet implemented / design only)
-
-> **Status:** design only — Phase 5 is not yet implemented. The `syncback/` engine modules
-> (`baseline.py`/`detect.py`/`diff.py`/`merge.py`) raise `NotImplementedError("phase 5: …")`,
-> there is no `SyncReviewScreen` (`tui/screens/sync_review.py` is a stub; `app.py`'s
-> `action_sync_review` only logs a phase-5 notice), and the `sync review` / `sync plan` CLI
-> verbs are `_todo(5, …)` stubs. The steps below describe the intended flow. See ROADMAP Phase 5.
+## Sync-back (review-gated three-way merge — Phase 5)
 
 Engine: a stdlib **three-way manifest reconcile** with the **denylist enforced before any read**.
-Git is the audit layer only (accepted changes are committed to a `sync-audit/` repo for free
-revert history).
+The security-reviewed copy/backup/symlink-guard primitives are shared with the asset sync via
+`syncback/fsmerge.py` (one audited implementation). Git is the audit layer only (accepted changes are
+committed to `config.sync_audit_dir()` — a state-tier repo — for free revert history).
 
 1. **Seed (session start):** walk the allowlisted artifacts and write `baseline.json` (sibling of
    the mount, never inside it) — sha256 for file trees, canonical-JSON-subtree hash for
@@ -435,12 +430,20 @@ revert history).
    `a`/`r`/`s` per row, `enter` to apply. Defaults: authored text (agents/skills/commands/memory/
    `CLAUDE.md`) **accept**; `settings.json` + MCP + deletions + conflicts **reject**. Nothing is
    written until `enter`.
-5. **Merge (accepted only):** back up every host target first → copy file-tree artifacts
-   (symlink-preserving, container→host path rewrite, honouring the user-vs-project split and the new
-   `commands/` target) → **field-patch** `settings.json` (host hooks + statusLine structurally
-   immune) → apply MCP via `claude mcp add/remove --scope` → mirror accepted assets into
-   `~/Work/setups/claude-code/` and `git commit` (with a denylist re-assertion at staging time) →
-   refresh `baseline.json`. A per-profile merge lock serialises concurrent reconciles.
+5. **Merge (accepted only):** under a **single GLOBAL merge lock** (`config.syncback_lock_path()` —
+   the host `~/.claude` target is singular regardless of profile), back up every host target first
+   (refuse the overwrite on backup failure — nothing lost) → copy file-tree artifacts through the same
+   gated `fsmerge` primitive (per-entry denylist re-assert + containment; never a blind `copytree`).
+   The source read is **TOCTOU-safe** against the still-running untrusted agent: the source path is
+   walked component-by-component with `O_NOFOLLOW` from a bind-root anchor the agent can't reach, so a
+   symlink swapped in at *any* level (leaf or intermediate dir) fails with `ELOOP` rather than
+   redirecting the read to an out-of-tree operator secret (a leaf symlink to an in-tree target is still
+   dereferenced, via a bounded all-`O_NOFOLLOW` re-walk) → **inverse field-patch** `settings.json` (start from the HOST dict, overlay
+   only accepted keys; host `hooks` + `statusLine` structurally immune, denied keys skipped; atomic
+   write) → **MCP is gate-only in v1** (detected/diffed, apply deferred — no `claude mcp` exec) →
+   mirror accepted file artifacts into `config.sync_audit_dir()/<slug>/` and `git commit` (denylist
+   re-asserted at staging time) → **refresh `baseline.json` from the real post-merge on-disk state**
+   (partial-merge safe).
 
 **Never synced:** credentials / OAuth tokens (env-injected — no file to sync), identity
 (`oauthAccount`/`userID`/`accountUuid`), history/sessions/transcripts, statsig/caches/shell-snapshots,

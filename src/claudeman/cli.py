@@ -1,8 +1,8 @@
 """``claudemanctl`` — the scriptable CLI surface.
 
-Importable without ``textual``. Phase-0/1 implements the read-only/safe verbs (profile
-list, project status, shell/claude/nvim spawn, image build/smoke command rendering); the rest
-print an honest "not yet implemented (phase N)" and exit non-zero.
+Importable without ``textual`` (every handler defers its ``lifecycle``/registry imports), so the CLI
+and the unit tests run without the TUI installed. Each verb maps to a ``cmd_*`` handler that returns a
+process exit code; mutating verbs print a one-line ``Result.detail`` and exit non-zero on failure.
 """
 
 from __future__ import annotations
@@ -14,11 +14,6 @@ from . import __version__, config
 from .docker import status
 from .registry import profiles, projects
 from .tui import terminals
-
-
-def _todo(phase: int, what: str) -> int:
-    print(f"not yet implemented — {what} (phase {phase}); see ROADMAP.md", file=sys.stderr)
-    return 2
 
 
 def _slug_arg(value: str) -> str:
@@ -836,12 +831,54 @@ def cmd_project_egress_smoke(args) -> int:
 # --------------------------------------------------------------------------
 # sync / image
 # --------------------------------------------------------------------------
-def cmd_sync_review(args) -> int:
-    return _todo(5, f"sync-back review for {args.slug!r}")
+def _print_sync_plan(plan) -> None:
+    """Render a SyncPlan to stdout: per-change header + its secret-masked diff, indented."""
+    print(f"{plan.slug}: {plan.pending} sync-back change(s) pending\n")
+    for row in plan.changes:
+        c = row.change
+        flag = "  [CONFLICT]" if c.conflict else ""
+        print(f"  {c.change_type:8} {c.kind:11} {c.label}  (default: {c.default_decision}){flag}")
+        for line in row.diff:
+            print(f"      {line}")
+        print()
 
 
 def cmd_sync_plan(args) -> int:
-    return _todo(5, f"sync-back dry-run for {args.slug!r}")
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    plan = lifecycle.sync_plan(args.slug)
+    if not plan.changes:
+        print(f"{args.slug}: no sync-back changes pending")
+        return 0
+    _print_sync_plan(plan)
+    print("apply with `claudemanctl sync review <slug> --yes` (defaults), "
+          "or use the TUI for per-row accept/reject")
+    return 0
+
+
+def cmd_sync_review(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    plan = lifecycle.sync_plan(args.slug)
+    if not plan.changes:
+        print(f"{args.slug}: no sync-back changes pending")
+        return 0
+    _print_sync_plan(plan)
+    if not args.yes:
+        print("(dry-run) re-run with --yes to apply the DEFAULT decisions (authored text accepted; "
+              "settings.json / MCP / conflicts / deletions rejected), or use the TUI for per-row "
+              "control.", file=sys.stderr)
+        return 0
+    decisions = {row.change.label: row.change.default_decision for row in plan.changes}
+    res = lifecycle.sync_apply(args.slug, decisions)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 # --------------------------------------------------------------------------
@@ -1292,10 +1329,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # sync
     sy = sub.add_parser("sync", help="config sync-back").add_subparsers(dest="cmd", required=True)
-    syr = sy.add_parser("review", help="open the accept/reject gate")
+    syr = sy.add_parser("review", help="review the plan; --yes applies the default decisions")
     syr.add_argument("slug", type=_slug_arg)
+    syr.add_argument("--yes", action="store_true",
+                     help="apply the DEFAULT decisions (authored text accepted; settings/MCP/"
+                          "conflicts/deletions rejected). Per-row control is TUI-only.")
     syr.set_defaults(func=cmd_sync_review)
-    syp = sy.add_parser("plan", help="dry-run the reconcile")
+    syp = sy.add_parser("plan", help="dry-run the reconcile (masked diffs, no write)")
     syp.add_argument("slug", type=_slug_arg)
     syp.set_defaults(func=cmd_sync_plan)
 

@@ -31,6 +31,10 @@ from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
 from .registry import settings as settings_registry
 from .registry.schema import EnvMount, PortMapping, Profile, Project, Repo, ValidationError
+from .syncback import baseline as syncback_baseline
+from .syncback import detect as syncback_detect
+from .syncback import diff as syncback_diff
+from .syncback import merge as syncback_merge
 
 # A progress sink threaded through create/up/recreate so a long, one-time image build surfaces
 # live in the caller (the TUI log pane / the CLI). ``None`` means "no progress wanted".
@@ -386,6 +390,10 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     # Sync assets IN after ensure_created (which seeds profile defaults) so per-project assets layer
     # on top, and BEFORE start so the container sees them. Best-effort — a sync fault never blocks start.
     sync_note = _sync_in(project, on_progress=on_progress)
+    # Capture the sync-back baseline ONCE (only-if-absent), AFTER sync-in (so the seeded + asset/pack
+    # state is the agent-untouched reference) and BEFORE start (before the agent can touch anything).
+    # Best-effort: a baseline fault must never block a start (Phase 5).
+    _write_baseline_if_absent(project.slug, on_progress=on_progress)
     cp = runner.start(project.slug)
     if cp.returncode != 0:
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
@@ -402,7 +410,8 @@ def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
     egress.stop_proxy(slug)  # remove the squid sidecar (best-effort; no-op for an open project)
     sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
-    return Result(True, f"stopped {config.container_name(slug)}{sync_note}")
+    pending_note = _pending_syncback_note(slug)  # "N change(s) pending; review with sync review"
+    return Result(True, f"stopped {config.container_name(slug)}{sync_note}{pending_note}")
 
 
 def stop_all(
@@ -483,6 +492,85 @@ def sync(slug: str, *, direction: str, on_progress: ProgressFn | None = None) ->
     project = projects_registry.load(slug)
     rep = (assets.sync_in if direction == "in" else assets.sync_out)(project, on_progress=on_progress)
     return Result(rep.ok, rep.detail or f"{slug}: nothing to sync-{direction}")
+
+
+# ---------------------------------------------------------------------------
+# Sync-back (Phase 5) — review-gated three-way merge into the operator's host ~/.claude
+# ---------------------------------------------------------------------------
+def _write_baseline_if_absent(slug: str, *, on_progress: ProgressFn | None = None) -> None:
+    """Capture the sync-back 3-way baseline ONLY if none exists yet (first start).
+
+    Refreshing it every start would erase unreviewed prior-session drift; the baseline is otherwise
+    refreshed only after a successful merge. Best-effort — never raises (a baseline fault must never
+    block a container start)."""
+    try:
+        if config.baseline_path(slug).exists():
+            return
+        syncback_baseline.write_baseline(slug)
+        if on_progress:
+            on_progress("captured sync-back baseline")
+    except Exception as exc:  # noqa: BLE001 - never block start on a baseline fault
+        if on_progress:
+            on_progress(f"baseline capture failed: {exc!r}")
+
+
+def _pending_syncback_note(slug: str) -> str:
+    """A ``'; N change(s) pending…'`` suffix after a stop, or '' (nothing pending / any fault).
+
+    The agent's in-container ``SessionEnd`` hook is stripped at seed (``seed._patch_settings`` —
+    SYNC-2), so claude never auto-syncs config out; this stop-time nudge is the only prompt the
+    operator gets to review what the agent changed."""
+    try:
+        n = len(syncback_detect.detect_changes(slug))
+    except Exception:  # noqa: BLE001 - a detect fault must not make a stop look failed
+        return ""
+    if not n:
+        return ""
+    return f"; {n} sync-back change(s) pending; review with `claudemanctl sync review {slug}`"
+
+
+@dataclass(frozen=True)
+class SyncChange:
+    """One detected change plus its secret-masked diff — a read-only plan row for the gate."""
+    change: syncback_detect.Change
+    diff: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SyncPlan:
+    slug: str
+    changes: tuple[SyncChange, ...]
+
+    @property
+    def pending(self) -> int:
+        return len(self.changes)
+
+
+def sync_plan(slug: str) -> SyncPlan:
+    """Detect changes + render each one's secret-masked diff (the review plan).
+
+    Read-only EXCEPT for writing a fresh baseline when none exists yet (the documented no-baseline
+    degradation in ``detect.detect_changes``)."""
+    if not projects_registry.exists(slug):
+        return SyncPlan(slug, ())
+    rows = [
+        SyncChange(c, tuple(syncback_diff.change_diff(slug, c)))
+        for c in syncback_detect.detect_changes(slug)
+    ]
+    return SyncPlan(slug, tuple(rows))
+
+
+def sync_apply(slug: str, decisions: dict[str, str]) -> Result:
+    """Apply accepted decisions under the global merge lock (``merge.apply_accepted``).
+
+    ``decisions`` maps a change label (``artifact/unit``) → ``accept`` / ``reject`` / ``skip``."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        rep = syncback_merge.apply_accepted(slug, decisions)
+    except Exception as exc:  # noqa: BLE001 - surface as a red Result, never crash the caller
+        return Result(False, f"sync-back merge failed: {exc!r}")
+    return Result(rep.ok, rep.detail)
 
 
 def set_packs(slug: str, names: tuple[str, ...]) -> Result:

@@ -75,8 +75,9 @@ test endpoint inside a container is reachable on the host, and **edit/commit in 
 table to an async `docker ps`/`docker events` worker (TUI-2). The one-claude-per-container guard
 (SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10, with the open-sourcing pass).
 **Then:** finish Phase 3 (`project delete` / version-bump lifecycle), Phase 4 (strict egress —
-incl. routing in-container ssh-git when egress is locked), Phase 5 (sync-back), and **Phase 6
-(curated packs — [`docs/PACKS.md`](docs/PACKS.md)): 6a LANDED 2026-06-11, 6b LANDED 2026-06-12**
+incl. routing in-container ssh-git when egress is locked). **Phase 5 (sync-back): LANDED 2026-06-13**
+(review-gated three-way merge into the host `~/.claude` — `sync plan`/`sync review` + the TUI gate).
+**Phase 6 (curated packs — [`docs/PACKS.md`](docs/PACKS.md)): 6a LANDED 2026-06-11, 6b LANDED 2026-06-12**
 (library + schema + materializer + CLI + the /workspace launch default, then the TUI Packs…
 checklist screen + create-modal Language field — see the Phase 6 checklist); **next bite is 6c**
 (deeper curation — port the operator's existing skills into `library/packs/`). Tracked
@@ -235,19 +236,22 @@ the `dnsmasq` direct-DNS forwarder and an in-container `iptables` default-DROP l
 defence-in-depth. IMG-4 yarn/apt hosts are in the base allowlist; offline-first overlay cache pinning
 (`COREPACK_HOME`/uv) is still worth verifying in `image smoke <overlay>`._
 
-## Phase 5 — Sync-back accept flow
-**Goal:** review-gated three-way merge of container config changes to host + setups repo.
+## Phase 5 — Sync-back accept flow ✅
+**Goal:** review-gated three-way merge of container config changes back to the operator's host
+`~/.claude` (USER scope), audited in a state-tier git repo. **Done & verified** (2026-06-13).
 
-_Review notes: **SYNC-5** `json_key_diff` must drop `is_denied_json_key` keys before diffing (so
-`oauthAccount`/`userID` never reach the diff buffer); **SYNC-3** containment-check synced skill
-symlinks (reject/down-rank absolute/escaping targets); **SYNC-1** add project/repo-scope artifact
-producers; **BUG-3** anchor the `*-cache.json` deny to the basename; **BUG-4** add a value-shape
-secret scan to `mask_line`. (SYNC-4/SYNC-6 denylist additions + SEC-5 doc fix already landed.)_
+_Landed review notes: **SYNC-5** `json_key_diff` drops `is_denied_json_key` keys before diffing (so
+`oauthAccount`/`userID` never reach the diff buffer); **SYNC-3** synced skill symlinks are
+containment-checked (escaping/denied-target symlinks refused); **BUG-3** the `*-cache.json` deny is
+basename-anchored (tested nested); **BUG-4** `mask_line` has a value-shape secret scan (sk-/ghp_/JWT/
+long-base64). **SYNC-1** project/repo-scope artifact producers remain deferred (USER scope only);
+**MCP apply** is deferred — detected/diffed + gated, never `claude mcp` exec'd in v1._
 
-- [ ] `syncback/artifacts.py` registry + `denylist.py` enforced before read; `baseline.py` 3-way manifest (sha256 / canonical-JSON / symlink-target)
-- [ ] `detect.py` classify; `diff.py` difflib + canonical key-diff + secret-mask; per-profile merge lock
-- [ ] `tui/screens/sync_review.py` accept/reject/skip gate with defaults (text accept; settings/MCP/deletions/conflict reject)
-- [ ] `merge.py`: backup → field-patch `settings.json` → `claude mcp add/remove --scope` → symlink-preserving tree copy + path rewrite → mirror to `setups/claude-code` + git commit; baseline refresh; `sync --plan` dry-run
+- [x] `syncback/fsmerge.py` factors the shared FS primitives out of `assets.py` (one audited copy/backup/symlink-guard impl, zero behaviour change)
+- [x] `syncback/artifacts.py` registry + `denylist.py` enforced before read; `baseline.py` 3-way manifest (sha256 / canonical-JSON / symlink-target; narrow `mcpServers`-only `.claude.json` read)
+- [x] `detect.py` classify (per-file/key/server; conflict + no-op subtraction + claude-man-own-write subtraction; no-baseline implicit reference); `diff.py` difflib + canonical key-diff + secret-mask
+- [x] `tui/screens/sync_review.py` accept/reject/skip/cycle/accept-non-reject gate with defaults (text accept; settings/MCP/deletions/conflict reject)
+- [x] `merge.py`: **global** merge lock → backup-first → gated tree copy → inverse field-patch `settings.json` (hooks/statusLine immune) → MCP gate-only → mirror to `config.sync_audit_dir()/<slug>/` + git commit (denylist re-asserted at staging) → baseline refresh; CLI `sync plan` / `sync review [--yes]`
 
 ## Phase 6 — Curated packs (skills + CLAUDE.md injectors)
 **Goal:** a curated, in-repo library of task-focused skills + CLAUDE.md fragments that projects

@@ -6,6 +6,21 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Sync-back** (Phase 5, invariant 5): a review-gated three-way merge that flows accepted
+  in-container `~/.claude` changes (new skills/agents/commands, edited `settings.json`) back into
+  the operator's real global host `~/.claude`, so improvements made in one project benefit all.
+  The denylist is enforced **before any read** and **again at git-staging**; every host target is
+  **backed up before** an overwrite (refuse on backup failure — nothing lost); `settings.json` is an
+  **inverse field-patch** (host `hooks`/`statusLine` structurally immune, denied keys skipped); MCP
+  is detected/diffed but **gate-only** (apply deferred); accepted file artifacts are committed to a
+  state-tier audit repo (`config.sync_audit_dir()`) for free revert history; the merge runs under a
+  single **global** lock. Diffs are secret-masked (key-name **and** value-shape: `sk-`/`ghp_`/JWT/
+  long-base64). A three-way `baseline.json` is captured once on first `up` (after sync-in, before
+  start) and refreshed from real on-disk state after each merge; `stop` prints a pending-changes
+  nudge. The security-reviewed copy/backup/symlink-guard primitives are now shared with the asset
+  sync via `syncback/fsmerge.py` (one audited implementation). CLI: `sync plan <slug>` (dry-run
+  masked diffs), `sync review <slug> [--yes]` (apply defaults). TUI: projects table `y` →
+  `SyncReviewScreen` (per-row accept/reject/skip/cycle + accept-all-non-reject, masked-diff pane).
 - **Lockable strict egress** (Phase 4, invariant 3): per-project squid allowlist sidecar
   (`claude-man:proxy`) on a no-route `--internal` network — the agent's only path out is the
   CONNECT-tunnel allowlist proxy (no MITM); the hardened agent floor is byte-identical (the
