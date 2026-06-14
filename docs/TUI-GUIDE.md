@@ -52,8 +52,16 @@ uv run claudeman
 ```
 
 A short boot splash plays (~2 s; any key skips it; auto-skipped on tiny terminals; disable
-with `claudemanctl config splash off`), then scrolls off to reveal the main screen, top to
-bottom:
+with `claudemanctl config splash off`) — the wordmark reveals top-to-bottom, a highlight band
+sweeps across the gradient, then the whole splash scrolls off to reveal the main screen:
+
+<p align="center">
+  <img src="images/splash-intro.png" alt="boot splash — settled CLAUDE MAN wordmark" width="420">
+  &nbsp;
+  <img src="images/splash-sweep.png" alt="boot splash — mid-sweep highlight band" width="420">
+</p>
+
+The main screen, top to bottom:
 
 - **Projects table** — `Project · Status · Profile · Egress · Repos · Version · Detail`.
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);

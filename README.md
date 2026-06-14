@@ -1,5 +1,9 @@
 # claude-man
 
+<p align="center">
+  <img src="docs/images/splash-intro.png" alt="claude-man boot splash — the CLAUDE MAN block wordmark over 'hardened containers for claude code'" width="680">
+</p>
+
 A Python **Textual TUI** + a scriptable **`claudemanctl`** CLI that provisions, persists, and
 manages **hardened Docker containers**, each running **Claude Code** under a chosen **account
 profile** (e.g. work / home), for a set of long-lived **git-checkout projects** on a single
