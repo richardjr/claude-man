@@ -92,12 +92,8 @@ def _mint_token() -> str:
 
 
 def _store_token(name: str, token: str) -> None:
-    """Write the token 0600 (dir 0700) under the profile state dir."""
-    path = config.profile_token_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    path.write_text(token + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+    """Write the token 0600 (dir 0700) under the profile state dir (no world-readable window)."""
+    config.write_secret_file(config.profile_token_path(name), token + "\n")
 
 
 def mint(
@@ -156,7 +152,7 @@ def account_info(token: str) -> dict:
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:
         env.pop(key, None)
-    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    env[config.OAUTH_TOKEN_ENV] = token
     with tempfile.TemporaryDirectory(prefix="claude-man-verify-") as tmp:
         env["CLAUDE_CONFIG_DIR"] = tmp
         cp = subprocess.run(

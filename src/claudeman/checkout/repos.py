@@ -13,6 +13,7 @@ first: an auth failure echoes the remote URL, which may embed ``https://user:tok
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -28,6 +29,23 @@ _CREDS_RE = re.compile(r"([a-zA-Z][\w+.\-]*://)[^/@\s]+@")
 # A *shape* check only (no network probe): scp-style ``user@host:path`` OR any ``scheme://…``.
 # The real reachability test is the clone — this just stops obvious garbage at the modal boundary.
 _REPO_URL_RE = re.compile(r"^(?:[\w.\-]+@[\w.\-]+:[\w./\-~]+|[a-zA-Z][\w+.\-]*://\S+)$")
+
+
+# git is run non-interactively so a missing credential FAILS FAST instead of blocking on a terminal
+# prompt (which would hang the TUI/CLI), and every call is time-bounded so a wedged network can't
+# hang us — mirroring docker/runner._run's timeout-to-124 contract.
+_GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+_GIT_NET_TIMEOUT_S = 120    # clone / fetch (network-bound)
+_GIT_LOCAL_TIMEOUT_S = 30   # ff-merge (local, no network)
+
+
+def _run_git(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess:
+    """Run a git command non-interactively + time-bounded; map a timeout to a 124 result."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False,
+                              env=_GIT_ENV, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout:.0f}s")
 
 
 def mask_url_creds(text: str) -> str:
@@ -76,9 +94,9 @@ def clone_one(slug: str, repo: Repo) -> RepoResult:
         return RepoResult(repo.resolved_dir(), False, "refusing to clone: dir escapes workspace/")
     if (dest / ".git").exists():
         return RepoResult(repo.resolved_dir(), True, "already present")
-    cp = subprocess.run(
+    cp = _run_git(
         ["git", "clone", "--branch", repo.branch, repo.url, str(dest)],
-        capture_output=True, text=True, check=False,
+        timeout=_GIT_NET_TIMEOUT_S,
     )
     detail = mask_url_creds(cp.stderr or cp.stdout).strip()
     return RepoResult(repo.resolved_dir(), cp.returncode == 0, detail)
@@ -103,10 +121,7 @@ def fetch_all(project: Project) -> list[RepoResult]:
         if not (dest / ".git").exists():
             results.append(RepoResult(repo.resolved_dir(), False, "not cloned"))
             continue
-        cp = subprocess.run(
-            ["git", "-C", str(dest), "fetch", "--quiet"],
-            capture_output=True, text=True, check=False,
-        )
+        cp = _run_git(["git", "-C", str(dest), "fetch", "--quiet"], timeout=_GIT_NET_TIMEOUT_S)
         if cp.returncode == 0:
             results.append(RepoResult(repo.resolved_dir(), True, "fetched"))
         else:
@@ -134,9 +149,9 @@ def ff_merge_one(slug: str, repo: Repo) -> RepoResult:
         return RepoResult(rdir, False, "refusing to pull: dir escapes workspace/")
     if not (dest / ".git").exists():
         return RepoResult(rdir, False, "not cloned")
-    cp = subprocess.run(
+    cp = _run_git(
         ["git", "-C", str(dest), "merge", "--ff-only", "@{upstream}"],
-        capture_output=True, text=True, check=False,
+        timeout=_GIT_LOCAL_TIMEOUT_S,
     )
     detail = first_line(mask_url_creds(cp.stderr or cp.stdout))
     if cp.returncode == 0:

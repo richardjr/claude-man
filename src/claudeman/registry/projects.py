@@ -30,6 +30,7 @@ import dataclasses
 import os
 import tomllib
 from pathlib import Path
+from uuid import uuid4
 
 from .. import config
 from .schema import (
@@ -50,10 +51,12 @@ def _atomic_write(path: Path, text: str) -> None:
     The registry can be read on the TUI thread (the 2s projects poll) while it is written on
     another (the create worker), so a plain ``write_text`` truncate-then-write would expose a
     partial file mid-write. Writing a sibling temp file then ``os.replace`` (atomic on the same
-    filesystem) closes that window. The temp name includes the target name so distinct slugs
-    never collide; same-slug writers produce identical bytes, so a double replace is harmless.
+    filesystem) closes that window. The temp name is unique per write (pid + a random suffix) so two
+    concurrent writers of the SAME file — e.g. non-exclusive TUI ``@work`` threads, or a mutation
+    racing the poll — never share a temp path and clobber each other's half-written file before the
+    replace.
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
 
@@ -125,12 +128,6 @@ def load(slug: str) -> Project:
     with path.open("rb") as fh:
         data = tomllib.load(fh)
     return _parse(data, slug_hint=slug)
-
-
-def load_path(path: Path) -> Project:
-    with path.open("rb") as fh:
-        data = tomllib.load(fh)
-    return _parse(data, slug_hint=path.stem)
 
 
 def list_slugs() -> list[str]:

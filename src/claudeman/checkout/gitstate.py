@@ -185,14 +185,15 @@ def summarize(states: list[RepoState]) -> ProjectGitSummary:
         ok = n - bad
         line = f"✗ {bad} error" + (f"  {ok} ok" if ok else "")
         return ProjectGitSummary(line, tuple(states))
-    clean = sum(1 for s in states if s.present and _glyphs(s) == "✓")
+    present = [(s, _glyphs(s)) for s in states if s.present]  # _glyphs once per repo, not up to 3x
+    clean = sum(1 for _, g in present if g == "✓")
+    flagged = [(s, g) for s, g in present if g != "✓"]
     uncloned = sum(1 for s in states if not s.present)
-    flagged = [s for s in states if s.present and _glyphs(s) != "✓"]
     segs: list[str] = []
     if clean:
         segs.append(f"{clean} ✓")
-    for s in flagged:
-        segs.append(f"{s.dir}:{_glyphs(s)}")
+    for s, g in flagged:
+        segs.append(f"{s.dir}:{g}")
     if uncloned:
         segs.append(f"{uncloned} uncloned")
     return ProjectGitSummary("  ".join(segs) or "✓", tuple(states))

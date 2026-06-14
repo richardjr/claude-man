@@ -12,12 +12,7 @@ override is a possible later refinement. Pure stdlib — importable by the CLI/l
 
 from __future__ import annotations
 
-import os
-
 from . import config
-
-#: The env var name gh reads first (ahead of GITHUB_TOKEN). Injected pass-through, never as argv value.
-ENV_NAME = config.GH_TOKEN_ENV
 
 
 def load() -> str | None:
@@ -35,22 +30,11 @@ def is_set() -> bool:
 
 
 def save(token: str) -> None:
-    """Write ``token`` to the 0600 state file (mkdir parent 0700 first). Raises on an empty token.
-
-    The file is *created* 0600 via ``os.open`` (no brief world-readable window between write and
-    chmod), and a trailing ``chmod`` re-tightens a pre-existing file that ``O_CREAT`` won't re-mode."""
+    """Write ``token`` to the 0600 state file (parent 0700, no world-readable window). Raises on empty."""
     token = token.strip()
     if not token:
         raise ValueError("gh token must be a non-empty string")
-    path = config.gh_token_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, (token + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)  # tighten a pre-existing file (O_CREAT keeps the old mode)
+    config.write_secret_file(config.gh_token_path(), token + "\n")
 
 
 def clear() -> bool:

@@ -10,7 +10,6 @@ CLAUDE.md invariant 1. Pure stdlib; callers (lifecycle) hold the per-slug flock 
 from __future__ import annotations
 
 import json
-import os
 
 from . import config
 
@@ -32,15 +31,10 @@ def get(slug: str, name: str) -> str | None:
 
 
 def _write(slug: str, data: dict[str, str]) -> None:
-    """Atomically write the 0600 JSON store (create at 0600; re-tighten a pre-existing file)."""
-    path = config.project_env_path(slug)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(data, indent=2, sort_keys=True).encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
+    """Write the 0600 JSON store (parent 0700, no world-readable window)."""
+    config.write_secret_file(
+        config.project_env_path(slug), json.dumps(data, indent=2, sort_keys=True),
+    )
 
 
 def set(slug: str, name: str, value: str) -> None:  # noqa: A001 - mirrors dict.set ergonomics

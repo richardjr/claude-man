@@ -151,6 +151,8 @@ def _host_port_from_url(url: str) -> tuple[str, int | None]:
     never diverge between them. Bracketed IPv6 literals (``[::1]:443``) split correctly — the final
     ``:`` precedes the numeric port.
     """
+    if not url or url == "-":          # squid logs '-' for an early-denied request with no URL
+        return "", None
     host = url.split("://", 1)[-1]     # strip scheme for a plain-HTTP url
     host = host.split("/", 1)[0]       # drop any path
     h, sep, port = host.rpartition(":")

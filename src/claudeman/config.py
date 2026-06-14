@@ -258,10 +258,6 @@ def profile_token_path(name: str) -> Path:
     return profile_state_dir(name) / "token"
 
 
-def profile_identity_path(name: str) -> Path:
-    return profile_state_dir(name) / "identity.json"
-
-
 def profile_seed_dir(name: str) -> Path:
     """Canonical config seed copied into a new project's claude-config/."""
     return profile_state_dir(name) / "seed"
@@ -286,6 +282,25 @@ def gh_token_path() -> Path:
     State tier (NEVER the secret-free ``config.toml``, never synced). Global / opt-in: absent unless
     the operator sets one via ``config gh-token``. Mirrors ``profile_token_path``'s 0600 model."""
     return state_home() / "gh-token"
+
+
+def write_secret_file(path: Path, data: str | bytes) -> None:
+    """Write a ``0600`` secret file under a ``0700`` parent, with NO world-readable window.
+
+    One audited implementation for every state-tier secret store (the OAuth token, ``GH_TOKEN``, the
+    per-project env values). Create the parent ``0700``, open ``O_CREAT|O_TRUNC`` at ``0600`` so the
+    file is never briefly group/world-readable between write and chmod (a ``write_text`` then
+    ``chmod`` would leave that gap), write, then re-chmod ``0600`` to tighten a *pre-existing* file
+    (``O_CREAT`` keeps an existing file's mode)."""
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
 
 
 def managed_ssh_agent_sock() -> Path:

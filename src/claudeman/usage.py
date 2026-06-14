@@ -42,6 +42,15 @@ class Usage:
         self.sessions += other.sessions
 
 
+def _as_int(v) -> int:
+    """Coerce a transcript token field to int, tolerating a missing/None/non-numeric value (one bad
+    field must not abort the whole per-project scan)."""
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _scan_file(path) -> Usage:
     u = Usage()
     try:
@@ -59,13 +68,35 @@ def _scan_file(path) -> Usage:
                 usage = (rec.get("message") or {}).get("usage")
                 if not isinstance(usage, dict):
                     continue
-                u.input += int(usage.get("input_tokens") or 0)
-                u.output += int(usage.get("output_tokens") or 0)
-                u.cache_creation += int(usage.get("cache_creation_input_tokens") or 0)
-                u.cache_read += int(usage.get("cache_read_input_tokens") or 0)
+                u.input += _as_int(usage.get("input_tokens"))
+                u.output += _as_int(usage.get("output_tokens"))
+                u.cache_creation += _as_int(usage.get("cache_creation_input_tokens"))
+                u.cache_read += _as_int(usage.get("cache_read_input_tokens"))
                 u.messages += 1
     except OSError:
         return Usage()
+    return u
+
+
+# path -> (mtime_ns, size, Usage): an append-only transcript whose (mtime, size) are unchanged since
+# the last scan re-yields its cached Usage instead of re-parsing — the 15 s usage poll re-read and
+# re-parsed every JSONL from scratch each tick. Keyed by path (one entry per file, replaced on change),
+# so it stays bounded by the number of transcript files. The cached Usage is never mutated (callers
+# add it into a fresh accumulator).
+_SCAN_CACHE: dict[str, tuple[int, int, Usage]] = {}
+
+
+def _scan_file_cached(path) -> Usage:
+    try:
+        st = path.stat()
+    except OSError:
+        return _scan_file(path)
+    sp = str(path)
+    ent = _SCAN_CACHE.get(sp)
+    if ent is not None and ent[0] == st.st_mtime_ns and ent[1] == st.st_size:
+        return ent[2]
+    u = _scan_file(path)
+    _SCAN_CACHE[sp] = (st.st_mtime_ns, st.st_size, u)
     return u
 
 
@@ -77,7 +108,7 @@ def project_usage(slug: str) -> Usage:
         return total
     files = list(root.rglob("*.jsonl"))
     for path in files:
-        total.add(_scan_file(path))
+        total.add(_scan_file_cached(path))
     total.sessions += len(files)
     return total
 

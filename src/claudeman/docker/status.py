@@ -8,6 +8,7 @@ DEFINED; with a stopped container STOPPED; running UP.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -55,6 +56,8 @@ class Row:
 
 def query_containers() -> dict[str, ContainerStatus]:
     """Map slug -> ContainerStatus for every claude-man container (running or not)."""
+    if shutil.which("docker") is None:  # no docker == no containers (matches images.py / stats.py)
+        return {}
     cp = subprocess.run(
         ["docker", "ps", "-a", "--filter", labels.SELECTOR, "--format", "{{json .}}"],
         capture_output=True, text=True, check=False,
