@@ -81,7 +81,7 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 | SYNC-4 | `syncback/denylist.py:19-53` | `settings.local.json` is in neither DENY_PATHS nor SYNC_ARTIFACTS (safe only because reads are allowlist-driven). | DONE (records — added to DENY_PATHS) |
 | SYNC-6 | `syncback/denylist.py:19-53` | `debug/` and `todos/` are excluded only by being unlisted, not denied; invariant 5 also names legacy `tasks/` but not the current `todos/`. | DONE (records — added to DENY_PATHS) |
 | TUI-4 | `tui/app.py:103-114` | `action_toggle_running` re-queries docker (redundant blocking call + benign TOCTOU). | DONE (Phase 1 — cached-row reads) |
-| TUI-5 | `tui/screens/{logs,create,sync_review}.py`; `ROADMAP.md:22` | logs/create/sync screens are pure stubs; ROADMAP line 22 bundles a stubbed logs pane under a `[x]` box. | DONE (records — ROADMAP split) |
+| TUI-5 | `tui/screens/{logs,create,sync_review}.py`; `ROADMAP.md:22` | logs/create/sync screens are pure stubs; ROADMAP line 22 bundles a stubbed logs pane under a `[x]` box. | DONE (create/sync landed in their phases; live log streaming `LogsScreen` landed 2026-06-14) |
 | TUI-6 | `tui/app.py:78-101`; `status.py:111-117` | Actions fire on orphan rows (container, no registry entry) with no guard/distinct UX. | DONE (Phase 3 — orphan guards) |
 | TUI-7 | `tui/app.py:65-76` | Cursor restore by integer index snaps to row 0 when the selected row vanishes from a shrinking, slug-sorted table. | DONE (Phase 1-min) |
 

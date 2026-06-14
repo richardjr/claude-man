@@ -402,5 +402,24 @@ class RunnerStopTest(unittest.TestCase):
         self.assertIn("timed out", cp.stderr)
 
 
+class LogsArgvTest(unittest.TestCase):
+    """The log-stream argv is rendered by a pure builder (TUI-5) so it's pinned without a daemon."""
+
+    def test_default_follows_with_bounded_tail_and_timestamps(self) -> None:
+        argv = runner.build_logs_argv("demo")
+        self.assertEqual(argv[:2], ["docker", "logs"])
+        self.assertIn("-f", argv)                                   # follows new lines
+        self.assertIn("--timestamps", argv)                        # keeps stdout/stderr ordered
+        self.assertEqual(argv[argv.index("--tail") + 1], "200")    # bounded backfill
+        self.assertEqual(argv[-1], config.container_name("demo"))   # container is the final positional
+
+    def test_follow_false_drops_dash_f(self) -> None:
+        self.assertNotIn("-f", runner.build_logs_argv("demo", follow=False))
+
+    def test_custom_tail_is_stringified(self) -> None:
+        argv = runner.build_logs_argv("demo", tail=10)
+        self.assertEqual(argv[argv.index("--tail") + 1], "10")
+
+
 if __name__ == "__main__":
     unittest.main()

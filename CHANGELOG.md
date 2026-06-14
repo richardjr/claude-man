@@ -6,6 +6,12 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Live container-log viewer** (Phase 1 / TUI-5): View… → **Logs** opens a near-full-screen
+  `LogsScreen` that streams a project's `docker logs --tail 200 --timestamps -f` into a `RichLog`
+  via an off-UI-thread follower worker. The argv is a pure, unit-tested `runner.build_logs_argv`;
+  the follower subprocess is reaped (`terminate`→`kill`) when the screen is dismissed or the app
+  exits, so no `docker logs -f` leaks. Read-only (it never writes to the container). Replaces the
+  old placeholder that only focused the status pane.
 - **Sync-back** (Phase 5, invariant 5): a review-gated three-way merge that flows accepted
   in-container `~/.claude` changes (new skills/agents/commands, edited `settings.json`) back into
   the operator's real global host `~/.claude`, so improvements made in one project benefit all.

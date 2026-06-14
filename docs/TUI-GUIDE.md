@@ -98,7 +98,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 |---|---|
 | `n` | New project |
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
-| `v` | View… → `u` Refresh usage · `l` Focus logs |
+| `v` | View… → `u` Refresh usage · `l` Logs (live `docker logs -f`, escape/q to close) |
 | `,` | Settings (ssh keys · git identity · GH token · terminal) |
 | `q` | Quit immediately — containers keep running |
 

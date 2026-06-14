@@ -33,6 +33,7 @@ from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
 from .screens.env_mounts import EnvMountsScreen
+from .screens.logs import LogsScreen
 from .screens.menu import MenuScreen
 from .screens.packs import PacksScreen
 from .screens.ports import PortsScreen
@@ -131,7 +132,7 @@ class ClaudeManApp(App):
     ]
     _VIEW_MENU = [
         ("u", "Refresh usage", "refresh_usage"),
-        ("l", "Focus logs", "focus_logs"),
+        ("l", "Logs (live)", "logs"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -850,11 +851,15 @@ class ClaudeManApp(App):
             res = lifecycle.Result(False, f"stop failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
-    def action_focus_logs(self) -> None:
+    def action_logs(self) -> None:
         slug = self._current_slug()
-        if slug:
-            self.query_one("#log", RichLog).focus()
-            self._log(f"(phase 1) live log streaming for {slug} — see screens/logs.py")
+        if not slug:
+            return
+        row = next((r for r in self._last_rows if r.slug == slug), None)  # cached join — no UI-thread docker ps
+        if row is not None and row.kind == status.DEFINED:
+            self._log(f"[yellow]{slug}: no container yet — start it first to see logs[/]")
+            return
+        self.push_screen(LogsScreen(slug))
 
     def on_data_table_row_selected(self, event) -> None:
         # Enter on a row opens a shell. The app-level `enter` binding is shadowed by DataTable's
@@ -918,7 +923,7 @@ class ClaudeManApp(App):
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
-            "focus_logs": self.action_focus_logs,
+            "logs": self.action_logs,
         }.get(token)
         if handler is not None:
             handler()

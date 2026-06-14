@@ -354,6 +354,21 @@ def exec_write_file(slug: str, container_path: str, data: bytes, *, mode: str = 
         return subprocess.CompletedProcess([], 127, stdout=b"", stderr=b"docker not found")
 
 
+def build_logs_argv(slug: str, *, tail: int = 200, follow: bool = True) -> list[str]:
+    """Pure argv for streaming a container's logs (unit-testable without a daemon).
+
+    ``--timestamps`` keeps interleaved stdout/stderr ordered; ``--tail`` bounds the initial backfill
+    so a long-lived container doesn't flood the viewer. ``follow`` adds ``-f`` to stream new lines
+    (the TUI Logs screen reaps the process on dismiss, so no follower leaks). On a STOPPED container
+    ``docker logs`` prints what's there and exits even with ``-f``; on a missing one it errors to
+    stderr (the viewer merges it in)."""
+    argv = ["docker", "logs", "--tail", str(tail), "--timestamps"]
+    if follow:
+        argv.append("-f")
+    argv.append(config.container_name(slug))
+    return argv
+
+
 def start(slug: str) -> subprocess.CompletedProcess:
     return _run(["docker", "start", config.container_name(slug)])
 

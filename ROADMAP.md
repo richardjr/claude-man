@@ -56,7 +56,7 @@ neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeSc
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
-Commits from fugitive/gitsigns carry the injected git identity. 593 dependency-free
+Commits from fugitive/gitsigns carry the injected git identity. 596 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git + nvim probes).
 
@@ -76,11 +76,12 @@ test endpoint inside a container is reachable on the host, and **edit/commit in 
 LANDED 2026-06-13, committed 2026-06-14** (review-gated three-way merge into the host `~/.claude` —
 `sync plan`/`sync review` + the TUI gate). **Phase 6 (curated packs — [`docs/PACKS.md`](docs/PACKS.md)):
 6a LANDED 2026-06-11, 6b LANDED 2026-06-12** (library + schema + materializer + CLI + the /workspace
-launch default, then the TUI Packs… checklist screen + create-modal Language field). The
-one-claude-per-container guard (SEC-3) and CLI slug validation (SEC-6) are DONE (2026-06-10).
+launch default, then the TUI Packs… checklist screen + create-modal Language field). **TUI-5 (live
+container-log streaming): LANDED 2026-06-14** (a `docker logs -f --tail --timestamps` follower pane
+— View… → Logs — reaped on dismiss). The one-claude-per-container guard (SEC-3) and CLI slug
+validation (SEC-6) are DONE (2026-06-10).
 
-**Next up:** **TUI-5 (live log streaming)** — a `docker logs -f` follower pane, the last true
-Phase-1 stub. **Then:** Phase 6c (deeper curation — port the operator's existing skills into
+**Next up:** **Phase 6c** (deeper curation — port the operator's existing skills into
 `library/packs/`); the projects-table `docker events` push-refresh (the async off-UI-thread `docker
 ps` worker (TUI-2) is DONE — only the event-driven trigger remains); and the deferred hardening
 items — **BUG-2** (per-label `docker inspect`, latent today) and **IMG-4** (`COREPACK_HOME`/uv-cache
@@ -151,7 +152,7 @@ SEC-2, IMG-2/5, IMG-3.)
 - [x] `tui/app.py`: live JOIN + DEFINED→create+start with surfaced errors (TUI-1), `enter`→shell (TUI-3), cursor-by-slug (TUI-7), async off-UI-thread `docker ps` worker (TUI-2 — `@work(thread=True, exclusive)`), single post-action refresh (TUI-4). The only remaining bit is the `docker events` push-refresh (tracked under Phase 2)
 - [x] `tui/screens/create.py`: `n`→new-project modal (slug/profile/overlay/egress; inline slug validation + duplicate guard; runs `lifecycle.create_project` in a thread worker that converts every failure to a red `Result`). **Repos/env/allowlist capture deferred** — `create_project` has no `repos` param yet (see Phase 3)
 - [x] `tui/terminals.py`: detached terminal spawn — settings-driven launcher table (ghostty/alacritty/kitty/wezterm/foot/gnome-terminal/konsole/xterm + macOS Terminal.app/iTerm2 + WSL2 wt, or a custom template) (**SEC-6** done: slug validated at the CLI argparse boundary *and* in `_inner_exec` before the keep-open shell string)
-- [~] logs pane streaming `docker logs -f` — `screens/logs.py` still a stub (TUI-5)
+- [x] **TUI-5** logs pane streaming `docker logs -f` — `screens/logs.py` `LogsScreen` (View… → Logs): an `@work(thread=True, exclusive, group="logs")` follower over the pure `runner.build_logs_argv` (`--tail 200 --timestamps -f`), lines pushed via `self.app.call_from_thread`, the subprocess reaped (`terminate`→`kill`) in `on_unmount` so no follower leaks
 - [x] Auth: `profiles.load_token(name)` injects a `0600` token file as `CLAUDE_CODE_OAUTH_TOKEN`; minted by `profile add` (Phase 2); `ANTHROPIC_*` scrubbed incl. `env_file` (0.5)
 - [x] **SEC-3:** "one claude per container" enforced in `terminals.spawn_claude` (a /proc comm probe via `docker exec`; fails open on probe errors; both the CLI and TUI spawn paths go through it)
 - [x] **In-container git identity + GitHub CLI (under `--read-only` rootfs):** `git commit` failed

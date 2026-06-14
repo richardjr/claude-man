@@ -493,8 +493,11 @@ recreate re-renders squid.conf); and **promote-blocked** (a picker over `egress.
 sidecar's access log — pick a destination the proxy actually denied straight into the allowlist, the common
 tuning loop). The per-destination CLI readout stays at `project egress-log`.
 
-- **Logs:** a `RichLog` fed by a worker running `docker logs -f --tail 200 --timestamps`; the
-  follower is reaped on container switch and app shutdown.
+- **Logs:** View… → Logs opens a `LogsScreen` modal — a `RichLog` fed by a `@work(thread=True,
+  exclusive, group="logs")` worker running `docker logs --tail 200 --timestamps -f` (argv from the
+  pure, unit-tested `runner.build_logs_argv`), lines pushed via `self.app.call_from_thread`. The
+  follower subprocess is reaped (`terminate`→`kill`) in `on_unmount`, so dismissing the screen or
+  quitting the app never leaks a `docker logs -f`. Read-only — it never writes to the container.
 - **Terminal spawn** (`tui/terminals.py`): a **separate OS window** (not `suspend()`), launched
   detached via `Popen(..., start_new_session=True)`. The emulator is chosen from a **settings-driven
   per-platform launcher table**: on Linux 8 built-ins (`ghostty`, `alacritty`, `kitty`, `wezterm`,
