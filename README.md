@@ -82,6 +82,7 @@ large `yarn`/`npm` installs in `/workspace` take noticeably longer.
   profiles/<name>/identity.json scrubbed oauthAccount block (no UUIDs)
   profiles/<name>/seed/         allowlisted ~/.claude assets new projects inherit
   projects/<slug>/workspace/    the checked-out repos  ->  bind /workspace
+  projects/<slug>/workspace/scratch/  data drop-zone -> /workspace/scratch (wiped on start+stop)
   projects/<slug>/claude-config/ per-project CLAUDE_CONFIG_DIR  ->  bind /home/agent/.claude
   projects/<slug>/packs-manifest.json  which files the pack system manages (ours/theirs boundary)
   sync-audit/                   git repo: per-session commit of accepted sync-back
@@ -304,6 +305,13 @@ uv run claudemanctl project env list demo
 uv run claudemanctl project resync demo        # re-validate sources + re-seed ssh (no recreate)
 uv run claudemanctl project env rm demo /home/agent/.netrc            # by container dst or 'ssh'
 ```
+
+For **ad-hoc** file transfer (no recreate, nothing persisted) use the scratch dir instead of a `file`
+mount: every container gets **`/workspace/scratch/`**, a known drop-zone backed by
+`~/.local/state/claude-man/projects/<slug>/workspace/scratch/` on the host (open it from the TUI's
+Browse action, `b`). Drop files in while the container runs and tell the agent to "check the data" —
+an injected `CLAUDE.md` note points it at `/workspace/scratch/`. It is **wiped on every start and
+stop**, so it never persists; keep durable work in a repo under `/workspace/`.
 
 Projects launch `claude`/shell at **`/workspace`** (`docker exec -w`) — the uniform anchor where the
 workspace `CLAUDE.md` (and any pack-injected guidance) lives; set `[project] workdir = "<subdir>"` in

@@ -64,6 +64,12 @@ CONTAINER_CLAUDE_CONFIG = "/home/agent/.claude"   # = CLAUDE_CONFIG_DIR in the c
 CONTAINER_CACHE = "/home/agent/.cache"
 CONTAINER_STATE = "/home/agent/.cache/state"      # XDG_STATE_HOME (under the writable .cache tmpfs)
 CONTAINER_WORKSPACE = "/workspace"
+# Per-session scratch / data-transfer dir, a SUBDIR of the /workspace bind (NOT a new mount — so the
+# hardened floor is byte-identical, invariant 2). A known drop-zone for moving files in/out of the
+# container; lifecycle WIPES it on every start and stop, so it never persists. The injected CLAUDE.md
+# note points the agent here for "provided files" (scratch.py).
+SCRATCH_DIRNAME = "scratch"
+CONTAINER_SCRATCH = CONTAINER_WORKSPACE + "/" + SCRATCH_DIRNAME
 # Optional persistent shell-history bind (opt-in via `config shell-history on`): a per-project
 # state-tier dir bound here read-write so $HISTFILE survives recreate. Dedicated path (NOT under the
 # read-only ~/.local/bin claude install, NOT the XDG_STATE tmpfs) — the ONLY writable surface beyond
@@ -221,6 +227,15 @@ def project_state_dir(slug: str) -> Path:
 def workspace_dir(slug: str) -> Path:
     """Host dir bind-mounted to /workspace; holds the checked-out repos."""
     return project_state_dir(slug) / "workspace"
+
+
+def scratch_dir(slug: str) -> Path:
+    """Per-session scratch / data-transfer dir inside the /workspace bind (== CONTAINER_SCRATCH).
+
+    A subdir of the existing workspace bind — NOT a new mount, so the hardened floor (invariant 2) is
+    unchanged. ``lifecycle`` wipes + recreates it on every container start/stop, so anything dropped
+    here is ephemeral; durable work belongs in a repo under workspace/."""
+    return workspace_dir(slug) / SCRATCH_DIRNAME
 
 
 def claude_config_dir(slug: str) -> Path:

@@ -189,6 +189,16 @@ picks up Windows Terminal); change it in Settings (`,` → `e`) or with
 already running (two would race on `.claude.json`). A second *shell* is always fine — but
 don't launch `claude` by hand from that shell; the guard can't see a future one.
 
+**Hand the agent a file — the scratch dir.** Every running container has
+**`/workspace/scratch/`**, a known drop-zone for moving files in and out. The quickest way in:
+press `b` to open the workspace in your file manager, drop the file into `scratch/`, then in
+Claude say *"check the data"* (or *"look in the scratch dir"*) — an injected `CLAUDE.md` note
+already points the agent at `/workspace/scratch/`. Files the agent writes there are picked up
+the same way. **It is wiped on every start and stop**, so copy things in *while the container
+is running* and grab any outputs before you stop it; nothing in `scratch/` survives a session.
+Keep durable work in a repo under `/workspace/`. (Need a file present *persistently* and
+read-only instead? Use a `file` env-mount — section 7.)
+
 ## 5. Git identity + GitHub CLI (`,` → `g`, `,` → `t`)
 
 So the agent can `git commit` and use `gh` from inside the read-only container.

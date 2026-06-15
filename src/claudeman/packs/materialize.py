@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
+from .. import claudemd, config
 from ..registry.schema import Project
 from . import library
 
@@ -63,40 +63,12 @@ class RefreshReport:
 # Pure pieces (unit-tested without a filesystem)
 # ---------------------------------------------------------------------------
 def patch_block(text: str, lines: list[str]) -> str:
-    """Replace (or append) the claude-man-owned fenced block in a CLAUDE.md body. Pure + idempotent.
-
-    Empty ``lines`` removes the block entirely. A start marker with no end marker (a corrupted
-    edit) is healed by treating everything from the start marker to EOF as the old block —
-    operator content above it is preserved; content below a half-deleted marker is
-    indistinguishable from old block content and is dropped with the block.
-    """
-    out: list[str] = []
-    rows = text.splitlines()
-    i = 0
-    found = False
-    while i < len(rows):
-        row = rows[i]
-        if row.lstrip().startswith(_START_PREFIX):
-            found = True
-            j = i + 1
-            while j < len(rows) and not rows[j].lstrip().startswith(_END_PREFIX):
-                j += 1
-            i = j + 1  # past the end marker (or EOF when unterminated)
-            continue
-        out.append(row)
-        i += 1
-    while out and not out[-1].strip():
-        out.pop()
-    if lines:
-        if out:
-            out.append("")
-        out.extend([BLOCK_START, *lines, BLOCK_END])
-    body = "\n".join(out)
-    if not body:
-        return ""
-    if found or lines:
-        return body + "\n"
-    return text  # untouched input (no block, no selection) — byte-identical round-trip
+    """Patch the packs ``@``-import block into a CLAUDE.md body — the shared managed-block patcher
+    (``claudemd.patch_block``) bound to the packs markers. Empty ``lines`` removes the block;
+    operator content outside the markers is preserved; the block is rewritten in place (so it
+    coexists with the scratch-dir block without either migrating). See ``claudemd``."""
+    return claudemd.patch_block(text, lines, begin=BLOCK_START, end=BLOCK_END,
+                                begin_prefix=_START_PREFIX, end_prefix=_END_PREFIX)
 
 
 def block_lines(selection: tuple[str, ...], lib: dict[str, library.Pack]) -> list[str]:

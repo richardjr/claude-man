@@ -217,6 +217,17 @@ tmpfs. `--pids-limit` is **1024** (not small): claude forks Bash, ripgrep, MCP s
 low limit silently breaks parallel tool calls. `no-new-privileges` + `--cap-drop ALL` is exactly
 why the firewall is a network-layer sidecar.
 
+**The scratch / data-transfer dir (`/workspace/scratch`).** A known drop-zone for copying files in
+and out of a container. It is a **subdir of the existing `/workspace` bind — not a new mount**, so
+the hardened floor is byte-identical (invariant 2 holds; `scratch.py` touches no `docker create`
+argv). The lifecycle **wipes it on every container start and stop** (`scratch.clear`, containment-
+checked against the workspace bind, best-effort — a clear fault never blocks a start/stop), so it
+never persists across sessions: stage inputs there while the container runs, collect outputs before
+stop. `scratch.ensure_note` stamps a small claude-man-owned managed block into `/workspace/CLAUDE.md`
+on start (via the shared `claudemd.patch_block`, in place — it coexists with the packs block and
+preserves operator content) telling the agent to look there for "provided files". A repo whose dir
+would land under `scratch/` is refused at `project repo add` (it would be wiped).
+
 **The `.cache` tmpfs must be agent-owned.** Docker special-cases `/tmp` to sticky world-writable
 (`1777`), so it's writable for free — but a *named* tmpfs like `/home/agent/.cache` defaults to
 `root:root mode=755`, which uid 1000 cannot write. Left bare, `node`/`corepack` (`mkdir ~/.cache/node`),

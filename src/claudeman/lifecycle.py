@@ -19,7 +19,17 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import assets, config, env_secrets, gh_token, gitconfig, hostplatform, ssh_agent, updates
+from . import (
+    assets,
+    config,
+    env_secrets,
+    gh_token,
+    gitconfig,
+    hostplatform,
+    scratch,
+    ssh_agent,
+    updates,
+)
 from .checkout import gitstate, repos
 from .docker import images, runner, status
 from .network import allowlist as allowlist_mod
@@ -408,13 +418,17 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     # state is the agent-untouched reference) and BEFORE start (before the agent can touch anything).
     # Best-effort: a baseline fault must never block a start (Phase 5).
     _write_baseline_if_absent(project.slug, on_progress=on_progress)
+    # Per-session scratch dir: wipe it to a fresh empty state and (re)stamp the CLAUDE.md note that
+    # points the agent at it. After sync-in so the note layers on top of the operator's CLAUDE.md;
+    # before start so the agent sees an empty dir + the note from its first launch. Best-effort.
+    scratch_note = _scratch_prepare(project, on_progress=on_progress)
     cp = runner.start(project.slug)
     if cp.returncode != 0:
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
     if _has_ssh_mount(project):
         _seed_ssh(project.slug)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
     prefix = created.detail + "; " if "created" in created.detail else ""
-    return Result(True, f"{prefix}started {project.container}{packs_note}{sync_note}")
+    return Result(True, f"{prefix}started {project.container}{packs_note}{sync_note}{scratch_note}")
 
 
 def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
@@ -424,8 +438,9 @@ def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
     egress.stop_proxy(slug)  # remove the squid sidecar (best-effort; no-op for an open project)
     sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
+    scratch_note = _scratch_clear(slug)  # wipe the scratch dir at session end (best-effort)
     pending_note = _pending_syncback_note(slug)  # "N change(s) pending; review with sync review"
-    return Result(True, f"stopped {config.container_name(slug)}{sync_note}{pending_note}")
+    return Result(True, f"stopped {config.container_name(slug)}{sync_note}{scratch_note}{pending_note}")
 
 
 def stop_all(
@@ -496,6 +511,33 @@ def _sync_out(slug: str, *, on_progress: ProgressFn | None) -> str:
             on_progress(f"asset sync-out failed: {exc!r}")
         return f"; sync-out error: {exc}"
     return ("; " + rep.detail) if rep.detail else ""
+
+
+def _scratch_prepare(project: Project, *, on_progress: ProgressFn | None) -> str:
+    """Wipe the scratch dir + (re)stamp its CLAUDE.md note for the start path → a ``'; <note>'``
+    suffix (or ''). Never raises — a scratch fault must not block a container start."""
+    notes: list[str] = []
+    try:
+        for note in (scratch.clear(project.slug), scratch.ensure_note(project)):
+            if note:
+                notes.append(note)
+                if on_progress:
+                    on_progress(note)
+    except Exception as exc:  # noqa: BLE001 - never block start on a scratch fault
+        if on_progress:
+            on_progress(f"scratch prepare failed: {exc!r}")
+        return f"; scratch error: {exc}"
+    return ("; " + "; ".join(notes)) if notes else ""
+
+
+def _scratch_clear(slug: str) -> str:
+    """Wipe the scratch dir on stop → a ``'; <note>'`` suffix (or ''). Never raises (a fault mustn't
+    make a stop look failed)."""
+    try:
+        note = scratch.clear(slug)
+    except Exception as exc:  # noqa: BLE001 - a scratch-clear fault must not fail the stop
+        return f"; scratch error: {exc}"
+    return ("; " + note) if note else ""
 
 
 def sync(slug: str, *, direction: str, on_progress: ProgressFn | None = None) -> Result:
