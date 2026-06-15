@@ -304,6 +304,31 @@ provider's policy DATA varies._
 - [ ] **7c:** a `codex` provider + image overlay, validated against the hardened floor (`image smoke`); resolve the auth-kind divergence (single bearer vs refreshable JSON cred — needs research on Codex's auth/login flow; invariant 1 must still hold). `project create --agent codex`
 - [ ] **7d:** Codex sync-back policy (adversarially reviewed, like the Claude denylist) + pack content (`AGENTS.md` vs `CLAUDE.md`, its own config taxonomy)
 
+## Phase 8 — In-container dev environment (curated bash + nvim-on-start)
+**Goal:** make the in-container `shell` and `nvim` feel like the operator's host Arch/Omarchy bash —
+a git-aware prompt, the same history search, the `n` shortcut (which opens neovim with the file tree
+via the directory-arg hijack — 8b folded into this), and a shell-open banner explaining the setup.
+Full design: [`docs/DEVENV.md`](docs/DEVENV.md) (8a/8c/8d landed 2026-06-15; 8b dropped).
+
+_Key decisions: everything is BAKED, curated, network-free, floor-preserving — the same model as the
+already-baked `images/nvim/` config; the default path is invariant-2 byte-identical (read-only rc on
+the rootfs, all writes to the existing `.cache` tmpfs). No spawn-path change: `terminals._inner_exec`
+already execs a plain interactive `bash`, which sources a baked `~/.bashrc` (guarded with
+`[[ $- != *i* ]] && return` so the non-interactive exec probes are untouched). The host `n` =
+`nvim .`; the file tree shows because a DIRECTORY argument trips LazyVim's "start Neo-tree with
+directory" autocmd — bare `nvim` (no args) shows the dashboard. The container's curated nvim
+replicates both: a directory-arg hijack for `n`, plus a `VimEnter` side-panel `Neotree show` (reveal,
+don't focus) for the no-arg/single-file cases, guarded against git-editor/diff/stdin. claude-launching
+aliases are excluded (invariant 6). History is EPHEMERAL by default (`.cache` tmpfs, resets on
+recreate); a default-OFF `config shell-history on` adds one owner-pinned writable bind for
+persistence — the only, opt-in, documented invariant-2 relaxation. The operator's LOCAL nvim config
+is left untouched._
+
+- [x] **8a (landed 2026-06-15):** curated bash env baked into the base image — `images/bash/{bashrc,inputrc,starship.toml}` (the operator's `starship.toml` byte-for-byte; `inputrc` ↑/↓ history prefix-search + `$include /etc/inputrc`; rc with the `n` neovim fn, eza/git/zoxide aliases, fzf `Ctrl-R` via `fzf --bash`, starship prompt init). `starship/fzf/eza/zoxide/bat/bash-completion` from Trixie apt (`bat` symlinked over Debian's `batcat` — starship is packaged in Trixie, so no pinned-binary fetch). Shell env (EDITOR/STARSHIP_*/_ZO_DATA_DIR/MANPAGER/…) in the image ENV ONLY → inherited by `docker exec`, NO `runner.py` change, so the create-argv floor is byte-identical (invariant 2). NO claude/opencode alias (invariant 6); the rc bails on non-interactive shells FIRST so the comm/ssh/gitstate exec probes are untouched. Writable state (HISTFILE/zoxide db/starship cache) → `.cache` tmpfs (ephemeral; 8d adds opt-in persistence). 12 new static tests (`tests/test_bash_env.py`) + 4 new `image smoke base` probes (rc loads `n`, HISTFILE on tmpfs, starship runs, dev CLIs present) — **smoke GREEN on a real base rebuild; starship renders the git branch under `--read-only --user`**
+- [~] **8b: DROPPED (2026-06-15) — covered by `n`.** The host `n` = `nvim .`, and a directory argument already opens the curated nvim's neo-tree as the main view (neo-tree's netrw hijack, same end state as LazyVim's "start Neo-tree with directory"). So the operator gets the tree-on-open via `n` with no extra autocmd; a separate `VimEnter` side-panel was deemed redundant. The `<leader>e` toggle (8a) remains. (Bare `nvim` still opens the mini.starter dashboard — deliberate.)
+- [x] **8c (landed 2026-06-15):** shell-open banner — baked `images/bash/motd`, a standalone bash script on PATH (`/usr/local/bin/claude-man-motd`). Renders the boot-splash CLAUDE-MAN wordmark in the terracotta→ember gradient (per-row RGB byte-identical to `tui/splash.py::row_color`, an `ast`-based test pins the sync) + a cheat-sheet (`n`, `ls`/`lt`, `g`/`gcm`, `cd`, `Ctrl-R`/↑↓, `<leader>e`, `hints`), a DYNAMIC history line (ephemeral vs persistent from `CLAUDEMAN_HISTFILE`), and the starship git-status legend. The rc shows it on EVERY interactive shell on a real tty (the `-t 1` guard keeps non-tty exec probes silent), `hints` re-shows it, `CLAUDEMAN_NO_MOTD`/`NO_COLOR` honoured. Colour only on a tty
+- [x] **8d (landed 2026-06-15):** history persistence — `[shell] persist_history = false` (default OFF) in the general tier (`registry/settings.py`, mirroring `ui_splash`) + `set_shell_history` + `config shell-history on|off` CLI (+ `config show` line). When ON, `lifecycle.ensure_created` makes a per-project state-tier dir (`config.project_shell_dir`, 0700 = uid 1000) and `runner._render_shell_history` binds it read-WRITE at `CONTAINER_SHELL_HISTORY_DIR` + injects `CLAUDEMAN_HISTFILE` (the baked rc points `$HISTFILE` there; else ephemeral on the `.cache` tmpfs). The ONE opt-in writable surface beyond the floor — default OFF keeps the create-argv byte-identical (a floor test pins both paths). Recreate to apply (the bind is fixed at create)
+
 ---
 
 Legend: `[x]` done in scaffold · `[~]` partially scaffolded (structure + stubs) · `[ ]` not started.

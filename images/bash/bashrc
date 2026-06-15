@@ -1,0 +1,76 @@
+# claude-man curated bash rc (baked at /home/agent/.bashrc, read-only at runtime).
+#
+# Sourced by the interactive `docker exec ... bash` the launcher opens (tui/terminals.py). Mirrors
+# the operator's Arch/Omarchy bash: a starship git prompt, ↑/↓ history prefix-search + fzf Ctrl-R,
+# the `n` neovim shortcut, and the eza/zoxide aliases. Everything here is read-only on the rootfs;
+# the only writes (history, zoxide db, starship cache) target the writable .cache tmpfs. See
+# images/bash/ + docs/DEVENV.md (Phase 8a).
+#
+# HARD REQUIREMENT — bail on NON-interactive shells FIRST. claude-man drives the container through
+# non-interactive `docker exec sh -c` / `bash -c` probes (the one-claude comm probe, the ssh seed,
+# gitstate). rc logic must never run for those, so this guard stays the first effective line.
+[[ $- != *i* ]] && return
+
+# --- History --------------------------------------------------------------------------------------
+# Persistent when claude-man mounted a history bind (CLAUDEMAN_HISTFILE, set by `config shell-history
+# on`); otherwise ephemeral on the .cache tmpfs — shared across shells within one container's lifetime
+# and reset on `recreate` (same model as nvim shada). The read-only home cannot hold the default
+# ~/.bash_history either way.
+HISTFILE="${CLAUDEMAN_HISTFILE:-${XDG_CACHE_HOME:-$HOME/.cache}/bash_history}"
+HISTCONTROL=ignoreboth
+HISTSIZE=32768
+HISTFILESIZE=$HISTSIZE
+shopt -s histappend
+
+# --- Completion -----------------------------------------------------------------------------------
+if [[ ! -v BASH_COMPLETION_VERSINFO && -f /usr/share/bash-completion/bash_completion ]]; then
+  source /usr/share/bash-completion/bash_completion
+fi
+
+# --- Aliases (curated, container-safe subset of the operator's Omarchy set) ------------------------
+# File listing via eza, like the host (icons need the host terminal's nerd font).
+if command -v eza &>/dev/null; then
+  alias ls='eza -lh --group-directories-first --icons=auto'
+  alias lsa='ls -a'
+  alias lt='eza --tree --level=2 --long --icons --git'
+  alias lta='lt -a'
+fi
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Git shortcuts (the host set).
+alias g='git'
+alias gcm='git commit -m'
+alias gcam='git commit -a -m'
+alias gcad='git commit -a --amend'
+
+# `n`: neovim with the file tree (`nvim .`) like the host; `n <files>` opens those files.
+# Deliberately NO `claude`/`opencode` alias — launching claude from a shell would bypass the
+# host-side one-claude-per-container guard (CLAUDE.md invariant 6).
+n() { if [ "$#" -eq 0 ]; then command nvim .; else command nvim "$@"; fi; }
+
+# --- zoxide (smart `cd`; database on the .cache tmpfs via _ZO_DATA_DIR, set in the image env) ------
+if command -v zoxide &>/dev/null; then
+  eval "$(zoxide init bash)"
+  alias cd='zd'
+  zd() {
+    if   (( $# == 0 )); then builtin cd ~ || return
+    elif [[ -d $1 ]];   then builtin cd "$1" || return
+    else z "$@" || { echo "zoxide: no match for $*" >&2; return 1; }; fi
+  }
+fi
+
+# --- fzf (Ctrl-R fuzzy history, Ctrl-T file, Alt-C dir — Trixie's fzf supports `--bash`) -----------
+command -v fzf &>/dev/null && eval "$(fzf --bash)"
+
+# --- Prompt: starship (git branch + status; config baked at ~/.config/starship.toml) --------------
+command -v starship &>/dev/null && eval "$(starship init bash)"
+
+# --- Dev-shell banner (Phase 8c) — the funky boot-splash wordmark + a cheat-sheet (n, history, git
+# legend). Shown on EVERY interactive shell on a real terminal. The `-t 1` guard keeps non-tty execs
+# (the smoke/comm/ssh/gitstate probes) silent; `CLAUDEMAN_NO_MOTD` opts out; `hints` re-shows it.
+alias hints='claude-man-motd'
+if [[ -t 1 && -z "${CLAUDEMAN_NO_MOTD:-}" ]] && command -v claude-man-motd &>/dev/null; then
+  claude-man-motd
+fi

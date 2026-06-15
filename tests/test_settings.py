@@ -174,6 +174,18 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(s.terminal_program, "kitty")
         self.assertEqual(s.opener_command, ("open",))
 
+    def test_shell_history_defaults_off(self) -> None:
+        self.assertFalse(settings_registry.load().shell_persist_history)
+
+    def test_shell_history_roundtrip_and_coexists(self) -> None:
+        settings_registry.add_ssh_key("~/.ssh/a")        # an unrelated section to preserve
+        settings_registry.set_shell_history(True)
+        s = settings_registry.load()
+        self.assertTrue(s.shell_persist_history)
+        self.assertEqual(s.ssh_keys, ("~/.ssh/a",))      # preserved across the shell write
+        settings_registry.set_shell_history(False)
+        self.assertFalse(settings_registry.load().shell_persist_history)
+
 
 if __name__ == "__main__":
     unittest.main()

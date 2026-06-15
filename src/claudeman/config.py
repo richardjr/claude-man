@@ -64,6 +64,11 @@ CONTAINER_CLAUDE_CONFIG = "/home/agent/.claude"   # = CLAUDE_CONFIG_DIR in the c
 CONTAINER_CACHE = "/home/agent/.cache"
 CONTAINER_STATE = "/home/agent/.cache/state"      # XDG_STATE_HOME (under the writable .cache tmpfs)
 CONTAINER_WORKSPACE = "/workspace"
+# Optional persistent shell-history bind (opt-in via `config shell-history on`): a per-project
+# state-tier dir bound here read-write so $HISTFILE survives recreate. Dedicated path (NOT under the
+# read-only ~/.local/bin claude install, NOT the XDG_STATE tmpfs) — the ONLY writable surface beyond
+# the hardened floor, and only when the operator opts in (default off → byte-identical floor).
+CONTAINER_SHELL_HISTORY_DIR = "/home/agent/.persistent-history"
 CONTAINER_SSH_DIR = "/home/agent/.ssh"            # ssh-conditional writable tmpfs (known_hosts/config)
 CONTAINER_SSH_AGENT_SOCK = "/ssh-agent"           # forwarded host ssh-agent socket (path, not a secret)
 # Redirect git's global config + gh's config onto the writable .cache tmpfs — the rootfs is read-only,
@@ -238,6 +243,13 @@ def project_env_path(slug: str) -> Path:
 
 def backups_dir(slug: str) -> Path:
     return project_state_dir(slug) / "backups"
+
+
+def project_shell_dir(slug: str) -> Path:
+    """Host dir bound read-write to ``CONTAINER_SHELL_HISTORY_DIR`` when persistent shell history is
+    enabled (``config shell-history on``). State tier (holds only the operator's bash history, no
+    secret); created 0700 owned by the current uid so the in-container agent (uid 1000) can write it."""
+    return project_state_dir(slug) / "shell"
 
 
 def packs_manifest_path(slug: str) -> Path:

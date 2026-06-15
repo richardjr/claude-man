@@ -478,6 +478,11 @@ class Settings:
     terminal_command: tuple[str, ...] = ()  # program="custom": argv template ({title}/{class}/"{argv}")
     opener_command: tuple[str, ...] = ()    # custom 'open this path' argv (path appended); () -> auto
     ui_splash: bool = True               # show the TUI boot splash (any key skips; `config splash off`)
+    # In-container shell history: OFF -> ephemeral on the .cache tmpfs (resets on recreate); ON ->
+    # claude-man mounts a per-project state-tier writable bind for $HISTFILE so history survives
+    # recreate. The ONLY opt-in writable surface beyond the hardened floor (default off keeps the floor
+    # byte-identical, invariant 2); fixed at container create, so a change needs `recreate` to apply.
+    shell_persist_history: bool = False
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:

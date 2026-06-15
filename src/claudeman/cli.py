@@ -900,6 +900,8 @@ def cmd_config_show(args) -> int:
     print(f"terminal: {_terminal_summary(s)}")
     print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
     print(f"tui splash: {'on' if s.ui_splash else 'off'}")
+    print(f"shell history: {'persistent' if s.shell_persist_history else 'ephemeral'} "
+          "(recreate to apply)")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -1043,6 +1045,20 @@ def cmd_config_splash(args) -> int:
         return 0
     s = settings_registry.set_splash(args.state == "on")
     print(f"tui splash: {'on' if s.ui_splash else 'off'}")
+    return 0
+
+
+def cmd_config_shell_history(args) -> int:
+    from .registry import settings as settings_registry
+
+    if args.state is None:
+        on = settings_registry.load().shell_persist_history
+        print(f"shell history: {'persistent' if on else 'ephemeral'}")
+        return 0
+    s = settings_registry.set_shell_history(args.state == "on")
+    mode = "persistent" if s.shell_persist_history else "ephemeral"
+    print(f"shell history: {mode} — `recreate` a project to apply (the history bind is fixed at "
+          "container create)")
     return 0
 
 
@@ -1372,6 +1388,11 @@ def build_parser() -> argparse.ArgumentParser:
     csp = cfg.add_parser("splash", help="the TUI boot splash (any key skips it)")
     csp.add_argument("state", nargs="?", choices=("on", "off"))
     csp.set_defaults(func=cmd_config_splash)
+    csh = cfg.add_parser("shell-history",
+                         help="persist in-container shell history across recreate (default off; "
+                              "adds an opt-in writable bind — recreate to apply)")
+    csh.add_argument("state", nargs="?", choices=("on", "off"))
+    csh.set_defaults(func=cmd_config_shell_history)
     cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
     cg.add_argument("--name", help="set git user.name (overrides host inherit)")
     cg.add_argument("--email", help="set git user.email")

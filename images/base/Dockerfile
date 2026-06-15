@@ -26,10 +26,17 @@ ARG MARKSMAN_VERSION=2026-02-08
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
 # openssh-client provides `ssh` for in-container git-over-ssh when a project adds an `ssh` env-mount
 # (agent-forwarded — no keys baked or stored here).
+#
+# Shell dev environment (Phase 8a — see images/bash/ + docs/DEVENV.md): starship (git-aware prompt),
+# fzf (Ctrl-R history), eza (ls), zoxide (smart cd), bat (pager/man), bash-completion — all from
+# Trixie. Debian ships bat's binary as `batcat`; symlink a `bat` onto PATH so the alias + MANPAGER
+# work. These only affect the interactive shell; the hardened runtime floor is unchanged (invariant 2).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl git ripgrep nodejs npm openssh-client; \
+        ca-certificates curl git ripgrep nodejs npm openssh-client \
+        bash-completion starship fzf eza zoxide bat; \
+    ln -s /usr/bin/batcat /usr/local/bin/bat; \
     rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (`gh`) — not in Debian's repos, so install the pinned upstream .deb (arch-aware). Gives
@@ -165,6 +172,20 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     echo "baked parsers:"; ls /opt/nvim-parsers/parser/ | tr '\n' ' '; echo
 
+# --- Shell environment (curated bash: starship prompt + history search + host aliases) -----------
+# Baked dotfiles sourced by the interactive `docker exec ... bash` the launcher opens (terminals.py).
+# Mirrors the operator's Arch/Omarchy bash. All read-only on the rootfs; the rc's only writes
+# (history, zoxide db, starship cache) land on the .cache tmpfs (XDG_CACHE_HOME). The rc bails on
+# non-interactive shells FIRST, so the non-interactive exec probes are untouched. See images/bash/
+# + docs/DEVENV.md (Phase 8a). The .config dir already exists (agent-owned) from the nvim COPY above.
+COPY --chown=agent:agent images/bash/bashrc        /home/agent/.bashrc
+COPY --chown=agent:agent images/bash/inputrc       /home/agent/.inputrc
+COPY --chown=agent:agent images/bash/starship.toml /home/agent/.config/starship.toml
+# The dev-shell banner (Phase 8c): the funky boot-splash wordmark + a cheat-sheet, printed once per
+# container by the rc and re-shown via `hints`. On PATH, root-owned + read-only like every other tool.
+COPY images/bash/motd /usr/local/bin/claude-man-motd
+RUN chmod 0755 /usr/local/bin/claude-man-motd
+
 # Baked environment (also set explicitly at run time by docker/runner.py).
 # XDG_STATE_HOME points at the writable .cache tmpfs so claude's version-lock dir
 # (state/claude/locks) doesn't land on the read-only rootfs (review IMG-2). Non-persistent
@@ -180,7 +201,15 @@ ENV HOME=/home/agent \
     YARN_CACHE_FOLDER=/workspace/.yarn-cache \
     PATH=/home/agent/.local/bin:$PATH \
     USE_BUILTIN_RIPGREP=0 \
-    DISABLE_AUTOUPDATER=1
+    DISABLE_AUTOUPDATER=1 \
+    EDITOR=nvim \
+    VISUAL=nvim \
+    BAT_THEME=ansi \
+    MANROFFOPT=-c \
+    MANPAGER="sh -c 'col -bx | bat -l man -p'" \
+    STARSHIP_CONFIG=/home/agent/.config/starship.toml \
+    STARSHIP_CACHE=/home/agent/.cache/starship \
+    _ZO_DATA_DIR=/home/agent/.cache/zoxide
 
 LABEL claude-man.image="base" \
       claude-man.claude-version="${CLAUDE_VERSION}"

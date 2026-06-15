@@ -146,6 +146,21 @@ def _render_egress(project: Project) -> list[str]:
     return args
 
 
+def _render_shell_history(host_dir: str | None) -> list[str]:
+    """Render the opt-in persistent shell-history bind + its ``CLAUDEMAN_HISTFILE`` env. PURELY
+    ADDITIVE — like ``_render_ports``/``_render_egress`` it never emits a ``_HARDENING`` flag, so with
+    persistence OFF (``host_dir is None``, the default) this is empty and the hardened floor is
+    byte-identical (invariant 2; unit-pinned). With it ON: a read-WRITE bind of the per-project state
+    dir at ``CONTAINER_SHELL_HISTORY_DIR`` + ``CLAUDEMAN_HISTFILE`` so the baked rc points ``$HISTFILE``
+    at the bind (history survives recreate). The ONE opt-in writable surface beyond the floor — only
+    present when the operator runs ``config shell-history on``."""
+    if not host_dir:
+        return []
+    histfile = f"{config.CONTAINER_SHELL_HISTORY_DIR}/bash_history"
+    return ["-v", f"{host_dir}:{config.CONTAINER_SHELL_HISTORY_DIR}",
+            "-e", f"CLAUDEMAN_HISTFILE={histfile}"]
+
+
 def build_create_argv(
     project: Project,
     *,
@@ -159,6 +174,7 @@ def build_create_argv(
     file_env: dict[str, str] | None = None,
     ssh_auth_sock: str | None = None,
     git_env: dict[str, str] | None = None,
+    shell_history_host_dir: str | None = None,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
 
@@ -219,6 +235,7 @@ def build_create_argv(
     argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
     argv += _render_ports(project)
     argv += _render_egress(project)
+    argv += _render_shell_history(shell_history_host_dir)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
     argv += [project.image, "sleep", "infinity"]
@@ -292,6 +309,7 @@ def create(
     version: str = config.DEFAULT_CLAUDE_VERSION,
     created_iso: str,
     git_env: dict[str, str] | None = None,
+    shell_history_host_dir: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -313,7 +331,7 @@ def create(
     argv = build_create_argv(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
         file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
-        ssh_auth_sock=ssh_sock, git_env=git_env,
+        ssh_auth_sock=ssh_sock, git_env=git_env, shell_history_host_dir=shell_history_host_dir,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:

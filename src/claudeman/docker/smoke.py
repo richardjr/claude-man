@@ -93,6 +93,22 @@ def _base_probes() -> list[Probe]:
                "-c", "lua io.write(pcall(vim.treesitter.language.add, 'typescript') and 'ts-ok' or 'ts-fail')",
                "-c", "wshada!", "-c", "qa"],
               required=True, expect="ts-ok", timeout=20),
+        # Shell dev environment (Phase 8a) — the curated bash must load cleanly under the read-only
+        # rootfs. `bash -ic` forces an INTERACTIVE shell, which sources the baked ~/.bashrc; the rc
+        # bails on non-interactive shells, so the comm/ssh/gitstate exec probes are unaffected. A
+        # forbidden EROFS marker here would mean a starship/zoxide/fzf init wrote to the read-only fs.
+        Probe("bash rc loads (`n` fn)", ["bash", "-ic", "type n"],
+              required=True, expect="n is a function"),
+        # History defaults to the writable .cache tmpfs (the read-only home can't hold ~/.bash_history).
+        Probe("bash HISTFILE on tmpfs", ["bash", "-ic", 'printf "%s" "$HISTFILE"'],
+              required=True, expect="/home/agent/.cache/bash_history"),
+        # starship (the git-aware prompt) must resolve + run as uid 1000.
+        Probe("starship present", ["sh", "-lc", "command -v starship && starship --version"],
+              required=True, expect="starship "),
+        # The supporting CLIs must be on PATH (bat is the baked /usr/local/bin symlink over batcat).
+        Probe("dev CLIs present (eza/zoxide/fzf/bat)",
+              ["sh", "-lc", "command -v eza && command -v zoxide && command -v fzf && command -v bat"],
+              required=True, expect="/usr/local/bin/bat"),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]

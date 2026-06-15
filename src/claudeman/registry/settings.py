@@ -44,6 +44,7 @@ def _parse(data: dict) -> Settings:
     terminal = data.get("terminal", {}) or {}
     opener = data.get("opener", {}) or {}
     ui = data.get("ui", {}) or {}
+    shell = data.get("shell", {}) or {}
     program = str(terminal.get("program", "") or "")
     command = _argv_list(terminal, "command", "terminal.command")
     # Same coercion philosophy as the channel: a hand-edited custom template missing its '{argv}'
@@ -62,6 +63,7 @@ def _parse(data: dict) -> Settings:
         terminal_command=command,
         opener_command=_argv_list(opener, "command", "opener.command"),
         ui_splash=bool(ui.get("splash", True)),
+        shell_persist_history=bool(shell.get("persist_history", False)),
     )
 
 
@@ -105,6 +107,9 @@ def save(settings: Settings) -> Path:
     ui = tomlkit.table()
     ui["splash"] = bool(settings.ui_splash)
     doc["ui"] = ui
+    shell = tomlkit.table()
+    shell["persist_history"] = bool(settings.shell_persist_history)
+    doc["shell"] = shell
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +177,15 @@ def set_opener(command: list[str] | tuple[str, ...]) -> Settings:
 def set_splash(enabled: bool) -> Settings:
     """Enable/disable the TUI boot splash."""
     updated = dataclasses.replace(load(), ui_splash=bool(enabled))
+    save(updated)
+    return updated
+
+
+def set_shell_history(enabled: bool) -> Settings:
+    """Enable/disable persistent in-container shell history (a per-project writable bind for
+    ``$HISTFILE`` — the opt-in writable surface; default off keeps the hardened floor byte-identical).
+    Takes effect on the next ``recreate`` (the bind is fixed at container create)."""
+    updated = dataclasses.replace(load(), shell_persist_history=bool(enabled))
     save(updated)
     return updated
 

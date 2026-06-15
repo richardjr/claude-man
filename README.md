@@ -7,9 +7,10 @@
 A Python **Textual TUI** + a scriptable **`claudemanctl`** CLI that provisions, persists, and
 manages **hardened Docker containers**, each running **Claude Code** under a chosen **account
 profile** (e.g. work / home), for a set of long-lived **git-checkout projects** on a single
-host.
+host. Each container is a **working hardened dev environment** — a curated shell and editor you
+can work in alongside the agent, not just a box the agent runs in.
 
-It exists to solve five things at once:
+It exists to solve six things at once:
 
 1. **Multiple accounts** — launch each Claude instance under a chosen profile. A profile is one
    OAuth identity minted once with `claude setup-token` and injected per-launch as
@@ -29,6 +30,16 @@ It exists to solve five things at once:
    (agents, skills, slash-commands, `settings.json`, MCP servers, memory, `CLAUDE.md`) are
    diffed against a baseline and offered back to your host config behind an **accept/reject
    gate**. Credentials and identity are **never** synced.
+6. **A working dev environment** — every container is also a curated **hardened dev shell** you
+   (not just the agent) work in: a starship git-aware prompt, prefix + fuzzy (`Ctrl-R`) history
+   search, the `n` neovim shortcut (file tree on open), and `eza`/`zoxide`/`fzf`/`bat` — plus a
+   baked neovim with LSP/treesitter. A shell-open banner sums up the keys; bash history is
+   ephemeral by default and persistable with the opt-in `config shell-history`. All baked
+   read-only — the hardened floor is unchanged.
+
+<p align="center">
+  <img src="docs/images/shell-banner.png" alt="claude-man dev-shell banner — the CLAUDE MAN block wordmark over a cheat-sheet of shell commands (n, ls/lt, g/gcm, Ctrl-R), history mode, and the git-prompt legend" width="680">
+</p>
 
 > Status: **alpha — phases 0–4 + 6 working, 5 planned** (2026-06-12). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
@@ -37,10 +48,12 @@ It exists to solve five things at once:
 > add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
 > files into a container; publish service ports; **lock a project to strict egress** (a squid
 > allowlist proxy on a no-direct-route network); select **curated packs** of CLAUDE.md guidance +
-> skills per project (defaults by language, drift-tracked, applied live) — all from both the CLI
-> and the TUI.
+> skills per project (defaults by language, drift-tracked, applied live); and open a **curated
+> hardened dev shell** (starship git-prompt, prefix + `Ctrl-R` history search, `n` for neovim,
+> `eza`/`zoxide`/`fzf`/`bat`, a shell-open cheat-sheet banner, opt-in persistent history) + a baked
+> neovim in any container — all from both the CLI and the TUI.
 > **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 553 dependency-free tests; the hardened image is
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 632 dependency-free tests; the hardened image is
 > `image smoke`-gated.
 
 ## Platform support

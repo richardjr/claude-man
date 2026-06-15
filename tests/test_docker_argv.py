@@ -421,5 +421,35 @@ class LogsArgvTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--tail") + 1], "10")
 
 
+class ShellHistoryRenderTest(unittest.TestCase):
+    """Opt-in persistent shell history (Phase 8d) adds exactly a -v bind + CLAUDEMAN_HISTFILE, and
+    NEVER alters the hardened floor — default OFF is byte-identical (invariant 2)."""
+
+    def _argv(self, host_dir=None):
+        return runner.build_create_argv(
+            _project(), profile_name="work", created_iso="t",
+            claude_config_path="/cfg", workspace_path="/ws",
+            shell_history_host_dir=host_dir,
+        )
+
+    def test_off_by_default_floor_byte_identical(self) -> None:
+        a0 = self._argv()  # the default (None) — no bind/env, floor intact
+        self.assertTrue(_contains_sublist(a0, runner._HARDENING))
+        self.assertNotIn(config.CONTAINER_SHELL_HISTORY_DIR, " ".join(a0))
+        self.assertFalse(any(t.startswith("CLAUDEMAN_HISTFILE=") for t in a0))
+
+    def test_on_adds_exactly_the_rw_bind_and_histfile_env(self) -> None:
+        a0 = self._argv()
+        a1 = self._argv("/state/landarna/shell")
+        self.assertTrue(_contains_sublist(a1, runner._HARDENING))  # floor still present + contiguous
+        # Net-new tokens are exactly the bind value + the HISTFILE env (the -v/-e flags pre-exist).
+        self.assertEqual(set(a1) - set(a0), {
+            f"/state/landarna/shell:{config.CONTAINER_SHELL_HISTORY_DIR}",
+            f"CLAUDEMAN_HISTFILE={config.CONTAINER_SHELL_HISTORY_DIR}/bash_history",
+        })
+        # Read-WRITE bind (no :ro) so the agent can persist its history.
+        self.assertNotIn(f"/state/landarna/shell:{config.CONTAINER_SHELL_HISTORY_DIR}:ro", a1)
+
+
 if __name__ == "__main__":
     unittest.main()

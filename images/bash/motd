@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# claude-man dev-shell banner (Phase 8c — docs/DEVENV.md).
+#
+# Printed ONCE per container by the baked ~/.bashrc (a tmpfs marker gates it); re-shown any time with
+# `hints`. Echoes the TUI boot splash: the CLAUDE-MAN block wordmark in the terracotta→ember gradient
+# (the per-row RGB matches tui/splash.py::row_color), then a cheat-sheet for the curated shell. The
+# HISTORY line is dynamic — it reads CLAUDEMAN_HISTFILE (set only when `config shell-history on`
+# mounted a persistent history bind) to report ephemeral vs persistent.
+
+# Colour only on a real terminal (and not under NO_COLOR); plain text otherwise.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  R=$'\e[0m'
+  HDR=$'\e[1;38;2;255;217;168m'   # section headers — the splash sweep highlight, bold
+  CMD=$'\e[38;2;217;119;87m'      # command names  — terracotta (gradient top)
+  DIM=$'\e[38;2;154;154;154m'     # descriptions   — grey (splash tagline)
+  GRAD=(
+    $'\e[38;2;217;119;87m'  $'\e[38;2;210;115;84m'  $'\e[38;2;203;112;81m'
+    $'\e[38;2;195;108;79m'  $'\e[38;2;188;104;76m'  $'\e[38;2;181;100;73m'
+    $'\e[38;2;174;97;70m'   $'\e[38;2;167;93;67m'   $'\e[38;2;160;89;64m'
+    $'\e[38;2;152;85;62m'   $'\e[38;2;145;82;59m'   $'\e[38;2;138;78;56m'
+  )
+else
+  R='' ; HDR='' ; CMD='' ; DIM=''
+  GRAD=( '' '' '' '' '' '' '' '' '' '' '' '' )
+fi
+
+# The block wordmark (rows byte-identical to tui/splash.py::LOGO).
+LOGO=(
+" ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗"
+"██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝"
+"██║     ██║     ███████║██║   ██║██║  ██║█████╗  "
+"██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  "
+"╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗"
+" ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝"
+"          ███╗   ███╗ █████╗ ███╗   ██╗          "
+"          ████╗ ████║██╔══██╗████╗  ██║          "
+"          ██╔████╔██║███████║██╔██╗ ██║          "
+"          ██║╚██╔╝██║██╔══██║██║╚██╗██║          "
+"          ██║ ╚═╝ ██║██║  ██║██║ ╚████║          "
+"          ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝          "
+)
+
+echo
+for i in "${!LOGO[@]}"; do
+  printf '  %s%s%s\n' "${GRAD[i]}" "${LOGO[i]}" "$R"
+done
+printf '  %s         hardened dev shell%s\n\n' "$DIM" "$R"
+
+# Cheat-sheet. Keys are ASCII-only so %-12s aligns (the description column may use unicode freely).
+row() { printf '    %s%-12s%s %s%s%s\n' "$CMD" "$1" "$R" "$DIM" "$2" "$R"; }
+printf '  %sSHELL%s\n' "$HDR" "$R"
+row 'n'        'neovim with the file tree   (n <file…> opens files)'
+row 'ls / lt'  'eza list / tree            <leader>e  toggle tree in nvim'
+row 'g / gcm'  'git / git commit -m        gcam  commit -am'
+row 'cd <dir>' 'smart jump (zoxide)        ↑ ↓   history prefix-search'
+row 'Ctrl-R'   'fuzzy history search       hints  show this again'
+echo
+
+# History mode — dynamic from CLAUDEMAN_HISTFILE (the persistent bind's env, set by the runner).
+if [[ -n "${CLAUDEMAN_HISTFILE:-}" ]]; then
+  printf '  %sHISTORY%s  %spersistent — survives container recreate%s\n\n' \
+    "$HDR" "$R" "$DIM" "$R"
+else
+  printf '  %sHISTORY%s  %sephemeral — resets when the container is recreated%s\n' \
+    "$HDR" "$R" "$DIM" "$R"
+  printf '           %senable on the host:  claudemanctl config shell-history on%s\n\n' "$DIM" "$R"
+fi
+
+# Git prompt legend — what starship shows next to the branch.
+printf '  %sGIT%s      %sthe prompt shows the branch + status:%s\n' "$HDR" "$R" "$DIM" "$R"
+printf '           %s⇡N ahead · ⇣N behind · ? untracked · icons for modified / staged%s\n\n' \
+  "$DIM" "$R"
