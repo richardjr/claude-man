@@ -35,6 +35,7 @@ from .screens.egress import EgressScreen
 from .screens.env_mounts import EnvMountsScreen
 from .screens.logs import LogsScreen
 from .screens.menu import MenuScreen
+from .screens.overlay_select import OverlaySelectScreen
 from .screens.packs import PacksScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
@@ -84,6 +85,15 @@ class ClaudeManApp(App):
     /* height: auto — on a narrow terminal the project row wraps onto a second line; a fixed
        height: 2 would clip the whole global row (including the quit hint) out of view. */
     #keybar { dock: bottom; height: auto; background: $panel; padding: 0 1; }
+    /* App-wide cap so every modal's fixed-width #dialog (each screen sets its own `width:`)
+       shrinks to fit a terminal narrower than that width instead of being clipped off the
+       screen's right edge (there is no horizontal screen scroll, so clipped content is
+       unreachable). `width` and `max-width` are different properties, so this leaves the
+       designed width intact whenever the terminal has room. Paired with the ItemGrid button
+       rows (which reflow inside the narrowed dialog) this makes dialogs never crop — see
+       CLAUDE.md "TUI dialog button rows". splash.py uses #splash-fill, not #dialog, so the
+       full-screen boot animation is unaffected. */
+    #dialog { max-width: 100%; }
     """
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
@@ -127,6 +137,7 @@ class ClaudeManApp(App):
         ("o", "Ports", "ports"),
         ("p", "Packs…", "packs"),
         ("g", "Egress…", "egress"),
+        ("i", "Overlay (image)…", "overlay"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -920,6 +931,7 @@ class ClaudeManApp(App):
             "ports": self.action_ports,
             "packs": self.action_packs,
             "egress": self.action_egress,
+            "overlay": self.action_overlay,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1214,6 +1226,34 @@ class ClaudeManApp(App):
             res = lifecycle.set_egress(slug, mode, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- overlay (image variant) ------------------------------------------
+    def action_overlay(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]overlay: select a defined project (orphan rows aren't managed)[/]")
+            return
+        current = projects.load(slug).overlay
+        self._log(f"changing overlay for {slug} (recreates to apply; builds the image if missing)")
+        self.push_screen(OverlaySelectScreen(slug, current), lambda ov: self._on_overlay(slug, ov))
+
+    def _on_overlay(self, slug: str, overlay) -> None:
+        if overlay is None:  # cancelled, or picked the current overlay — nothing to recreate
+            return
+        if not self._reserve(slug, "overlay"):
+            return
+        self._log(f"switching {slug} to overlay {overlay!r} (recreating to apply) …")
+        self._overlay_worker(slug, overlay)
+
+    @work(thread=True, group="create")
+    def _overlay_worker(self, slug: str, overlay: str) -> None:
+        """Apply an overlay switch off the UI thread (recreate persists the choice + rebuilds the image
+        via ensure_chain if it's missing). Streams build progress to the log, like the egress worker."""
+        try:
+            res = lifecycle.recreate(slug, overlay=overlay, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"overlay change failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- sync-back (review-gated three-way merge into the host ~/.claude) --

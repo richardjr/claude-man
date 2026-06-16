@@ -356,8 +356,8 @@ def cmd_project_recreate(args) -> int:
     # Offer the same on-start claude update that `project up` does: check the channel and (on a TTY)
     # prompt before rebuilding. --update-yes / --no-update control it; default prompts.
     rebuild_to = _resolve_update(project, args)
-    res = lifecycle.recreate(args.slug, profile_name=args.profile, force=args.force,
-                             rebuild_to=rebuild_to, on_progress=print)
+    res = lifecycle.recreate(args.slug, profile_name=args.profile, overlay=args.overlay,
+                             force=args.force, rebuild_to=rebuild_to, on_progress=print)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
 
@@ -1231,6 +1231,8 @@ def build_parser() -> argparse.ArgumentParser:
     prc = proj.add_parser("recreate", help="rebuild the container (offers a claude update; optionally switch profile)")
     prc.add_argument("slug", type=_slug_arg)
     prc.add_argument("--profile", type=_slug_arg, help="switch the project to this profile (account)")
+    prc.add_argument("--overlay", choices=config.OVERLAYS,
+                     help="switch the project to this overlay/image (builds it if missing)")
     prc.add_argument("--force", action="store_true",
                      help="override the account-mismatch guard and re-seed the identity")
     prc.add_argument("--update-yes", action="store_true", dest="update_yes",

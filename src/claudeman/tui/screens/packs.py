@@ -17,7 +17,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import ItemGrid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
@@ -54,8 +54,9 @@ class PacksScreen(ModalScreen[None]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #packs { height: auto; max-height: 14; }
     #packs-status { height: auto; color: $text-muted; padding-top: 1; }
-    #buttons { height: auto; padding-top: 1; align-horizontal: right; }
-    #buttons Button { margin-left: 2; }
+    /* ItemGrid wraps the action buttons into rows instead of cropping them off the
+       dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
+    #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
     def __init__(self, slug: str) -> None:
@@ -68,7 +69,7 @@ class PacksScreen(ModalScreen[None]):
             yield DataTable(id="packs", cursor_type="row")
             yield Label("space/↵ Toggle · d Defaults · esc Close   (applies immediately — no recreate)",
                         id="packs-status")
-            with Horizontal(id="buttons"):
+            with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Toggle", variant="success", id="toggle")
                 yield Button("Defaults", id="defaults")
                 yield Button("Close", id="close")

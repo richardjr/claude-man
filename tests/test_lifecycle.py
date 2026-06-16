@@ -751,5 +751,64 @@ class SyncBackWiringTest(unittest.TestCase):
         self.assertIn("no project", res.detail)
 
 
+class RecreateOverlayTest(unittest.TestCase):
+    """recreate(overlay=…) validates + persists the new image variant before the rebuild (the docker
+    tail — runner.remove / seed / up — is mocked so no daemon is touched)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        lifecycle.projects_registry.save(Project(slug="demo", overlay="node"))
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None)
+        os.environ.pop("CLAUDE_MAN_STATE_HOME", None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    @contextlib.contextmanager
+    def _mock_docker_tail(self):
+        """Mock the post-validation rebuild path so recreate stays daemon-free."""
+        with (
+            mock.patch.object(lifecycle.runner, "remove"),
+            mock.patch.object(lifecycle.seed_mod, "seed_project_config"),
+            mock.patch.object(lifecycle, "effective_profile", lambda p: None),
+            mock.patch.object(lifecycle, "account_mismatch", lambda p, prof: None),
+            mock.patch.object(lifecycle, "up",
+                              lambda project, on_progress=None, rebuild_to="": lifecycle.Result(True, "up")),
+        ):
+            yield
+
+    def test_invalid_overlay_rejected_before_docker(self) -> None:
+        with mock.patch.object(lifecycle.runner, "remove") as rm:
+            res = lifecycle.recreate("demo", overlay="haskell")
+        self.assertFalse(res.ok)
+        self.assertIn("invalid overlay", res.detail)
+        rm.assert_not_called()  # rejected before teardown
+        self.assertEqual(lifecycle.projects_registry.load("demo").overlay, "node")  # unchanged
+
+    def test_valid_overlay_persists_then_recreates(self) -> None:
+        with self._mock_docker_tail():
+            res = lifecycle.recreate("demo", overlay="python-node")
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual(lifecycle.projects_registry.load("demo").overlay, "python-node")  # persisted
+        self.assertIn("python-node", res.detail)
+
+    def test_no_overlay_arg_leaves_overlay_untouched(self) -> None:
+        with self._mock_docker_tail():
+            res = lifecycle.recreate("demo")
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual(lifecycle.projects_registry.load("demo").overlay, "node")
+
+    def test_same_overlay_is_a_noop_change(self) -> None:
+        # Re-selecting the current overlay still recreates but reports no overlay note.
+        with self._mock_docker_tail():
+            res = lifecycle.recreate("demo", overlay="node")
+        self.assertTrue(res.ok, res.detail)
+        self.assertNotIn("overlay", res.detail)
+
+
 if __name__ == "__main__":
     unittest.main()
