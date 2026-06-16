@@ -26,6 +26,10 @@ class BuildChainTest(unittest.TestCase):
         self.assertEqual(images.build_chain("node"), ["base", "node"])
         self.assertEqual(images.build_chain("python"), ["base", "python"])
 
+    def test_combo_overlay_chain(self) -> None:
+        # The python-node combo is an ordinary FROM-base overlay — base-first, no chaining.
+        self.assertEqual(images.build_chain("python-node"), ["base", "python-node"])
+
 
 class BuildArgvTest(unittest.TestCase):
     def test_base_argv(self) -> None:
@@ -45,6 +49,13 @@ class BuildArgvTest(unittest.TestCase):
         self.assertIn("claude-man:node", argv)
         dfile = argv[argv.index("-f") + 1]
         self.assertTrue(dfile.endswith("images/overlays/node.Dockerfile"))
+
+    def test_combo_overlay_argv_targets_combo_dockerfile(self) -> None:
+        argv = images.build_argv("python-node")
+        self.assertIn("claude-man:python-node", argv)
+        dfile = argv[argv.index("-f") + 1]
+        self.assertTrue(dfile.endswith("images/overlays/python-node.Dockerfile"))
+        self.assertTrue(config.image_dockerfile("python-node").is_file())
 
     def test_default_claude_version(self) -> None:
         argv = images.build_argv("base")

@@ -63,6 +63,11 @@ _BAKED_ENV = {
     "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
     "YARN_ENABLE_GLOBAL_CACHE": "false",
     "YARN_CACHE_FOLDER": config.CONTAINER_YARN_CACHE,
+    # pip/uv caches default to the size-capped .cache tmpfs (which ENOSPC'd a large yarn install).
+    # Redirect both onto the disk-backed /workspace bind — same philosophy as YARN_CACHE_FOLDER, no
+    # new writable surface (floor unchanged). Created lazily by pip/uv only when a project uses them.
+    "PIP_CACHE_DIR": config.CONTAINER_PIP_CACHE,
+    "UV_CACHE_DIR": config.CONTAINER_UV_CACHE,
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }

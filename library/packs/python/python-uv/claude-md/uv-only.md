@@ -8,3 +8,7 @@
   one-off tools instead.
 - Match the project's pinned Python version (`requires-python` / `.python-version`); don't
   "upgrade" it to make something work.
+- The container rootfs is read-only: a system-wide or `pip install --user` install fails. The
+  writable surface is `/workspace`, so keep the environment in the project's `.venv` there (uv's
+  default) — `uv venv` / `uv sync` Just Work. (pip and uv caches are already redirected to
+  `/workspace`, so installs don't fill the small in-memory cache.)
