@@ -2,7 +2,8 @@
 # the base image. The base already ships node + npm; this overlay adds the python toolchain and
 # activates the yarn/pnpm package managers, so a node project that also needs python/pip lives in one
 # image. Project python deps belong in a venv under /workspace (use `uv` — the read-only rootfs makes
-# `pip install --user` / system installs fail; pip/uv caches are redirected to /workspace, see runner).
+# `pip install --user` / system installs fail; pip/uv caches AND uv's downloaded interpreters + tool
+# venvs are redirected to /workspace, see runner._BAKED_ENV / config.CONTAINER_UV_*).
 # Build:  claudemanctl image build python-node   (tags claude-man:python-node)
 
 FROM claude-man:base
