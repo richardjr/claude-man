@@ -144,6 +144,26 @@ Runtime state lives **outside the repo** under `~/.config/claude-man` (definitio
 - **Tests must stay dependency-free** (`python -m unittest`): stdlib + `tomlkit` (the TOML
   writer) only — no docker/network/textual. Keep `textual` imports inside `tui/` so the CLI and
   tests import without it installed.
+- **TUI dialog button rows reflow, never crop.** A modal's action-button row (`#buttons`) uses a
+  reflowing `ItemGrid(id="buttons", min_column_width=16)` with `grid-gutter: 0 1` — **not** a
+  fixed-width `Horizontal`. Textual Buttons default to `min-width: 16`, so a `Horizontal` row of
+  them silently overflows the dialog's right edge once they no longer fit (issue #2: the 7-button
+  Settings and 6-button Egress toolbars cropped to ~4.5 buttons visible). `ItemGrid` wraps the
+  buttons onto as many rows as the dialog needs, so the row can never be cropped no matter the
+  dialog width or how many buttons are added. This is the standing pattern for the
+  management/toolbar screens (`settings`/`egress`/`env_mounts`/`ports`/`packs`); the simple
+  Cancel-plus-one-action confirm/input dialogs keep their right-aligned `Horizontal` footer (two
+  buttons never overflow). When adding a button to a toolbar, leave it as `ItemGrid` — don't revert
+  to `Horizontal`. There is no render assertion in the dependency-free suite (it can't import
+  textual); verify layout changes with a headless `App.run_test()` render.
+  The complementary half lives in `ClaudeManApp.CSS` (app.py): an app-wide `#dialog { max-width:
+  100% }` clamps every modal's fixed-width `#dialog` (each screen still sets its own `width:`) to the
+  terminal width, so a dialog wider than the terminal shrinks to fit instead of being clipped off the
+  screen's right edge (there's no horizontal screen scroll — clipped content would be unreachable).
+  `width` and `max-width` are different properties, so the designed width is preserved whenever the
+  terminal has room. New modals should use `id="dialog"` so they inherit this for free (the splash
+  uses `#splash-fill` and is intentionally exempt). Together: dialog fits the terminal, buttons fit
+  the dialog — never a crop.
 - **Shelling out to docker/git/claude** is done via `subprocess` with explicit argv lists (never
   `shell=True`). The hardened argv is rendered by one pure function (`docker/runner.py::build_create_argv`)
   so it can be unit-tested without a daemon.

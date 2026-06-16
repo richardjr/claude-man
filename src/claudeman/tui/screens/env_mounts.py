@@ -13,7 +13,7 @@ from __future__ import annotations
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import ItemGrid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
@@ -43,8 +43,9 @@ class EnvMountsScreen(ModalScreen[None]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #mounts { height: auto; max-height: 12; }
     #mount-status { height: auto; color: $text-muted; padding-top: 1; }
-    #buttons { height: auto; padding-top: 1; align-horizontal: right; }
-    #buttons Button { margin-left: 2; }
+    /* ItemGrid wraps the action buttons into rows instead of cropping them off the
+       dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
+    #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
     def __init__(self, slug: str) -> None:
@@ -56,7 +57,7 @@ class EnvMountsScreen(ModalScreen[None]):
             yield Label(f"Env mounts · {self._slug}", classes="title")
             yield DataTable(id="mounts", cursor_type="row")
             yield Label("a Add · x Remove · s Resync · esc Close", id="mount-status")
-            with Horizontal(id="buttons"):
+            with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Resync", id="resync")

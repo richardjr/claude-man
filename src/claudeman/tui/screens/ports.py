@@ -11,7 +11,7 @@ from __future__ import annotations
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import ItemGrid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
@@ -40,8 +40,9 @@ class PortsScreen(ModalScreen[None]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #ports { height: auto; max-height: 12; }
     #port-status { height: auto; color: $text-muted; padding-top: 1; }
-    #buttons { height: auto; padding-top: 1; align-horizontal: right; }
-    #buttons Button { margin-left: 2; }
+    /* ItemGrid wraps the action buttons into rows instead of cropping them off the
+       dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
+    #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
     def __init__(self, slug: str) -> None:
@@ -53,7 +54,7 @@ class PortsScreen(ModalScreen[None]):
             yield Label(f"Published ports · {self._slug}", classes="title")
             yield DataTable(id="ports", cursor_type="row")
             yield Label("a Add · x Remove · esc Close   (recreate to apply)", id="port-status")
-            with Horizontal(id="buttons"):
+            with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Close", id="close")

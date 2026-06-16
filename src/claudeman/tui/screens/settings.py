@@ -14,7 +14,7 @@ from __future__ import annotations
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import ItemGrid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
@@ -51,8 +51,9 @@ class SettingsScreen(ModalScreen[None]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #keys { height: auto; max-height: 12; }
     #settings-status { height: auto; color: $text-muted; padding-top: 1; }
-    #buttons { height: auto; padding-top: 1; align-horizontal: right; }
-    #buttons Button { margin-left: 2; }
+    /* ItemGrid wraps the action buttons into rows instead of cropping them off the
+       dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
+    #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -64,7 +65,7 @@ class SettingsScreen(ModalScreen[None]):
             yield Label("", id="terminal", classes="panel-title")
             yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · esc Close",
                         id="settings-status")
-            with Horizontal(id="buttons"):
+            with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Load all", id="load")
