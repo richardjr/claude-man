@@ -52,7 +52,7 @@ service running INSIDE a container (dev server / test endpoint) is reachable. Re
 byte-identical, unit-pinned); container port enforced ≥1024 (`--cap-drop ALL` drops NET_BIND_SERVICE),
 default bind 127.0.0.1 (host-only) with per-port `0.0.0.0` opt-in. Ingress — orthogonal to the egress
 firewall (invariant 3); fixed at create (recreate to apply). **Baked neovim** — the base image ships
-neovim 0.12 with a curated, no-plugin-manager config (`images/nvim/`) for TypeScript + Markdown +
+neovim 0.11 with a curated, no-plugin-manager config (`images/nvim/`) for TypeScript + Markdown +
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
