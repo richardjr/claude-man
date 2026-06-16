@@ -84,6 +84,15 @@ class ClaudeManApp(App):
     /* height: auto — on a narrow terminal the project row wraps onto a second line; a fixed
        height: 2 would clip the whole global row (including the quit hint) out of view. */
     #keybar { dock: bottom; height: auto; background: $panel; padding: 0 1; }
+    /* App-wide cap so every modal's fixed-width #dialog (each screen sets its own `width:`)
+       shrinks to fit a terminal narrower than that width instead of being clipped off the
+       screen's right edge (there is no horizontal screen scroll, so clipped content is
+       unreachable). `width` and `max-width` are different properties, so this leaves the
+       designed width intact whenever the terminal has room. Paired with the ItemGrid button
+       rows (which reflow inside the narrowed dialog) this makes dialogs never crop — see
+       CLAUDE.md "TUI dialog button rows". splash.py uses #splash-fill, not #dialog, so the
+       full-screen boot animation is unaffected. */
+    #dialog { max-width: 100%; }
     """
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the

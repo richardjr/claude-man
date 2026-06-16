@@ -21,7 +21,7 @@ from __future__ import annotations
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import ItemGrid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label
 
@@ -71,8 +71,9 @@ class EgressScreen(ModalScreen["str | None"]):
     #egress-base { height: auto; color: $text-muted; padding-bottom: 1; }
     #allowlist { height: auto; max-height: 12; }
     #egress-status { height: auto; color: $text-muted; padding-top: 1; }
-    #buttons { height: auto; padding-top: 1; align-horizontal: right; }
-    #buttons Button { margin-left: 2; }
+    /* ItemGrid wraps the action buttons into rows instead of cropping them off the
+       dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
+    #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
     def __init__(self, slug: str) -> None:
@@ -92,7 +93,7 @@ class EgressScreen(ModalScreen["str | None"]):
             )
             yield DataTable(id="allowlist", cursor_type="row")
             yield Label("", id="egress-status")
-            with Horizontal(id="buttons"):
+            with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Lock", id="toggle", variant="primary")
                 yield Button("Apply", id="apply")
                 yield Button("Add", variant="success", id="add")
