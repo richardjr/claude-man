@@ -63,11 +63,20 @@ _BAKED_ENV = {
     "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
     "YARN_ENABLE_GLOBAL_CACHE": "false",
     "YARN_CACHE_FOLDER": config.CONTAINER_YARN_CACHE,
-    # pip/uv caches default to the size-capped .cache tmpfs (which ENOSPC'd a large yarn install).
-    # Redirect both onto the disk-backed /workspace bind — same philosophy as YARN_CACHE_FOLDER, no
-    # new writable surface (floor unchanged). Created lazily by pip/uv only when a project uses them.
+    # pip/uv write to HOME dotdirs on the read-only rootfs: caches under ~/.cache (the size-capped tmpfs
+    # that ENOSPC'd a large yarn install) AND uv's downloaded interpreters + tool venvs under
+    # ~/.local/share/uv (read-only -> `uv sync` dies EROFS creating ~/.local/share/uv/python). Redirect
+    # every pip/uv dir onto the disk-backed /workspace bind, like YARN_CACHE_FOLDER — no new writable
+    # surface, floor byte-identical. Created lazily only when a project uses pip/uv. NOTE: runner-injected
+    # only — the YARN equivalents are ALSO baked in the base Dockerfile ENV; baking pip/uv there for
+    # bare-`docker run` parity is a follow-up (every claude-man container + `image smoke` go through this
+    # argv, so the fix lands without an image rebuild).
     "PIP_CACHE_DIR": config.CONTAINER_PIP_CACHE,
     "UV_CACHE_DIR": config.CONTAINER_UV_CACHE,
+    "UV_PYTHON_INSTALL_DIR": config.CONTAINER_UV_PYTHON,  # uv-managed interpreter downloads (uv sync)
+    "UV_PYTHON_BIN_DIR": config.CONTAINER_UV_BIN,         # `uv python install` exe links (else ~/.local/bin EROFS)
+    "UV_TOOL_DIR": config.CONTAINER_UV_TOOLS,             # `uv tool` venvs
+    "UV_TOOL_BIN_DIR": config.CONTAINER_UV_BIN,           # `uv tool` exe links
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }
