@@ -35,6 +35,11 @@ NewProject = tuple[str, "str | None", str, str, str]
 
 _SUGGESTION_CONSUMED = object()  # sentinel: no programmatic language echo pending
 
+# Combo overlays aren't a pack tier of their own. Map them to the tier whose conventions matter most
+# under the read-only floor for the language-suggestion pre-fill (python needs the venv/uv guidance;
+# node works without special steering). The operator can still override the suggestion.
+_OVERLAY_TIER_HINT = {"python-node": "python"}
+
 
 class NewProjectScreen(ModalScreen["NewProject | None"]):
     """Collect slug/profile/overlay/egress/language for a new project.
@@ -123,7 +128,10 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
         the operator hasn't picked one themselves."""
         if self._language_touched:
             return
-        suggestion = event.value if event.value in self._tiers else ""
+        # Combo overlays aren't themselves a pack tier; map them to the tier whose conventions matter
+        # most under the read-only floor (python needs the venv/uv guidance; node "just works").
+        hint = _OVERLAY_TIER_HINT.get(event.value, event.value)
+        suggestion = hint if hint in self._tiers else ""
         select = self.query_one("#language", Select)
         if select.value != suggestion:
             self._suggested = suggestion

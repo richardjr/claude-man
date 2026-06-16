@@ -118,7 +118,7 @@ features on existing setups:
 - [x] `config.py` XDG path resolution; constants for label prefix + image/container names + baked container paths
 - [x] `docker/runner.py` renders the full hardened `docker create` argv (pure, unit-tested)
 - [x] `docker/labels.py` label model; `syncback/denylist.py` (unit-tested)
-- [x] `images/base/Dockerfile` (debian-slim + node + pinned native claude + non-root uid1000 `/etc/passwd` entry + baked env) and `images/overlays/{python,rust,node}.Dockerfile`
+- [x] `images/base/Dockerfile` (debian-slim + node + pinned native claude + non-root uid1000 `/etc/passwd` entry + baked env) and `images/overlays/{python,rust,node,python-node}.Dockerfile` (`python-node` = polyglot combo for node projects that also need python/pip)
 - [x] `claudemanctl image build` (base + overlays) renders + runs `docker build`
 - [~] `image smoke` — moved to Phase 0.5 (the bake bug below made the original build untrustworthy)
 

@@ -28,7 +28,7 @@ DEFAULT_EGRESS = "open"               # "open" | "strict"
 # SIGTERM (the kernel applies no default disposition to PID 1), so `docker stop` ALWAYS waits the
 # full grace then SIGKILLs — a 10s default makes stop/quit feel frozen. A short grace bounds it.
 DOCKER_STOP_GRACE_S = 2
-OVERLAYS = ("base", "python", "rust", "node")
+OVERLAYS = ("base", "python", "rust", "node", "python-node")
 EGRESS_MODES = ("open", "strict")
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,12 @@ CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER (Ber
 # ~/.yarnrc onto the writable .cache tmpfs (see images/base/Dockerfile). Berry honours YARN_CACHE_FOLDER
 # too, so both yarns share this one disk-backed cache (still on the persistent workspace bind).
 CONTAINER_YARN_CACHE = CONTAINER_WORKSPACE + "/.yarn-cache"   # YARN_CACHE_FOLDER (Yarn v1 + Berry)
+# pip / uv caches default to ~/.cache (the size-capped 256m tmpfs — the exact surface that ENOSPC'd a
+# large yarn install). Same redirect philosophy as YARN_CACHE_FOLDER: point them at the disk-backed,
+# persistent /workspace bind so a large python install doesn't OOM the tmpfs. Env-only, additive (no
+# new writable surface — they ride the existing /workspace bind), so the hardened floor is unchanged.
+CONTAINER_PIP_CACHE = CONTAINER_WORKSPACE + "/.pip-cache"      # PIP_CACHE_DIR
+CONTAINER_UV_CACHE = CONTAINER_WORKSPACE + "/.uv-cache"        # UV_CACHE_DIR
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
