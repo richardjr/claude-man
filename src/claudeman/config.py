@@ -94,12 +94,18 @@ CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER (Ber
 # ~/.yarnrc onto the writable .cache tmpfs (see images/base/Dockerfile). Berry honours YARN_CACHE_FOLDER
 # too, so both yarns share this one disk-backed cache (still on the persistent workspace bind).
 CONTAINER_YARN_CACHE = CONTAINER_WORKSPACE + "/.yarn-cache"   # YARN_CACHE_FOLDER (Yarn v1 + Berry)
-# pip / uv caches default to ~/.cache (the size-capped 256m tmpfs — the exact surface that ENOSPC'd a
-# large yarn install). Same redirect philosophy as YARN_CACHE_FOLDER: point them at the disk-backed,
-# persistent /workspace bind so a large python install doesn't OOM the tmpfs. Env-only, additive (no
-# new writable surface — they ride the existing /workspace bind), so the hardened floor is unchanged.
+# pip / uv write to HOME dotdirs that sit on the read-only rootfs: pip's cache + uv's cache (~/.cache,
+# the size-capped 256m tmpfs that ENOSPC'd a large yarn install) AND uv's downloaded interpreters + tool
+# venvs (~/.local/share/uv — read-only -> `uv sync` dies with EROFS creating ~/.local/share/uv/python).
+# Redirect every pip/uv dir onto the disk-backed, persistent /workspace bind, same philosophy as
+# YARN_CACHE_FOLDER. Env-only, additive (no new writable surface — they ride the existing /workspace
+# bind), so the hardened floor is byte-identical.
 CONTAINER_PIP_CACHE = CONTAINER_WORKSPACE + "/.pip-cache"      # PIP_CACHE_DIR
-CONTAINER_UV_CACHE = CONTAINER_WORKSPACE + "/.uv-cache"        # UV_CACHE_DIR
+CONTAINER_UV_DIR = CONTAINER_WORKSPACE + "/.uv"               # uv's home on the disk-backed bind
+CONTAINER_UV_CACHE = CONTAINER_UV_DIR + "/cache"             # UV_CACHE_DIR
+CONTAINER_UV_PYTHON = CONTAINER_UV_DIR + "/python"           # UV_PYTHON_INSTALL_DIR (downloaded interpreters)
+CONTAINER_UV_BIN = CONTAINER_UV_DIR + "/bin"                # UV_PYTHON_BIN_DIR + UV_TOOL_BIN_DIR (exe links)
+CONTAINER_UV_TOOLS = CONTAINER_UV_DIR + "/tools"            # UV_TOOL_DIR (tool venvs)
 
 # Env keys that must NEVER be passed into a container (they would silently
 # outrank CLAUDE_CODE_OAUTH_TOKEN and can bill the wrong account).
