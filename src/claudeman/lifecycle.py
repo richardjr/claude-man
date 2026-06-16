@@ -671,6 +671,7 @@ def recreate(
     slug: str,
     *,
     profile_name: str | None = None,
+    overlay: str | None = None,
     force: bool = False,
     rebuild_to: str = "",
     on_progress: ProgressFn | None = None,
@@ -680,6 +681,10 @@ def recreate(
     With ``profile_name`` the project is switched to that profile (persisted). If the config dir
     already belongs to a different account, the guard refuses unless ``force`` — which re-seeds the
     identity for the new account (note: the old account's session history stays in the config dir).
+
+    With ``overlay`` the project switches image variant (e.g. ``base`` → ``python-node``): validated
+    against ``config.OVERLAYS`` and persisted before teardown, with ``up``'s ``ensure_chain`` building
+    the new image (base → overlay) if it isn't present yet. No account guard — the image is non-secret.
 
     ``rebuild_to`` (set by the caller after ``check_update`` + the operator's confirmation, exactly
     like ``up``) force-rebuilds the project's image to that claude version as part of the recreate —
@@ -698,6 +703,14 @@ def recreate(
             return Result(False, f"no profile {profile_name!r}; `claudemanctl profile add {profile_name}`")
         project = dataclasses.replace(project, profile=profile_name)
 
+    if overlay is not None and overlay not in config.OVERLAYS:
+        return Result(False, f"invalid overlay {overlay!r}: one of {', '.join(config.OVERLAYS)}")
+    overlay_changed = overlay is not None and overlay != project.overlay
+    if overlay_changed:
+        # Overlay (image) is non-secret + account-independent, so no mismatch guard — just persist the
+        # new image choice; up()'s ensure_chain auto-builds it (base → overlay) if it isn't present.
+        project = dataclasses.replace(project, overlay=overlay)
+
     profile = effective_profile(project)
     conflict = account_mismatch(project, profile)
     if conflict and not force:
@@ -709,10 +722,10 @@ def recreate(
             f"(the old account's session history stays in the config dir).",
         )
 
-    if profile_name:
+    if profile_name or overlay_changed:
         try:
             with _slug_lock(slug):  # serialise the switch write with add_repo/remove_repo
-                projects_registry.save(project)  # persist the switch only once past the guard
+                projects_registry.save(project)  # persist the switch/overlay only once past the guard
         except OSError as exc:
             return _lock_error(slug, exc)
 
@@ -723,8 +736,13 @@ def recreate(
     result = up(project, on_progress=on_progress, rebuild_to=rebuild_to)
     if not result.ok:
         return result
+    notes = []
+    if profile_name:
+        notes.append(f"on profile {profile_name!r}")
+    if overlay_changed:
+        notes.append(f"overlay {project.overlay!r}")
     return Result(True, f"recreated {project.container}"
-                  + (f" on profile {profile_name!r}" if profile_name else ""))
+                  + (" " + ", ".join(notes) if notes else ""))
 
 
 def set_egress(slug: str, mode: str, *, on_progress: ProgressFn | None = None) -> Result:
