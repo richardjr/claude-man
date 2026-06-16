@@ -20,7 +20,17 @@ FROM debian:trixie-slim
 
 ARG CLAUDE_VERSION=2.1.173
 ARG GH_VERSION=2.93.0
-ARG NVIM_VERSION=0.12.2
+# Pin Neovim to the 0.11 STABLE line, NOT 0.12. The curated plugins are baked as native packages
+# pinned to exact commits (below); nvim-treesitter's `master` branch (the only branch with the classic
+# `.configs`/highlight API this config uses) is FROZEN — its custom predicates/directives
+# (`is?`/`kind-eq?`/`nth?`, `set-lang-from-info-string!`, `downcase!`, …) register with the legacy
+# single-node match opt-out (`{all=false}`). Neovim 0.12 REMOVED that legacy mode, so on 0.12 those
+# handlers receive a list-valued match and crash ("attempt to call method 'range'/'start' (a nil
+# value)") the moment treesitter resolves an injection — e.g. viewing any markdown with a ```lang
+# fenced code block. 0.11.x still honours `{all=false}`, so the pinned plugin set works as designed.
+# (Bumping nvim-treesitter is not an option — master HEAD already IS the pinned commit; the 0.12 path
+# is its `main`-branch rewrite, a separate, larger config migration.)
+ARG NVIM_VERSION=0.11.7
 ARG MARKSMAN_VERSION=2026-02-08
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
