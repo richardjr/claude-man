@@ -1002,15 +1002,16 @@ class ClaudeManApp(App):
     def _on_new_project(self, data: NewProject | None) -> None:
         if not data:
             return  # cancelled
-        slug, profile, overlay, egress, language = data
+        slug, profile, overlay, egress, language, ssh_auto_trust = data
         if not self._reserve(slug, "create"):
             return
         self._log(f"creating {slug} …")
-        self._create_project_worker(slug, profile, overlay, egress, language)
+        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust)
 
     @work(thread=True, group="create")
     def _create_project_worker(
-        self, slug: str, profile: str | None, overlay: str, egress: str, language: str
+        self, slug: str, profile: str | None, overlay: str, egress: str, language: str,
+        ssh_auto_trust: bool = False,
     ) -> None:
         """Run the blocking create (image build + registry write + seed + `docker create`) off the
         UI thread, streaming build progress to the log.
@@ -1025,7 +1026,7 @@ class ClaudeManApp(App):
         try:
             res = lifecycle.create_project(
                 slug, profile=profile, overlay=overlay, egress=egress, language=language or None,
-                on_progress=self._thread_log,
+                ssh_auto_trust=ssh_auto_trust, on_progress=self._thread_log,
             )
         except schema.ValidationError as exc:
             res = lifecycle.Result(False, f"invalid project {slug!r}: {exc}")

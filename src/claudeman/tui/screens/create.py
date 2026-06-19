@@ -1,7 +1,7 @@
 """New-project form (Phase 1; Language field added in Phase 6b).
 
-A modal form collecting the five fields ``lifecycle.create_project`` accepts today —
-slug, profile, overlay, language, egress. On submit it dismisses with those values; the app
+A modal form collecting the six fields ``lifecycle.create_project`` accepts today —
+slug, profile, overlay, language, egress, ssh_auto_trust. On submit it dismisses with those values; the app
 then runs ``lifecycle.create_project`` off the UI thread (it writes the registry TOML, seeds
 ``claude-config/`` and ``docker create``s the hardened container). Repos / env / allowlist
 are a later increment — see ROADMAP.md and the ``[[repos]]`` shape in registry/schema.py.
@@ -29,9 +29,9 @@ from ...registry import profiles as profiles_registry
 from ...registry import projects
 from ...registry.schema import _SLUG_RE
 
-# What the screen hands back to the app: (slug, profile|None, overlay, egress, language),
-# or None on cancel. language == "" means common-tier packs only.
-NewProject = tuple[str, "str | None", str, str, str]
+# What the screen hands back to the app: (slug, profile|None, overlay, egress, language,
+# ssh_auto_trust), or None on cancel. language == "" means common-tier packs only.
+NewProject = tuple[str, "str | None", str, str, str, bool]
 
 _SUGGESTION_CONSUMED = object()  # sentinel: no programmatic language echo pending
 
@@ -42,10 +42,10 @@ _OVERLAY_TIER_HINT = {"python-node": "python"}
 
 
 class NewProjectScreen(ModalScreen["NewProject | None"]):
-    """Collect slug/profile/overlay/egress/language for a new project.
+    """Collect slug/profile/overlay/egress/language/ssh_auto_trust for a new project.
 
-    Dismisses with ``(slug, profile, overlay, egress, language)`` on Create (``profile`` is
-    ``None`` when the operator keeps the default), or ``None`` on Cancel/Escape. The app owns
+    Dismisses with ``(slug, profile, overlay, egress, language, ssh_auto_trust)`` on Create (``profile``
+    is ``None`` when the operator keeps the default), or ``None`` on Cancel/Escape. The app owns
     the actual create call so the blocking ``docker create`` stays off the UI thread.
     """
 
@@ -110,6 +110,11 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
                 [(e, e) for e in config.EGRESS_MODES],
                 value=config.DEFAULT_EGRESS, allow_blank=False, id="egress",
             )
+            yield Label("SSH auto-trust (TOFU — accept unknown host keys)")
+            yield Select(
+                [("off (common forges pre-trusted)", False), ("on (accept-new)", True)],
+                value=False, allow_blank=False, id="ssh-auto-trust",
+            )
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Create", variant="success", id="create")
@@ -169,4 +174,5 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
         overlay = self.query_one("#overlay", Select).value
         egress = self.query_one("#egress", Select).value
         language = self.query_one("#language", Select).value
-        self.dismiss((slug, profile, overlay, egress, language))
+        ssh_auto_trust = bool(self.query_one("#ssh-auto-trust", Select).value)
+        self.dismiss((slug, profile, overlay, egress, language, ssh_auto_trust))

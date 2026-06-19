@@ -116,6 +116,28 @@ class RegistryTest(unittest.TestCase):
         self.assertNotIn("language", text)
         self.assertNotIn("packs", text)
 
+    def test_ssh_auto_trust_roundtrips_terse_and_patches(self) -> None:
+        # True persists; default-False emits no key (terse template).
+        projects.save(Project(slug="trust", ssh_auto_trust=True))
+        self.assertTrue(projects.load("trust").ssh_auto_trust)
+        self.assertIn("ssh_auto_trust", (Path(self.tmp.name) / "projects" / "trust.toml").read_text())
+        projects.save(Project(slug="bare2"))
+        self.assertNotIn("ssh_auto_trust", (Path(self.tmp.name) / "projects" / "bare2.toml").read_text())
+        self.assertFalse(projects.load("bare2").ssh_auto_trust)
+        # The comment-preserving scalar patch flips it and drops the key when turned back off.
+        commented = '[project]\nslug = "p"\n# keep me\noverlay = "base"\n'
+        (Path(self.tmp.name) / "projects" / "p.toml").write_text(commented)
+        u = projects.set_ssh_auto_trust("p", True)
+        self.assertTrue(u.ssh_auto_trust)
+        text = (Path(self.tmp.name) / "projects" / "p.toml").read_text()
+        self.assertIn("ssh_auto_trust = true", text)
+        self.assertIn("# keep me", text)                      # in-place patch, comments survive
+        projects.set_ssh_auto_trust("p", False)
+        cleared = (Path(self.tmp.name) / "projects" / "p.toml").read_text()
+        self.assertNotIn("ssh_auto_trust", cleared)
+        self.assertIn("# keep me", cleared)
+        self.assertFalse(projects.load("p").ssh_auto_trust)
+
     def test_set_packs_patches_and_validates(self) -> None:
         projects.save(Project(slug="packed", packs=("guardrails",)))
         p = projects.set_packs("packed", ("guardrails", "workflow"))

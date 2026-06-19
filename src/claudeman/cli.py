@@ -272,7 +272,7 @@ def cmd_project_create(args) -> int:
 
     res = lifecycle.create_project(
         args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
-        language=args.language,
+        language=args.language, ssh_auto_trust=args.ssh_auto_trust,
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -788,6 +788,15 @@ def cmd_project_unlock(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_project_ssh_trust(args) -> int:
+    """Toggle a project's ssh auto-trust (TOFU: accept unknown host keys on first connect)."""
+    from . import lifecycle
+
+    res = lifecycle.set_ssh_auto_trust(args.slug, args.state == "on")
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
 def cmd_project_egress_log(args) -> int:
     """Show the destinations a locked project tried to reach but the allowlist blocked (for tuning)."""
     from .network import egress
@@ -1195,6 +1204,9 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--language", type=_slug_arg,
                     help="pack-library language tier (e.g. node/python/rust) — selects that tier's "
                          "default packs alongside the common ones; omit for common only")
+    pc.add_argument("--ssh-auto-trust", action="store_true", dest="ssh_auto_trust",
+                    help="auto-trust unknown SSH host keys on first connect (TOFU; accept-new). Default "
+                         "off — the common forges are already pre-trusted by the baked known_hosts")
     pc.set_defaults(func=cmd_project_create)
     pup = proj.add_parser("up", help="create-if-needed + start (checks for a newer claude first)")
     pup.add_argument("slug", type=_slug_arg)
@@ -1218,6 +1230,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug", type=_slug_arg)
         sp.set_defaults(func=func)
+    pst = proj.add_parser("ssh-trust",
+                          help="toggle auto-trust of unknown SSH host keys (TOFU; accept-new)")
+    pst.add_argument("slug", type=_slug_arg)
+    pst.add_argument("state", choices=("on", "off"))
+    pst.set_defaults(func=cmd_project_ssh_trust)
     proj.add_parser(
         "stop-all", help="stop + sync-out every running container (end-of-day batch)"
     ).set_defaults(func=cmd_project_stop_all)
