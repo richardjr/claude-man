@@ -12,6 +12,11 @@ extra_apt = ["jq"]          # optional: thin per-project apt layer baked at crea
 # env_file = "~/projects/my-project.env"   # alternative to [project.env]
 # workdir = "my-app-backend"     # where claude/shell launch (docker exec -w). Omit to launch at
 #                                # /workspace (the uniform anchor — see docs/PACKS.md).
+# ssh_auto_trust = true          # opt-in (default off): auto-trust UNKNOWN ssh host keys on first
+#                                # connect (TOFU; StrictHostKeyChecking accept-new). The common forges
+#                                # (github/gitlab/bitbucket/azure) are pre-trusted by the baked
+#                                # known_hosts regardless — turn this on only for self-hosted/other
+#                                # forges. Toggle: `project ssh-trust <slug> on|off` / TUI Env mounts (t).
 
 # Curated packs (docs/PACKS.md): bundles of CLAUDE.md fragments + skills from the in-repo library,
 # materialized into the asset source and synced into the binds on every start. `language` picks the
@@ -46,6 +51,9 @@ dir    = "my-app-client"
 # so a change needs `project recreate`. Manage with `project env add/rm/list` + `project resync`.
 
 # ssh: forward the host ssh-agent (private keys stay on the host) + seed ~/.ssh/{config,known_hosts}.
+# The common git forges are pre-trusted by a baked global known_hosts, so git-over-ssh to
+# github/gitlab/bitbucket/azure verifies with no prompt even if THIS host never SSH'd to them. For
+# other/self-hosted forges, set `ssh_auto_trust = true` above (TOFU) or `ssh-keyscan` into known_hosts.
 [[project.env_mount]]
 kind = "ssh"
 

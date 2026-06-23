@@ -31,6 +31,7 @@ class EnvMountsScreen(ModalScreen[None]):
         Binding("a", "add", "Add"),
         Binding("x", "remove", "Remove"),
         Binding("s", "resync", "Resync"),
+        Binding("t", "trust", "Auto-trust"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -42,6 +43,7 @@ class EnvMountsScreen(ModalScreen[None]):
     }
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #mounts { height: auto; max-height: 12; }
+    #trust-state { height: auto; padding-top: 1; }
     #mount-status { height: auto; color: $text-muted; padding-top: 1; }
     /* ItemGrid wraps the action buttons into rows instead of cropping them off the
        dialog's right edge — see CLAUDE.md "TUI dialog button rows" (reflow, no crop). */
@@ -56,11 +58,13 @@ class EnvMountsScreen(ModalScreen[None]):
         with Vertical(id="dialog"):
             yield Label(f"Env mounts · {self._slug}", classes="title")
             yield DataTable(id="mounts", cursor_type="row")
-            yield Label("a Add · x Remove · s Resync · esc Close", id="mount-status")
+            yield Label("", id="trust-state")
+            yield Label("a Add · x Remove · s Resync · t Auto-trust · esc Close", id="mount-status")
             with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
                 yield Button("Resync", id="resync")
+                yield Button("Auto-trust", id="trust")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
@@ -73,10 +77,12 @@ class EnvMountsScreen(ModalScreen[None]):
         table = self.query_one("#mounts", DataTable)
         table.clear()
         try:
-            mounts = projects.load(self._slug).env_mount
+            project = projects.load(self._slug)
         except Exception as exc:  # noqa: BLE001 - never tear down the app on a bad project load
             self._status(lifecycle.Result(False, f"failed to load {self._slug}: {exc}"))
             return
+        mounts = project.env_mount
+        self._refresh_trust(project)
         invalid = 0
         for m in mounts:
             if m.error:
@@ -94,6 +100,18 @@ class EnvMountsScreen(ModalScreen[None]):
         if invalid:
             self._status(lifecycle.Result(
                 False, f"{invalid} mount(s) invalid — select the row and press x to remove, then re-add"))
+
+    def _refresh_trust(self, project) -> None:
+        """Show the project's ssh auto-trust state below the table (TOFU for unknown host keys)."""
+        has_ssh = any(m.kind == "ssh" and not m.error for m in project.env_mount)
+        if project.ssh_auto_trust:
+            body = "[$success]Auto-trust: ON[/] — unknown SSH host keys accepted on first connect (TOFU)"
+        else:
+            body = ("Auto-trust: OFF — only pre-seeded forges trusted; unknown hosts rejected "
+                    "(the common forges work either way)")
+        if not has_ssh:
+            body += "  ·  add an ssh env-mount for it to take effect"
+        self.query_one("#trust-state", Label).update(body)
 
     def _status(self, res: lifecycle.Result) -> None:
         colour = "$success" if res.ok else "$error"
@@ -141,6 +159,26 @@ class EnvMountsScreen(ModalScreen[None]):
     def _resync_worker(self) -> None:
         res = lifecycle.resync(self._slug)
         self.app.call_from_thread(self._status, res)
+
+    @on(Button.Pressed, "#trust")
+    def action_trust(self) -> None:
+        """Flip ssh auto-trust (TOFU). Re-seeds the running container's ~/.ssh/config off-thread."""
+        try:
+            current = projects.load(self._slug).ssh_auto_trust
+        except Exception as exc:  # noqa: BLE001 - never tear down the app on a bad project load
+            self._status(lifecycle.Result(False, f"failed to load {self._slug}: {exc}"))
+            return
+        self.query_one("#mount-status", Label).update("toggling auto-trust …")
+        self._trust_worker(not current)
+
+    @work(thread=True, exclusive=True)
+    def _trust_worker(self, enabled: bool) -> None:
+        res = lifecycle.set_ssh_auto_trust(self._slug, enabled)
+        self.app.call_from_thread(self._after_trust, res)
+
+    def _after_trust(self, res: lifecycle.Result) -> None:
+        self._refresh()      # repaint the mounts + trust-state line
+        self._status(res)    # then surface the toggle result (wins the status line)
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

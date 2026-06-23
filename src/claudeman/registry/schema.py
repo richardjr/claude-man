@@ -387,6 +387,7 @@ class Project:
     extra_apt: tuple[str, ...] = ()
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
+    ssh_auto_trust: bool = False         # opt-in: StrictHostKeyChecking accept-new for in-container ssh (TOFU)
     ports: tuple[PortMapping, ...] = ()   # published container service ports (ingress -p; recreate to apply)
     allowlist: tuple[str, ...] = ()      # extra egress dstdomains (strict mode only)
     sync: Sync = field(default_factory=Sync)  # per-project asset sync (CLAUDE.md + skills/agents)

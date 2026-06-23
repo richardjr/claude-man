@@ -117,7 +117,7 @@ opens the editor.)
 
 ## 2. Create a project (`n`)
 
-Press `n`. The **New project** form has five fields:
+Press `n`. The **New project** form has six fields:
 
 - **Slug** — lowercase letters/digits/hyphens, ≤ 64 chars (validated inline; duplicates
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
@@ -133,6 +133,12 @@ Press `n`. The **New project** form has five fields:
   proxy (a squid sidecar on a no-route internal network — see the README's strict-egress
   section); it can also be toggled later with `claudemanctl project lock|unlock <slug>`.
   Start with `open` unless you've already tuned an allowlist.
+- **SSH auto-trust (TOFU)** — `off` (default) or `on`. `on` sets `StrictHostKeyChecking
+  accept-new` so in-container ssh records an *unknown* host's key on first connect instead of
+  failing the non-interactive `git`. The common forges (github/gitlab/bitbucket/azure) are
+  pre-trusted by the image's baked known_hosts either way, so leave this `off` unless you push
+  to a self-hosted/other forge. Toggle later with `project ssh-trust <slug> on|off` or the
+  Env-mounts screen (`t`).
 
 `Create` writes the registry TOML, auto-builds the image chain if missing (base, then the
 overlay — the first build takes minutes and streams into the log pane), seeds the per-project

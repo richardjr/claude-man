@@ -159,25 +159,59 @@ def _validate_mount_sources(project: Project) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
-def _seed_ssh(slug: str) -> None:
-    """Seed the host ~/.ssh/{config,known_hosts} into the container's ~/.ssh tmpfs (exec-stdin).
+# APPENDED to the seeded ~/.ssh/config when a project opts into auto-trust (issue #4, fix A). Placed
+# LAST as a general `Host *` default: ssh uses the FIRST obtained value per keyword, and ssh_config(5)
+# is explicit that host-specific declarations belong near the beginning and general defaults at the
+# end. So an operator's own host-specific `StrictHostKeyChecking` (e.g. a pinned corp host, copied in
+# from their host ~/.ssh/config earlier in the file) still WINS — only otherwise-unmatched/unknown
+# hosts fall through to accept-new, recording the key on first connect instead of failing the
+# non-interactive `git`. (Prepending would instead override those explicit pins down to TOFU — wrong.)
+# Default-off projects never get this block, so they keep ssh's safe default (`ask` → fail for an
+# unknown host); the baked global known_hosts (fix B) trusts the common forges either way. TOFU — opt-in.
+_SSH_AUTO_TRUST_BLOCK = (
+    b"# claude-man: ssh_auto_trust=on \xe2\x80\x94 accept unknown host keys on first connect (TOFU)\n"
+    b"Host *\n"
+    b"    StrictHostKeyChecking accept-new\n"
+    b"    UserKnownHostsFile ~/.ssh/known_hosts\n\n"
+)
 
-    Only NON-secret material (host aliases + known host keys) is copied so in-container ssh resolves
-    IdentityFile aliases and skips host-key prompts; private keys never leave the host agent.
+
+def _seed_ssh(project: Project) -> None:
+    """Seed the container's ~/.ssh tmpfs (config + known_hosts) via exec-stdin (post-start).
+
+    Only NON-secret material is written (host aliases + public known host keys + an accept-new opt-in);
+    private keys never leave the host agent (invariant 1). The host's ``~/.ssh/{config,known_hosts}``
+    are copied through when present so in-container ssh resolves IdentityFile aliases and inherits the
+    operator's trusted hosts. When ``project.ssh_auto_trust`` is set, an accept-new ``Host *`` block is
+    APPENDED to the config (TOFU; placed last so an operator's host-specific pins still win — see
+    ``_SSH_AUTO_TRUST_BLOCK``). A writable ``known_hosts`` is ALWAYS ensured (host copy, else
+    empty) so accept-new has a target even when the host never SSH'd to the forge; combined with the
+    baked global known_hosts (``/etc/ssh/ssh_known_hosts``), the common forges verify with no prompt.
+    Both files are written deterministically (config too, even when empty) so toggling the flag off
+    reliably clears a previously-seeded accept-new block.
+
     Best-effort: a stale container with no ~/.ssh tmpfs (ssh mount added without a recreate) just fails
     the write silently — ``project resync`` reports that case.
     """
+    slug = project.slug
     ssh_dir = os.path.expanduser("~/.ssh")
+    host: dict[str, bytes] = {}
     for name in ("config", "known_hosts"):
         path = os.path.join(ssh_dir, name)
-        if not os.path.exists(path):
-            continue
         try:
             with open(path, "rb") as fh:
-                data = fh.read()
+                host[name] = fh.read()
         except OSError:
-            continue
-        runner.exec_write_file(slug, f"{config.CONTAINER_SSH_DIR}/{name}", data)
+            continue  # absent/unreadable on the host — fine, we still seed our parts
+    config_bytes = host.get("config", b"")
+    if project.ssh_auto_trust:
+        # Append (general default last). A newline guard stops the block gluing onto a hostless last
+        # line of the copied config (e.g. a config with no trailing newline).
+        if config_bytes and not config_bytes.endswith(b"\n"):
+            config_bytes += b"\n"
+        config_bytes += _SSH_AUTO_TRUST_BLOCK
+    runner.exec_write_file(slug, f"{config.CONTAINER_SSH_DIR}/config", config_bytes)
+    runner.exec_write_file(slug, f"{config.CONTAINER_SSH_DIR}/known_hosts", host.get("known_hosts", b""))
 
 
 def _has_ssh_mount(project: Project) -> bool:
@@ -426,7 +460,7 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     if cp.returncode != 0:
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
     if _has_ssh_mount(project):
-        _seed_ssh(project.slug)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
+        _seed_ssh(project)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
     prefix = created.detail + "; " if "created" in created.detail else ""
     return Result(True, f"{prefix}started {project.container}{packs_note}{sync_note}{scratch_note}")
 
@@ -833,6 +867,33 @@ def remove_allow(slug: str, host: str) -> Result:
     return Result(True, f"removed {host} from {slug} allowlist — {_allowlist_apply_hint(slug)}")
 
 
+def set_ssh_auto_trust(slug: str, enabled: bool) -> Result:
+    """Toggle a project's ssh auto-trust (TOFU — ``StrictHostKeyChecking accept-new``; see ``_seed_ssh``).
+
+    Registry-only + flocked, then applied by RE-SEEDING the running container's ``~/.ssh/config`` — no
+    recreate needed, because the flag only shapes that seeded config (which ``_seed_ssh`` rewrites
+    deterministically on every ``up`` anyway). A stopped project applies it on its next ``up``. Only
+    meaningful with an ssh env-mount (the writable ``~/.ssh`` tmpfs); harmless without one. Idempotent."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    if project.ssh_auto_trust == enabled:
+        return Result(True, f"{slug} ssh auto-trust already {'on' if enabled else 'off'} (nothing to do)")
+    try:
+        with _slug_lock(slug):
+            projects_registry.set_ssh_auto_trust(slug, enabled)
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    verb = "enabled" if enabled else "disabled"
+    if not _has_ssh_mount(project):
+        return Result(True, f"{slug} ssh auto-trust {verb} — add an `ssh` env-mount for it to take "
+                            f"effect (`project env add {slug} ssh`)")
+    if runner.is_running(slug):
+        _seed_ssh(dataclasses.replace(project, ssh_auto_trust=enabled))  # re-seed with the new flag
+        return Result(True, f"{slug} ssh auto-trust {verb} — re-seeded ~/.ssh/config")
+    return Result(True, f"{slug} ssh auto-trust {verb} — `up` the project to apply")
+
+
 def create_project(
     slug: str,
     *,
@@ -840,6 +901,7 @@ def create_project(
     overlay: str | None = None,
     egress: str | None = None,
     language: str | None = None,
+    ssh_auto_trust: bool = False,
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Write (or load) the project definition, then create the container.
@@ -864,6 +926,7 @@ def create_project(
             egress=egress or config.DEFAULT_EGRESS,
             language=language or "",
             packs=default_packs,
+            ssh_auto_trust=ssh_auto_trust,
         )
         try:
             with _slug_lock(slug):  # serialise with concurrent add_repo/remove_repo on this slug
@@ -1210,7 +1273,7 @@ def resync(slug: str) -> Result:
     notes: list[str] = list(warnings)
     if _has_ssh_mount(project):
         if runner.is_running(slug):
-            _seed_ssh(slug)
+            _seed_ssh(project)
             notes.append("re-seeded ssh config/known_hosts")
         else:
             notes.append("container not running — `up` it to seed ssh")
