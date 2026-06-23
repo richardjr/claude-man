@@ -28,7 +28,7 @@ DEFAULT_EGRESS = "open"               # "open" | "strict"
 # SIGTERM (the kernel applies no default disposition to PID 1), so `docker stop` ALWAYS waits the
 # full grace then SIGKILLs — a 10s default makes stop/quit feel frozen. A short grace bounds it.
 DOCKER_STOP_GRACE_S = 2
-OVERLAYS = ("base", "python", "rust", "node", "python-node")
+OVERLAYS = ("base", "python", "rust", "node", "python-node", "terraform")
 EGRESS_MODES = ("open", "strict")
 
 # ---------------------------------------------------------------------------

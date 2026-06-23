@@ -30,6 +30,10 @@ class BuildChainTest(unittest.TestCase):
         # The python-node combo is an ordinary FROM-base overlay — base-first, no chaining.
         self.assertEqual(images.build_chain("python-node"), ["base", "python-node"])
 
+    def test_terraform_overlay_chain(self) -> None:
+        # The terraform overlay is an ordinary FROM-base overlay — base-first, no chaining.
+        self.assertEqual(images.build_chain("terraform"), ["base", "terraform"])
+
 
 class BuildArgvTest(unittest.TestCase):
     def test_base_argv(self) -> None:
@@ -56,6 +60,13 @@ class BuildArgvTest(unittest.TestCase):
         dfile = argv[argv.index("-f") + 1]
         self.assertTrue(dfile.endswith("images/overlays/python-node.Dockerfile"))
         self.assertTrue(config.image_dockerfile("python-node").is_file())
+
+    def test_terraform_overlay_argv_targets_dockerfile(self) -> None:
+        argv = images.build_argv("terraform")
+        self.assertIn("claude-man:terraform", argv)
+        dfile = argv[argv.index("-f") + 1]
+        self.assertTrue(dfile.endswith("images/overlays/terraform.Dockerfile"))
+        self.assertTrue(config.image_dockerfile("terraform").is_file())
 
     def test_default_claude_version(self) -> None:
         argv = images.build_argv("base")
