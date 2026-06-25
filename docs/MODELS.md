@@ -76,20 +76,33 @@ project model clear <slug>                 # back to subscription-direct
 After `project model set …`, **recreate** the project (`project recreate <slug>`). On `up`, claude-man
 brings up the gateway sidecar (fail-closed) and points the agent's `ANTHROPIC_BASE_URL` at it.
 
-How the two legs work:
-- **Claude leg — passthrough.** The gateway forwards the agent's claude.ai login (`Authorization` +
-  `anthropic-beta`) to Anthropic unchanged, so your **subscription** is used (no console key). The agent
-  authenticates to the gateway with a per-project master key via `x-litellm-api-key` (state-tier `0600`,
-  never in argv), keeping `Authorization` free for the OAuth.
-- **Local leg.** `claude-local-<model>` routes to your host Ollama.
-- **Background/Haiku tier** (summaries, the Explore subagent) points at the local model.
+How the two legs are meant to work:
+- **Local leg.** The local model appears in `/model` as `Local: <model>` (added via
+  `ANTHROPIC_CUSTOM_MODEL_OPTION`); selecting it sends `claude-local-<model>`, which the gateway routes to
+  your host Ollama (`ollama_chat/<model>`).
+- **Claude leg — passthrough.** The built-in Claude tiers route through the gateway to Anthropic on your
+  **subscription** (the agent's `Authorization`/`anthropic-beta` forwarded; the agent auths to the gateway
+  via `x-litellm-api-key`, a per-project master key, state-tier `0600`, never in argv).
 
 Invariants hold: the agent keeps the hard `ANTHROPIC_*` scrub and still gets the OAuth token; the
 hardened floor is byte-identical (the hybrid env is additive); the only posture change is that the OAuth
 token now transits claude-man's *own* sidecar (never a third party).
 
-**Limits (first cut):** hybrid requires **open** egress — locked + hybrid (the air-gapped two-sidecar
-wiring) is deferred (ROADMAP 9c) and refused with a clear message. Whether one LiteLLM daemon both
-forwards the OAuth for the Claude leg *and* translates the local leg is the open **9a validation** — run
-it against your Ollama + the pinned LiteLLM image before relying on it; if LiteLLM forces a console key
-for the Anthropic route, the Claude leg moves to a thin custom passthrough front.
+## Status (Phase 9 — work in progress, issue #14)
+
+**Working:** the model-management framework + CLI + TUI; the per-project pin; the gateway sidecar comes up
+fail-closed; the local model is **selectable in `/model` and routes to Ollama correctly** (verified live —
+the exact `claude-local-*` route beats the wildcard). The 30B reference model cold-loads slowly (~19 GB);
+pin a smaller preset (`gpt-oss:20b`, `qwen2.5-coder:7b`) for snappy local inference.
+
+**Open issue — the Claude passthrough leg does NOT work yet (the 9a spike).** Claude Code sends Claude
+models to the gateway as short aliases (e.g. `opus-4-8`) via `POST /v1/messages?beta=true`, which LiteLLM
+routes to its **anthropic passthrough** handler (not the `model_list` router) and forwards verbatim to
+`api.anthropic.com` → `404 not_found_error: model: opus-4-8`. So **selecting a built-in Claude tier in a
+hybrid project currently fails.** The background/Haiku tier (which also targets Claude) is affected the
+same way. Until this is fixed: use a hybrid project for the **local model**, and a normal
+(subscription-direct) project for Claude. Tracking + the debug findings + fix directions are in issue #14.
+
+**Other limits:** hybrid requires **open** egress — locked + hybrid (the air-gapped two-sidecar wiring) is
+deferred (ROADMAP 9c) and refused with a clear message. `/model` selections save "for new sessions", so
+the *current* session keeps its model until you restart `claude`.
