@@ -169,13 +169,17 @@ def _render_hybrid(project: Project) -> list[str]:
     emits a ``_HARDENING`` flag, so the hardened floor is byte-identical whether a project is hybrid or
     not (invariant 2; a unit test pins this). Empty unless a local model is pinned.
 
-    Points the agent at its per-project LiteLLM gateway sidecar (``ANTHROPIC_BASE_URL``) and turns on
-    gateway model-discovery (both Claude + the local model in ``/model``). The proxy auth rides
-    ``ANTHROPIC_CUSTOM_HEADERS`` (``x-litellm-api-key`` — pass-through, value supplied via the child env
-    in ``create`` so the key never reaches argv) so the agent's ``Authorization`` stays FREE to carry the
-    forwarded claude.ai OAuth — the SUBSCRIPTION is preserved and the OAuth token is STILL injected
-    (invariant 1: no ``ANTHROPIC_*`` key, no console key). The background/Haiku tier is pointed at the
-    local model (matches the primary backend / air-gap).
+    Points the agent at its per-project LiteLLM gateway sidecar (``ANTHROPIC_BASE_URL``) and adds the
+    local model as an EXPLICIT ``/model`` picker row (``ANTHROPIC_CUSTOM_MODEL_OPTION``). The built-in
+    Claude tiers still work — selecting one sends its ``claude-*`` id, which the gateway's wildcard route
+    passes through to Anthropic on the SUBSCRIPTION. (Gateway model-discovery is deliberately NOT relied
+    on: it silently fails on several auth shapes and a routing wildcard pollutes ``/v1/models`` — the
+    explicit custom-model env path is reliable.) The proxy auth rides ``ANTHROPIC_CUSTOM_HEADERS``
+    (``x-litellm-api-key`` — pass-through, value supplied via the child env in ``create`` so the key
+    never reaches argv) so the agent's ``Authorization`` stays FREE to carry the forwarded claude.ai
+    OAuth — the SUBSCRIPTION is preserved and the OAuth token is STILL injected (invariant 1: no
+    ``ANTHROPIC_*`` key, no console key). The background/Haiku tier is left on Claude Haiku (passthrough —
+    fast, on the subscription); a configurable local background tier is a follow-on.
 
     First cut is OPEN-egress only: a hybrid project joins its gateway bridge network (which keeps general
     egress + resolves the sidecar). Strict + hybrid (the two-sidecar air-gapped wiring) is deferred —
@@ -186,11 +190,15 @@ def _render_hybrid(project: Project) -> list[str]:
         return []
     gw = config.gateway_container_name(project.slug)
     base_url = f"http://{gw}:{config.GATEWAY_PORT}"
+    local_id = config.gateway_local_id(project.model)
     return [
         "--network", config.gateway_net_name(project.slug),
         "-e", f"ANTHROPIC_BASE_URL={base_url}",
-        "-e", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-        "-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={config.gateway_local_id(project.model)}",
+        # The local model as an explicit picker row (reliable; built-in Claude tiers route via the
+        # gateway's claude-* passthrough). The id MUST equal the gateway model_list name.
+        "-e", f"ANTHROPIC_CUSTOM_MODEL_OPTION={local_id}",
+        "-e", f"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=Local: {project.model}",
+        "-e", "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model via the claude-man hybrid gateway",
         "-e", HYBRID_HEADER_ENV,   # value (x-litellm-api-key: <master key>) supplied via the child env
     ]
 

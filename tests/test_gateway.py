@@ -104,11 +104,13 @@ class HybridFloorTest(unittest.TestCase):
         self.assertTrue(_contains_sublist(plain, runner._HARDENING))
         self.assertTrue(_contains_sublist(hybrid, runner._HARDENING))   # floor unchanged
         gw = config.gateway_container_name("p")
+        local_id = config.gateway_local_id("qwen3-coder:30b")
         self.assertEqual(set(hybrid) - set(plain), {
             "--network", config.gateway_net_name("p"),
             f"ANTHROPIC_BASE_URL=http://{gw}:{config.GATEWAY_PORT}",
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-            f"ANTHROPIC_DEFAULT_HAIKU_MODEL={config.gateway_local_id('qwen3-coder:30b')}",
+            f"ANTHROPIC_CUSTOM_MODEL_OPTION={local_id}",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=Local: qwen3-coder:30b",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model via the claude-man hybrid gateway",
             "ANTHROPIC_CUSTOM_HEADERS",   # pass-through (no value in argv — the key rides the child env)
         })
 
