@@ -37,6 +37,20 @@ class AllowlistTest(unittest.TestCase):
                      "registry.npmjs.org", "registry.yarnpkg.com", "deb.debian.org", "pypi.org"):
             self.assertIn(host, al)
 
+    def test_base_covers_gitlab_and_bitbucket(self) -> None:
+        # issue #12: a locked project must reach gitlab/bitbucket (and their altssh.* 443 SSH endpoints).
+        al = allowlist.build_allowlist()
+        self.assertIn(".gitlab.com", al)
+        self.assertIn(".bitbucket.org", al)
+
+    def test_ssh_over_443_alt_hosts_covered_by_base_wildcards(self) -> None:
+        # The SSH-over-443 alt endpoints must be matched by a base wildcard or squid would TCP_DENY them
+        # even with the ProxyCommand wired (issue #12).
+        wildcards = [h for h in allowlist.build_allowlist() if h.startswith(".")]
+        for ssh_host in ("ssh.github.com", "altssh.gitlab.com", "altssh.bitbucket.org"):
+            self.assertTrue(any(ssh_host.endswith(w) for w in wildcards),
+                            f"{ssh_host} not covered by any base wildcard")
+
     def test_no_bare_host_overlaps_a_wildcard_in_base(self) -> None:
         # squid FATALs/warns if a single dstdomain ACL has a bare host covered by a leading-dot
         # wildcard (e.g. api.anthropic.com under .anthropic.com) — so the rendered set must have none.
@@ -321,6 +335,45 @@ class SmokeVerdictTest(unittest.TestCase):
         ok, detail = egress.smoke_verdict(False, False)
         self.assertFalse(ok)
         self.assertIn("NOT reachable", detail)
+
+
+class SshSmokeProbeTest(unittest.TestCase):
+    """issue #12: the egress smoke's SSH-over-443 leg. The probe argv tunnels through the sidecar with an
+    explicit corkscrew ProxyCommand, and reachability is judged from the forge's banner, not the rc."""
+
+    def test_probe_argv_tunnels_via_corkscrew_to_alt_443(self) -> None:
+        argv = egress.egress_ssh_probe_argv("demo")
+        self.assertEqual(argv[:3], ["docker", "exec", config.container_name("demo")])
+        self.assertIn("-T", argv)
+        self.assertIn(f"git@{egress.SSH_ALLOWED_PROBE_HOST}", argv)
+        self.assertTrue(_contains_sublist(argv, ["-p", "443"]))   # the SSH-over-HTTPS port
+        # CONNECT through the project's squid sidecar via corkscrew (%h %p = the rewritten alt host:443).
+        proxy_cmd = f"corkscrew {config.proxy_container_name('demo')} {config.PROXY_PORT} %h %p"
+        self.assertTrue(_contains_sublist(argv, ["-o", f"ProxyCommand={proxy_cmd}"]))
+        self.assertTrue(_contains_sublist(argv, ["-o", "BatchMode=yes"]))
+
+    def test_ssh_reached_true_on_forge_banners(self) -> None:
+        for out in ("Hi user! You've successfully authenticated, but GitHub does not provide shell access.",
+                    "git@github.com: Permission denied (publickey)."):
+            self.assertTrue(egress.ssh_reached(out))
+
+    def test_ssh_reached_false_when_blocked_or_empty(self) -> None:
+        # A blocked CONNECT (corkscrew/squid deny) or a connection failure never yields a forge banner.
+        for out in ("",
+                    "ssh: connect to host ssh.github.com port 443: Connection refused",
+                    "kex_exchange_identification: Connection closed by remote host"):
+            self.assertFalse(egress.ssh_reached(out))
+
+
+class KnownHostsBakedTest(unittest.TestCase):
+    """issue #12: the baked global known_hosts must pre-trust the SSH-over-443 alt endpoints on the SAME
+    key lines as the bare forge, so strict-egress git-over-ssh verifies them with no prompt."""
+
+    def test_alt_443_aliases_present(self) -> None:
+        kh = (Path(__file__).resolve().parents[1] / "images/base/ssh_known_hosts").read_text()
+        self.assertIn("github.com,ssh.github.com ", kh)
+        self.assertIn("gitlab.com,altssh.gitlab.com ", kh)
+        self.assertIn("bitbucket.org,altssh.bitbucket.org ", kh)
 
 
 class StrictEgressFloorTest(unittest.TestCase):
