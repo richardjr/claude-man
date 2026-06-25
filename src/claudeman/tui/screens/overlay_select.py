@@ -27,6 +27,7 @@ _OVERLAY_DESC = {
     "rust": "+ rustup toolchain",
     "node": "+ corepack yarn/pnpm",
     "python-node": "+ python3/uv AND yarn/pnpm (polyglot)",
+    "terraform": "+ terraform + packer (HashiCorp infra)",
 }
 
 

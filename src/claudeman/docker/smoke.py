@@ -120,6 +120,39 @@ def _base_probes() -> list[Probe]:
     ]
 
 
+def _overlay_probes(overlay: str) -> list[Probe]:
+    """Overlay-specific probes appended after the base battery.
+
+    Each must exercise the overlay's tools' CORE operations under the read-only floor — not just
+    ``--version`` — per CLAUDE.md ("When adding or changing an overlay … actually exercise the real
+    workflow"). Returns ``[]`` for overlays whose tools the base battery already covers (e.g. the
+    node/python overlays — yarn/uv writable-path redirects are pinned by the base probes already).
+    """
+    if overlay == "terraform":
+        return [
+            # terraform must resolve + run as uid 1000 (CHECKPOINT_DISABLE keeps `version` network-free).
+            Probe("terraform version", ["terraform", "version"], required=True, expect="Terraform v"),
+            # CORE op under the floor: `terraform init` writes .terraform/ to the CWD. Run it in a fresh
+            # dir on the writable /workspace bind with a provider-less config so it stays network-free —
+            # proving terraform writes its working state to /workspace (not the read-only rootfs) and
+            # its checkpoint telemetry is disabled (no EROFS on the read-only HOME).
+            Probe("terraform init writes to /workspace (read-only floor)",
+                  ["sh", "-lc",
+                   'd="$(mktemp -d -p /workspace)" && cd "$d" && printf "terraform {}\\n" > main.tf '
+                   "&& terraform init"],
+                  required=True, expect="initialized", timeout=30),
+            # packer must resolve + run as uid 1000.
+            Probe("packer version", ["packer", "version"], required=True, expect="Packer v"),
+            # CORE op under the floor: packer installs plugins to PACKER_PLUGIN_PATH, whose default
+            # (~/.config/packer) is on the read-only rootfs. Prove the redirected path is agent-writable
+            # by creating it as uid 1000 — the EROFS this would hit if the redirect were missing.
+            Probe("packer plugin path writable (read-only floor)",
+                  ["sh", "-lc", 'mkdir -p "$PACKER_PLUGIN_PATH" && echo ok'],
+                  required=True, expect="ok"),
+        ]
+    return []
+
+
 def classify(probe: Probe, rc: int, out: str) -> tuple[bool, str, str]:
     """Pure verdict for one probe result → (failed, mark, detail). No docker/IO.
 
@@ -174,7 +207,7 @@ def smoke(overlay: str) -> SmokeResult:
     container = project.container
     token = _resolve_token()
 
-    probes = _base_probes()
+    probes = _base_probes() + _overlay_probes(overlay)
     if token:
         probes.append(Probe("one-shot claude -p (auth+egress)",
                             ["claude", "-p", "reply with the single word ok"],

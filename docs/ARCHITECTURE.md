@@ -173,9 +173,13 @@ extracts a binary to a writable temp), `DISABLE_AUTOUPDATER=1` (auto-update can'
 rootfs; claude-man owns version bumps).
 
 **Overlays** (`images/overlays/<name>.Dockerfile`, `FROM` the base) add toolchains: `python` (uv),
-`rust` (rustup), `node` (extra node), and `python-node` (a polyglot combo — python+uv *and* the node
+`rust` (rustup), `node` (extra node), `python-node` (a polyglot combo — python+uv *and* the node
 package managers in one image, for a node project that also needs python/pip; project python deps go
-in a `.venv` under `/workspace`, not the read-only rootfs). Project-specific lightweight packages come from
+in a `.venv` under `/workspace`, not the read-only rootfs), and `terraform` (the HashiCorp infra
+toolchain — pinned `terraform` + `packer` for the `infrastructure/` repo; working state writes ride
+the `/workspace` bind and `CHECKPOINT_DISABLE`/`PACKER_*`-dir redirects keep it off the read-only
+HOME; a *locked* terraform project must allowlist `registry.terraform.io` + `releases.hashicorp.com`
+plus its own cloud targets). Project-specific lightweight packages come from
 `project.toml`'s `extra_apt = [...]`, baked into a thin per-project layer at create time. Project
 **env vars are injected at run time** (declared `project.env` as `-e KEY=VAL`; any `env_file` is
 parsed and `ANTHROPIC_*`-scrubbed host-side, then injected pass-through as `-e KEY` name-only with

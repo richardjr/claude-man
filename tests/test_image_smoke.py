@@ -60,5 +60,23 @@ class BaseProbesTest(unittest.TestCase):
         self.assertTrue(any("treesitter" in n for n in names), names)
 
 
+class OverlayProbesTest(unittest.TestCase):
+    """Overlay-specific probes must exercise the overlay's tools' CORE ops under the floor."""
+
+    def test_terraform_overlay_adds_core_op_probes(self) -> None:
+        from claudeman.docker.smoke import _overlay_probes
+        names = [p.name for p in _overlay_probes("terraform")]
+        # Not just --version: an actual `terraform init` write to /workspace + packer plugin-path write.
+        self.assertTrue(any("terraform init" in n for n in names), names)
+        self.assertTrue(any("packer plugin path" in n for n in names), names)
+
+    def test_overlays_without_extra_probes_return_empty(self) -> None:
+        # node/python/base tools are already covered by the base battery — no extra probes.
+        from claudeman.docker.smoke import _overlay_probes
+        self.assertEqual(_overlay_probes("base"), [])
+        self.assertEqual(_overlay_probes("node"), [])
+        self.assertEqual(_overlay_probes("python-node"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
