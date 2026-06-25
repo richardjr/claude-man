@@ -346,10 +346,47 @@ def teardown(slug: str) -> None:
 ALLOWED_PROBE_URL = "https://github.com/git/git"
 DENIED_PROBE_URL = "https://example.com/blocked-by-claude-man"
 
+# SSH-over-443 through the proxy (issue #12). ssh ignores http(s)_proxy, so a locked project tunnels
+# git-over-ssh through the squid CONNECT proxy via each forge's SSH-over-443 endpoint. ssh.github.com is
+# allowlisted (`.github.com`) and trusted (baked known_hosts), so reaching it proves the path works even
+# WITHOUT a forwarded key — GitHub answers the SSH handshake before auth.
+SSH_ALLOWED_PROBE_HOST = "ssh.github.com"
+
+# Once the CONNECT tunnel + SSH transport reach GitHub it identifies itself, regardless of whether auth
+# succeeds. Any of these in the output means "reached the forge through the proxy".
+_SSH_REACHED_MARKERS = (
+    "successfully authenticated",       # a forwarded key authenticated
+    "does not provide shell access",    # GitHub's -T banner tail
+    "Permission denied (publickey)",    # reached, but no/wrong key — still proves reachability
+)
+
 
 def egress_probe_argv(slug: str, url: str) -> list[str]:
     """`docker exec <agent> git ls-remote <url> HEAD` — a tokenless egress probe (git uses the proxy)."""
     return ["docker", "exec", config.container_name(slug), "git", "ls-remote", url, "HEAD"]
+
+
+def egress_ssh_probe_argv(slug: str) -> list[str]:
+    """`docker exec <agent> ssh -T …` to the allowlisted forge over SSH-over-443, tunneled through the
+    sidecar with an EXPLICIT ProxyCommand — self-contained, so the probe works regardless of whether the
+    project's ~/.ssh/config has been seeded. Reachability is judged from the output (``ssh_reached``),
+    not the exit code (a keyless probe legitimately exits non-zero after reaching the server)."""
+    proxy_cmd = f"corkscrew {config.proxy_container_name(slug)} {config.PROXY_PORT} %h %p"
+    return [
+        "docker", "exec", config.container_name(slug),
+        "ssh", "-T",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        "-o", f"ProxyCommand={proxy_cmd}",
+        "-p", "443", f"git@{SSH_ALLOWED_PROBE_HOST}",
+    ]
+
+
+def ssh_reached(output: str) -> bool:
+    """PURE: did the SSH probe's combined output show the forge answered through the proxy? Reaching the
+    SSH server (even if auth then fails) is what proves the CONNECT-443 path — not a successful login."""
+    return any(marker in output for marker in _SSH_REACHED_MARKERS)
 
 
 def smoke_verdict(allowed_reachable: bool, denied_reachable: bool) -> tuple[bool, str]:
@@ -377,10 +414,19 @@ def smoke(slug: str) -> tuple[bool, list[str]]:
     lines.append(f"allowed  {ALLOWED_PROBE_URL}  -> rc={allowed.returncode}")
     denied = runner._run(egress_probe_argv(slug, DENIED_PROBE_URL), timeout=60)
     lines.append(f"denied   {DENIED_PROBE_URL}  -> rc={denied.returncode}")
+    # SSH-over-443 through the proxy (issue #12): proves git-over-ssh rides the same allowlist. Judged
+    # from the output, not the exit code (a keyless probe reaches the server then exits non-zero).
+    ssh = runner._run(egress_ssh_probe_argv(slug), timeout=60)
+    ssh_ok = ssh_reached((ssh.stdout or "") + (ssh.stderr or ""))
+    lines.append(f"ssh      git@{SSH_ALLOWED_PROBE_HOST}:443 (via proxy)  -> "
+                 + ("reached" if ssh_ok else "NOT reached"))
     blocked = denied_requests(slug)
     if blocked:
         lines.append("proxy denied-log: " + ", ".join(blocked))
     ok, detail = smoke_verdict(allowed.returncode == 0, denied.returncode == 0)
+    if not ssh_ok:
+        ok = False
+        detail += "; ssh-over-443 through the proxy did NOT reach the forge (corkscrew/known_hosts/allowlist?)"
     lines.append(("PASS: " if ok else "FAIL: ") + detail)
     return ok, lines
 

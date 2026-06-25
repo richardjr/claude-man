@@ -74,9 +74,15 @@ These are security- and correctness-critical. Every change must preserve them.
    `dstdomain` allowlist over CONNECT tunnels (no MITM). The agent's strict flags are ADDITIVE in
    `runner._render_egress` (floor byte-identical, invariant 2); `up` is **fail-closed** (a locked
    project never starts if the sidecar can't come up). The base allowlist must always include
-   `claude.ai` (the OAuth subscription refresh path) or token refresh fails opaquely. (`dnsmasq`
-   direct-DNS forwarding + an in-container `iptables` default-DROP layer are deferred defence-in-depth
-   — today's lock covers proxy-aware traffic only; see ROADMAP Phase 4.)
+   `claude.ai` (the OAuth subscription refresh path) or token refresh fails opaquely. **git-over-ssh**
+   is made proxy-aware under lock (issue #12): ssh ignores `HTTP(S)_PROXY`, so `lifecycle._seed_ssh`
+   rewrites github/gitlab/bitbucket to their **SSH-over-443** endpoints (`ssh.github.com`/`altssh.*`)
+   and `ProxyCommand`s through the sidecar with baked `corkscrew`, riding the SAME `dstdomain` allowlist
+   (squid `CONNECT` is 443-only; the `to_localhost`/`to_linklocal` denies still apply; keys never
+   enter — agent socket forwarded, invariant 1). Strict-mode + ssh-mount only, per-forge `Host` stanzas
+   (never `Host *`); Azure DevOps has no 443 SSH endpoint → HTTPS/open fallback. (`dnsmasq` direct-DNS
+   forwarding + an in-container `iptables` default-DROP layer are deferred defence-in-depth — today's
+   lock covers proxy-aware traffic plus the SSH-over-443 forges; see ROADMAP Phase 4.)
 4. **Registry is the source of truth; docker labels are a projection.** A project exists iff its
    `~/.config/claude-man/projects/<slug>.toml` exists. Live status is read fresh from
    `docker ps`/`inspect` and **never** cached. On any divergence, reconcile *toward* the registry by
