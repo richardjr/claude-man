@@ -60,3 +60,36 @@ models. Two operator-side host-daemon settings matter:
    known-good template/build for tool-heavy agent work.
 
 `model show <ref>` reports whether a model advertises the `tools` capability.
+
+## Hybrid mode — using a local model in Claude Code
+
+Pinning a model to a project turns on **hybrid mode**: a per-project **LiteLLM gateway sidecar** that
+fronts *both* the claude.ai subscription and the local model on one endpoint, so **both appear in Claude
+Code's `/model` picker and switch mid-session**.
+
+```
+project model set <slug> qwen3-coder:30b   # pin a local model → hybrid mode (recreate to apply)
+project model show <slug>                  # show the backend
+project model clear <slug>                 # back to subscription-direct
+```
+
+After `project model set …`, **recreate** the project (`project recreate <slug>`). On `up`, claude-man
+brings up the gateway sidecar (fail-closed) and points the agent's `ANTHROPIC_BASE_URL` at it.
+
+How the two legs work:
+- **Claude leg — passthrough.** The gateway forwards the agent's claude.ai login (`Authorization` +
+  `anthropic-beta`) to Anthropic unchanged, so your **subscription** is used (no console key). The agent
+  authenticates to the gateway with a per-project master key via `x-litellm-api-key` (state-tier `0600`,
+  never in argv), keeping `Authorization` free for the OAuth.
+- **Local leg.** `claude-local-<model>` routes to your host Ollama.
+- **Background/Haiku tier** (summaries, the Explore subagent) points at the local model.
+
+Invariants hold: the agent keeps the hard `ANTHROPIC_*` scrub and still gets the OAuth token; the
+hardened floor is byte-identical (the hybrid env is additive); the only posture change is that the OAuth
+token now transits claude-man's *own* sidecar (never a third party).
+
+**Limits (first cut):** hybrid requires **open** egress — locked + hybrid (the air-gapped two-sidecar
+wiring) is deferred (ROADMAP 9c) and refused with a clear message. Whether one LiteLLM daemon both
+forwards the OAuth for the Claude leg *and* translates the local leg is the open **9a validation** — run
+it against your Ollama + the pinned LiteLLM image before relying on it; if LiteLLM forces a console key
+for the Anthropic route, the Claude leg moves to a thin custom passthrough front.

@@ -24,6 +24,10 @@ from . import labels
 
 OAUTH_TOKEN_ENV = config.OAUTH_TOKEN_ENV
 GH_TOKEN_ENV = config.GH_TOKEN_ENV  # optional GitHub token — injected pass-through, sole-sourced from gh_token.py
+# Phase 9 hybrid gateway: the agent presents the LiteLLM master key to the sidecar via this header
+# (x-litellm-api-key) so its Authorization stays free for the forwarded claude.ai OAuth. Pass-through —
+# the value (carrying the key) rides the child env in create(), never argv.
+HYBRID_HEADER_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 
 # The fixed hardened flags (CLAUDE.md invariant 2 — the floor, not a suggestion).
 _HARDENING = [
@@ -160,6 +164,37 @@ def _render_egress(project: Project) -> list[str]:
     return args
 
 
+def _render_hybrid(project: Project) -> list[str]:
+    """Render the hybrid-mode (Phase 9) agent flags. PURELY ADDITIVE — like ``_render_egress`` it never
+    emits a ``_HARDENING`` flag, so the hardened floor is byte-identical whether a project is hybrid or
+    not (invariant 2; a unit test pins this). Empty unless a local model is pinned.
+
+    Points the agent at its per-project LiteLLM gateway sidecar (``ANTHROPIC_BASE_URL``) and turns on
+    gateway model-discovery (both Claude + the local model in ``/model``). The proxy auth rides
+    ``ANTHROPIC_CUSTOM_HEADERS`` (``x-litellm-api-key`` — pass-through, value supplied via the child env
+    in ``create`` so the key never reaches argv) so the agent's ``Authorization`` stays FREE to carry the
+    forwarded claude.ai OAuth — the SUBSCRIPTION is preserved and the OAuth token is STILL injected
+    (invariant 1: no ``ANTHROPIC_*`` key, no console key). The background/Haiku tier is pointed at the
+    local model (matches the primary backend / air-gap).
+
+    First cut is OPEN-egress only: a hybrid project joins its gateway bridge network (which keeps general
+    egress + resolves the sidecar). Strict + hybrid (the two-sidecar air-gapped wiring) is deferred —
+    ``lifecycle.up`` refuses it — so this renders nothing for a strict project, keeping the create argv
+    valid (no double ``--network``).
+    """
+    if not project.model or project.egress == "strict":
+        return []
+    gw = config.gateway_container_name(project.slug)
+    base_url = f"http://{gw}:{config.GATEWAY_PORT}"
+    return [
+        "--network", config.gateway_net_name(project.slug),
+        "-e", f"ANTHROPIC_BASE_URL={base_url}",
+        "-e", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+        "-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={config.gateway_local_id(project.model)}",
+        "-e", HYBRID_HEADER_ENV,   # value (x-litellm-api-key: <master key>) supplied via the child env
+    ]
+
+
 def _render_shell_history(host_dir: str | None) -> list[str]:
     """Render the opt-in persistent shell-history bind + its ``CLAUDEMAN_HISTFILE`` env. PURELY
     ADDITIVE — like ``_render_ports``/``_render_egress`` it never emits a ``_HARDENING`` flag, so with
@@ -249,6 +284,7 @@ def build_create_argv(
     argv += _render_env_mounts(project, ssh_auth_sock=ssh_auth_sock)
     argv += _render_ports(project)
     argv += _render_egress(project)
+    argv += _render_hybrid(project)
     argv += _render_shell_history(shell_history_host_dir)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
@@ -324,6 +360,7 @@ def create(
     created_iso: str,
     git_env: dict[str, str] | None = None,
     shell_history_host_dir: str | None = None,
+    hybrid_header: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -356,6 +393,10 @@ def create(
     env.update(file_env)
     if gh_token:
         env[GH_TOKEN_ENV] = gh_token  # the sole source; argv has the pass-through `-e GH_TOKEN`
+    # Hybrid gateway (Phase 9): the x-litellm-api-key header value carries the master key — supplied via
+    # the child env so it never reaches argv (argv has the pass-through `-e ANTHROPIC_CUSTOM_HEADERS`).
+    if hybrid_header:
+        env[HYBRID_HEADER_ENV] = hybrid_header
     # kind="env" env-mount values (pass-through; argv has the `-e NAME` from _render_env_mounts).
     # Forbidden names are filtered so an operator env var can never shadow the scrubbed/auth keys.
     for key, value in (env_secrets or {}).items():

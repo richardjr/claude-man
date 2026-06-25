@@ -417,6 +417,15 @@ def gateway_conf_path(slug: str) -> Path:
     return project_state_dir(slug) / "litellm.config.yaml"
 
 
+def gateway_local_id(model: str) -> str:
+    """The id the pinned local model is exposed under in Claude Code's ``/model`` picker. CC ignores any
+    id not starting with ``claude``/``anthropic``, and ``:``/``/`` aren't id-safe — so an ollama tag like
+    ``qwen3-coder:30b`` becomes ``claude-local-qwen3-coder-30b``. Shared by ``runner`` (the agent's
+    ANTHROPIC_DEFAULT_HAIKU_MODEL) and ``network/gateway`` (the model_list row) — defined here so neither
+    imports the other."""
+    return f"{GATEWAY_LOCAL_PREFIX}{model.replace(':', '-').replace('/', '-')}"
+
+
 def gateway_key_path(slug: str) -> Path:
     """The per-project LiteLLM master/virtual key (state-tier 0600, NEVER config.toml/synced) — the
     agent presents it via ``x-litellm-api-key`` so its ``Authorization`` header stays free to carry the

@@ -11,7 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from claudeman import config, hostplatform  # noqa: E402
+from claudeman.docker import runner  # noqa: E402
 from claudeman.network import gateway  # noqa: E402
+from claudeman.registry.schema import Project  # noqa: E402
 
 
 def _contains_sublist(big: list, small: list) -> bool:
@@ -82,6 +84,47 @@ class RunArgvTest(unittest.TestCase):
 
     def test_not_published_to_host(self) -> None:
         self.assertNotIn("-p", self.argv)   # in-network only; the agent reaches it by DNS name
+
+
+class HybridFloorTest(unittest.TestCase):
+    """The agent's hybrid flags are ADDITIVE — the hardened floor is byte-identical with/without a model
+    pinned (invariant 2); the OAuth token is STILL injected (subscription passthrough) and no
+    ``ANTHROPIC_*`` credential key is ever rendered (invariant 1)."""
+
+    def _argv(self, *, model: str = "", egress: str = "open") -> list[str]:
+        return runner.build_create_argv(
+            Project(slug="p", overlay="base", egress=egress, model=model),
+            profile_name="work", created_iso="t",
+            claude_config_path="/s/cc", workspace_path="/s/ws",
+        )
+
+    def test_floor_byte_identical_plain_vs_hybrid(self) -> None:
+        plain = self._argv()
+        hybrid = self._argv(model="qwen3-coder:30b")
+        self.assertTrue(_contains_sublist(plain, runner._HARDENING))
+        self.assertTrue(_contains_sublist(hybrid, runner._HARDENING))   # floor unchanged
+        gw = config.gateway_container_name("p")
+        self.assertEqual(set(hybrid) - set(plain), {
+            "--network", config.gateway_net_name("p"),
+            f"ANTHROPIC_BASE_URL=http://{gw}:{config.GATEWAY_PORT}",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+            f"ANTHROPIC_DEFAULT_HAIKU_MODEL={config.gateway_local_id('qwen3-coder:30b')}",
+            "ANTHROPIC_CUSTOM_HEADERS",   # pass-through (no value in argv — the key rides the child env)
+        })
+
+    def test_oauth_still_injected_and_anthropic_keys_never_rendered(self) -> None:
+        hybrid = self._argv(model="qwen3-coder:30b")
+        self.assertIn(runner.OAUTH_TOKEN_ENV, hybrid)   # subscription passthrough keeps the OAuth token
+        joined = " ".join(hybrid)
+        self.assertNotIn("ANTHROPIC_API_KEY", joined)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", joined)
+
+    def test_strict_plus_model_renders_no_hybrid(self) -> None:
+        # strict+hybrid is gated in lifecycle.up; the renderer emits nothing so the create argv stays
+        # valid (no double --network).
+        strict = self._argv(model="qwen3-coder:30b", egress="strict")
+        self.assertNotIn(config.gateway_net_name("p"), strict)
+        self.assertNotIn("ANTHROPIC_BASE_URL", " ".join(strict))
 
 
 class HostGatewaySeamTest(unittest.TestCase):

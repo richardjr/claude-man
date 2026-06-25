@@ -39,11 +39,9 @@ def _label_args(slug: str, role: str) -> list[str]:
 
 
 def local_model_id(model: str) -> str:
-    """The id the local model is exposed under in the ``/model`` picker. Claude Code IGNORES any id not
-    starting with ``claude``/``anthropic``, so the raw ollama tag is prefixed + sanitised (``:`` / ``/``
-    -> ``-``) into e.g. ``claude-local-qwen3-coder-30b``."""
-    safe = model.replace(":", "-").replace("/", "-")
-    return f"{config.GATEWAY_LOCAL_PREFIX}{safe}"
+    """The id the local model is exposed under in the ``/model`` picker (``config.gateway_local_id`` —
+    defined in config so runner + gateway share it without importing each other)."""
+    return config.gateway_local_id(model)
 
 
 def network_create_argv(slug: str) -> list[str]:
@@ -190,7 +188,15 @@ def _wait_healthy(gw: str, *, attempts: int = 30, delay: float = 1.0) -> bool:
 _TEARDOWN_TIMEOUT_S = 20
 
 
+def stop_gateway(slug: str) -> None:
+    """Remove just the gateway SIDECAR (best-effort, time-bounded) — on stop. The network is left for the
+    still-attached (stopped) agent container; ``up`` recreates the sidecar. No-op for a non-hybrid
+    project (rm of a non-existent container). Mirrors ``egress.stop_proxy``."""
+    runner._run(["docker", "rm", "-f", config.gateway_container_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
+
+
 def teardown(slug: str) -> None:
-    """Remove the gateway sidecar + its network (best-effort, idempotent) — on stop/unpin/delete."""
+    """Remove the gateway sidecar AND its network (best-effort, idempotent) — on delete/unpin, when the
+    agent container is already gone so the network rm succeeds."""
     runner._run(["docker", "rm", "-f", config.gateway_container_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
     runner._run(["docker", "network", "rm", config.gateway_net_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
