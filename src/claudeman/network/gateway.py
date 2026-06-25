@@ -169,15 +169,18 @@ def ensure_gateway(model: str, slug: str, *, on_progress=None):
     return True, f"hybrid gateway up: {local_model_id(model)} + claude.ai passthrough"
 
 
-def _wait_healthy(gw: str, *, attempts: int = 30, delay: float = 1.0) -> bool:
+def _wait_healthy(gw: str, *, attempts: int = 60, delay: float = 1.0) -> bool:
     """Poll the sidecar's ``/health/liveliness`` from inside the container (the port isn't published)
-    until it answers or the budget runs out — so the agent only starts behind a live gateway."""
+    until it answers 200 or the budget runs out — so the agent only starts behind a live gateway. The
+    LiteLLM image has a HEAVY import-time boot (~15-20s) and ships NO curl, so the probe uses the image's
+    own ``python`` (a Python app — guaranteed present); a generous budget covers a cold start."""
     import time
 
-    probe = ["docker", "exec", gw, "curl", "-fsS", "-m", "2",
-             f"http://localhost:{config.GATEWAY_PORT}/health/liveliness"]
+    url = f"http://localhost:{config.GATEWAY_PORT}/health/liveliness"
+    script = f"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('{url}',timeout=2).getcode()==200 else 1)"
+    probe = ["docker", "exec", gw, "python", "-c", script]
     for _ in range(attempts):
-        if runner._run(probe, timeout=5).returncode == 0:
+        if runner._run(probe, timeout=6).returncode == 0:
             return True
         if runner._run(["docker", "inspect", "-f", "{{.State.Running}}", gw]).stdout.strip() != "true":
             return False  # the container exited — stop waiting
