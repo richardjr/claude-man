@@ -43,6 +43,17 @@ PROXY_IMAGE = "proxy"                 # built as claude-man:proxy from images/pr
 PROXY_PORT = 3128                     # squid http_port — the agent's HTTP(S)_PROXY target
 EGRESS_NET_PREFIX = "claude-man-net-"          # per-project internal network: claude-man-net-<slug>
 PROXY_CONTAINER_PREFIX = "claude-man-proxy-"   # per-project squid sidecar: claude-man-proxy-<slug>
+
+# Phase 9 hybrid-model gateway: a per-project LiteLLM sidecar that fronts BOTH the claude.ai
+# subscription (passthrough — forwards the agent's OAuth + anthropic-beta) AND a local Ollama model,
+# so both appear in the /model picker and switch mid-session. PINNED official image (never pip — PyPI
+# 1.82.7/8 were malware). Reachable in-network on GATEWAY_PORT; not published to the host.
+GATEWAY_IMAGE_REF = "docker.litellm.ai/berriai/litellm:main-stable"   # pin to a digest before relying on it
+GATEWAY_PORT = 4000
+GATEWAY_NET_PREFIX = "claude-man-gwnet-"          # per-project gateway network: claude-man-gwnet-<slug>
+GATEWAY_CONTAINER_PREFIX = "claude-man-gw-"        # per-project gateway sidecar: claude-man-gw-<slug>
+GATEWAY_LOCAL_PREFIX = "claude-local-"             # the local model's id in the /model picker (CC ignores
+                                                  # ids not starting with claude/anthropic)
 # Buildable image tags: the project overlays + the standalone proxy sidecar (not an overlay of base).
 BUILDABLE_IMAGES = OVERLAYS + (PROXY_IMAGE,)
 
@@ -387,6 +398,30 @@ def squid_conf_path(slug: str) -> Path:
     """Host path of the rendered squid.conf (bind-mounted read-only into the sidecar). State tier —
     derived from the registry allowlist, holds no secret."""
     return project_state_dir(slug) / "squid.conf"
+
+
+def gateway_net_name(slug: str) -> str:
+    """The per-project network the agent + LiteLLM gateway sidecar share (hybrid mode)."""
+    return f"{GATEWAY_NET_PREFIX}{slug}"
+
+
+def gateway_container_name(slug: str) -> str:
+    """The per-project gateway sidecar container name (also its in-network DNS name for the agent's
+    ANTHROPIC_BASE_URL)."""
+    return f"{GATEWAY_CONTAINER_PREFIX}{slug}"
+
+
+def gateway_conf_path(slug: str) -> Path:
+    """Host path of the rendered LiteLLM config.yaml (bind-mounted read-only into the gateway). State
+    tier — holds no secret (the master key is injected as env, never written here)."""
+    return project_state_dir(slug) / "litellm.config.yaml"
+
+
+def gateway_key_path(slug: str) -> Path:
+    """The per-project LiteLLM master/virtual key (state-tier 0600, NEVER config.toml/synced) — the
+    agent presents it via ``x-litellm-api-key`` so its ``Authorization`` header stays free to carry the
+    forwarded claude.ai OAuth (the passthrough header trick; invariant 1 family)."""
+    return project_state_dir(slug) / "gateway-key"
 
 
 # ---------------------------------------------------------------------------

@@ -71,3 +71,25 @@ def docker_ssh_auth_sock(host_sock: str | None, platform: str | None = None) -> 
     if is_macos(platform):
         return DOCKER_DESKTOP_SSH_SOCK
     return host_sock
+
+
+# The in-container hostname that resolves to the host's loopback — where a host-run model server
+# (Ollama) listens. Same name everywhere; reachability is wired by ``host_gateway_create_args``.
+HOST_GATEWAY_HOST = "host.docker.internal"
+
+
+def host_loopback_host(platform: str | None = None) -> str:
+    """The hostname a container uses to reach the host (Phase 9 — the gateway sidecar -> host Ollama)."""
+    return HOST_GATEWAY_HOST
+
+
+def host_gateway_create_args(platform: str | None = None) -> list[str]:
+    """``--add-host`` so a container can resolve ``host.docker.internal`` to the host's loopback.
+
+    Docker Desktop (macOS) resolves it AUTOMATICALLY -> ``[]``. Native Linux docker does NOT, so map it
+    to the bridge gateway via docker's ``host-gateway`` magic value. Used by the Phase-9 gateway sidecar
+    to reach the host Ollama daemon (the AGENT never needs it — it talks only to the in-network sidecar).
+    """
+    if is_macos(platform):
+        return []
+    return [f"--add-host={HOST_GATEWAY_HOST}:host-gateway"]

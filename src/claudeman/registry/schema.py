@@ -16,6 +16,9 @@ from pathlib import PurePosixPath
 from .. import config
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# An ollama model ref: ``name[:tag]`` (namespaced ``ns/name`` allowed). SHAPE-only — a since-removed
+# model still loads (the gateway reports it, like a since-removed pack).
+_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*(:[a-z0-9][a-z0-9._-]*)?$", re.IGNORECASE)
 
 
 class ValidationError(ValueError):
@@ -393,6 +396,9 @@ class Project:
     sync: Sync = field(default_factory=Sync)  # per-project asset sync (CLAUDE.md + skills/agents)
     language: str = ""                   # EXPLICIT pack-tier key ("node"/"python"/…); "" = common only
     packs: tuple[str, ...] = ()          # selected curated packs (resolved at create; docs/PACKS.md)
+    model: str = ""                      # Phase 9 local-model PIN (an ollama tag). "" = subscription-direct;
+    #                                      set = HYBRID mode (gateway sidecar fronts claude.ai passthrough
+    #                                      + this local model in the /model picker). docs/MODELS.md, issue #14
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
@@ -416,6 +422,10 @@ class Project:
         if self.egress not in config.EGRESS_MODES:
             raise ValidationError(
                 f"invalid egress {self.egress!r}: one of {config.EGRESS_MODES}"
+            )
+        if self.model and not _MODEL_RE.match(self.model):
+            raise ValidationError(
+                f"invalid model {self.model!r}: must be an ollama tag like 'qwen3-coder:30b'"
             )
         for k in config.SCRUBBED_ENV_KEYS:
             if k in self.env:

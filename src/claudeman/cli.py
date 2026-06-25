@@ -876,6 +876,41 @@ def cmd_model_presets(_args) -> int:
     return 0
 
 
+def cmd_project_model_set(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    try:
+        updated = projects.set_model(args.slug, args.ref)
+    except Exception as exc:  # noqa: BLE001 - a malformed ref is operator error, surface it
+        print(f"invalid model: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.slug}: hybrid model pinned to {updated.model} (+ claude.ai passthrough) — "
+          f"recreate to apply: claudemanctl project recreate {args.slug}")
+    return 0
+
+
+def cmd_project_model_clear(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    projects.set_model(args.slug, "")
+    print(f"{args.slug}: hybrid mode off (subscription-direct) — recreate to apply")
+    return 0
+
+
+def cmd_project_model_show(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    p = projects.load(args.slug)
+    if p.model:
+        print(f"{args.slug}: hybrid — local model {p.model} (+ claude.ai passthrough via gateway)")
+    else:
+        print(f"{args.slug}: subscription-direct (no local model; `project model set {args.slug} <ref>`)")
+    return 0
+
+
 def cmd_project_delete(args) -> int:
     from . import lifecycle
 
@@ -1473,6 +1508,20 @@ def build_parser() -> argparse.ArgumentParser:
     pkd = pkp.add_parser("defaults", help="re-apply the library defaults for the project's language")
     pkd.add_argument("slug", type=_slug_arg)
     pkd.set_defaults(func=cmd_project_packs_defaults)
+    # project model (Phase 9 — the per-project hybrid local-model pin; recreate to apply)
+    pmd = proj.add_parser(
+        "model", help="per-project hybrid local-model pin (recreate to apply; docs/MODELS.md)"
+    ).add_subparsers(dest="modelcmd", required=True)
+    pms = pmd.add_parser("set", help="pin a local model (an ollama tag) → hybrid mode on")
+    pms.add_argument("slug", type=_slug_arg)
+    pms.add_argument("ref")
+    pms.set_defaults(func=cmd_project_model_set)
+    pmc = pmd.add_parser("clear", help="clear the pin → subscription-direct")
+    pmc.add_argument("slug", type=_slug_arg)
+    pmc.set_defaults(func=cmd_project_model_clear)
+    pmsh = pmd.add_parser("show", help="show the project's model backend")
+    pmsh.add_argument("slug", type=_slug_arg)
+    pmsh.set_defaults(func=cmd_project_model_show)
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
     prs.add_argument("slug", type=_slug_arg)
     prs.set_defaults(func=cmd_project_resync)
