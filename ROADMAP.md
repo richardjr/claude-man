@@ -329,6 +329,51 @@ is left untouched._
 - [x] **8c (landed 2026-06-15):** shell-open banner — baked `images/bash/motd`, a standalone bash script on PATH (`/usr/local/bin/claude-man-motd`). Renders the boot-splash CLAUDE-MAN wordmark in the terracotta→ember gradient (per-row RGB byte-identical to `tui/splash.py::row_color`, an `ast`-based test pins the sync) + a cheat-sheet (`n`, `ls`/`lt`, `g`/`gcm`, `cd`, `Ctrl-R`/↑↓, `<leader>e`, `hints`), a DYNAMIC history line (ephemeral vs persistent from `CLAUDEMAN_HISTFILE`), and the starship git-status legend. The rc shows it on EVERY interactive shell on a real tty (the `-t 1` guard keeps non-tty exec probes silent), `hints` re-shows it, `CLAUDEMAN_NO_MOTD`/`NO_COLOR` honoured. Colour only on a tty
 - [x] **8d (landed 2026-06-15):** history persistence — `[shell] persist_history = false` (default OFF) in the general tier (`registry/settings.py`, mirroring `ui_splash`) + `set_shell_history` + `config shell-history on|off` CLI (+ `config show` line). When ON, `lifecycle.ensure_created` makes a per-project state-tier dir (`config.project_shell_dir`, 0700 = uid 1000) and `runner._render_shell_history` binds it read-WRITE at `CONTAINER_SHELL_HISTORY_DIR` + injects `CLAUDEMAN_HISTFILE` (the baked rc points `$HISTFILE` there; else ephemeral on the `.cache` tmpfs). The ONE opt-in writable surface beyond the floor — default OFF keeps the create-argv byte-identical (a floor test pins both paths). Recreate to apply (the bind is fixed at create)
 
+## Phase 9 — Hybrid local models (claude.ai subscription + a local backend in one session)
+**Goal:** let a project's in-container `claude` use BOTH the claude.ai subscription AND a local/
+self-hosted model, both shown in the `/model` picker and switchable **mid-session**, via Claude Code's
+gateway surface. **Opt-in per project** (default stays subscription-direct). Full design: `docs/MODELS.md`
+(planned) + issue #14. **A different axis from Phase 7** (which runs a different *binary* like
+Codex): here the SAME `claude` binary points at a different *model backend*.
+
+_Key decisions: Claude Code reads `ANTHROPIC_BASE_URL` ONCE at launch and `/model` only flips the model
+NAME at a fixed endpoint, so "both models, one picker, mid-session" requires routing the session through
+ONE per-project **gateway sidecar** built like the squid egress sidecar (`network/egress.py` —
+additive `--network`/`-e`, floor byte-identical, invariant 2). CORRECTED finding (official
+`code.claude.com/docs/.../llm-gateway`): `ANTHROPIC_BASE_URL` alone does NOT replace the subscription —
+only a credential var (`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`) does — so a **passthrough** gateway
+that forwards the claude.ai login (`Authorization` + the `anthropic-beta` OAuth capability) KEEPS the
+Max/Pro subscription for Claude models while translating local-model calls (Anthropic `/v1/messages` ↔
+OpenAI) to a HOST Ollama/vLLM. Chosen (operator decision) over the terminating-router flavor (console
+pay-per-token + transparent auto-failover) to preserve the subscription — the cost is that failover to
+local is a **manual `/model` switch, not automatic**. Invariant 1 (no mis-bill): the agent keeps the
+hard `ANTHROPIC_*` scrub (no console key, no `ANTHROPIC_AUTH_TOKEN`), gets only `ANTHROPIC_BASE_URL` +
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, and STILL gets `CLAUDE_CODE_OAUTH_TOKEN` (the subscription
+stays the active credential). POSTURE CHANGE to document: the OAuth token now transits claude-man's OWN
+passthrough sidecar (never a third party — sidecar → `api.anthropic.com` directly), a scoped relaxation
+of "the token only touches the `claude` binary," opt-in to hybrid mode only. Mode is a `Project` field
+(`subscription` default | `hybrid`), recreate-to-apply (the base_url boundary IS a container boundary),
+mirroring the overlay/profile switch; the active mode + billing is surfaced in the TUI so it is never
+silent. The background/Haiku tier (`ANTHROPIC_DEFAULT_HAIKU_MODEL` — summaries, `--resume`/`/compact`,
+the Explore subagent, titles) ALSO traverses the gateway and is set to MATCH the project's primary
+backend (a small local model when primary is local → air-gap; a cheap Claude id when primary is Claude).
+Local server on the HOST (`host.docker.internal`); a locked hybrid project is PARTIAL air-gap (the Claude
+leg still needs `api.anthropic.com` — route the sidecar's Anthropic egress through the existing squid
+allowlist; the local leg stays on-host). LiteLLM (pinned official Docker image — NEVER pip; PyPI
+1.82.7/8 were malware) is the reference gateway. Tool-use fidelity through local translation is the
+make-or-break NON-invariant risk — prefer vLLM/OpenAI-native over raw Ollama. Design the Project fields
+provider-shaped so Phase 7 can later subsume this. A **dynamic model-management framework** sits under
+the gateway: a provider-shaped `models/` seam (Ollama first — it IS a model package manager: pull/list/
+rm/show + a registry; vLLM later) so the operator installs/updates local models from inside claude-man
+(`claudemanctl model …` + TUI) rather than hand-running `ollama pull`. Qwen3-Coder is the reference
+first model. "Keep up to date" = re-pull the tag + digest compare (Ollama has no auto-update)._
+
+- [ ] **9a (spike):** validate ONE per-project gateway sidecar that PASSES THROUGH the claude.ai login for `claude-*`/`anthropic-*` ids (forwarding `Authorization` + `anthropic-beta`, subscription billing intact) AND translates `local-*` ids to a host Ollama/vLLM, exposing both via `/v1/models` for `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. Confirm a mid-session `/model` switch works and the latest Claude ids appear with no config edit (wildcard route). Pinned LiteLLM image, else a thin custom front if one daemon can't cleanly do passthrough-Claude + translate-local + unified discovery
+- [ ] **9-models (dynamic model framework):** an Ollama-backed model-management layer — `claudemanctl model list/add/update/rm` (+ TUI) wrapping the host Ollama HTTP API (`/api/tags`, `/api/pull` with streamed progress, `/api/delete`, `/api/show`, `/api/version`) so the operator installs/updates local models (reference: Qwen3-Coder) without leaving claude-man; a `models/` package with a provider-shaped backend seam (Ollama now, vLLM later) feeding the gateway's local route. Update = re-pull tag + digest compare
+- [ ] **9b:** `Project.mode = subscription | hybrid` + a provider-shaped model-backend descriptor (state/registry); `lifecycle.recreate(mode=…)` (validated + persisted before teardown); gateway-sidecar orchestration paralleling `network/egress.py` (ensure/teardown, read-only config bind, fail-closed); additive agent env (`ANTHROPIC_BASE_URL` + discovery flag) rendered like `_render_egress` (floor byte-identical, unit-pinned); `ANTHROPIC_*` scrub UNCHANGED; `ANTHROPIC_DEFAULT_HAIKU_MODEL` set to match the primary backend
+- [ ] **9c:** egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server; TUI mode/billing badge; `image build`-style pin/verify for the gateway image; CLI/TUI verbs (`project model …`); `docs/MODELS.md`
+- [ ] **9d (optional, deferred):** the terminating-router flavor (console API key ON THE SIDECAR ONLY + transparent LiteLLM router failover Anthropic→local) as an alternative per-project hybrid auth — only if auto-failover ever outweighs the subscription
+
 ---
 
 Legend: `[x]` done in scaffold · `[~]` partially scaffolded (structure + stubs) · `[ ]` not started.
