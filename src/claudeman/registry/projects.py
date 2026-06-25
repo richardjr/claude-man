@@ -113,6 +113,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         extra_apt=tuple(proj.get("extra_apt", []) or ()),
         repos=repos,
         env_mount=mounts,
+        ssh_auto_trust=bool(proj.get("ssh_auto_trust", False)),
         ports=ports,
         allowlist=tuple(egress_tbl.get("allowlist", []) or ()),
         sync=sync,
@@ -174,6 +175,8 @@ def save(project: Project) -> Path:
         proj["claude_version"] = project.claude_version
     if project.workdir:
         proj["workdir"] = project.workdir
+    if project.ssh_auto_trust:  # opt-in; default off stays absent (terse template)
+        proj["ssh_auto_trust"] = True
     if project.extra_apt:
         proj["extra_apt"] = list(project.extra_apt)
     if project.env_file:
@@ -526,6 +529,30 @@ def set_allowlist(slug: str, hosts: tuple[str, ...]) -> Project:
         egress["allowlist"] = list(updated.allowlist)
     elif "allowlist" in egress:
         del egress["allowlist"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
+def set_ssh_auto_trust(slug: str, enabled: bool) -> Project:
+    """Set the project's ``ssh_auto_trust`` flag (comment-preserving scalar patch, atomic write).
+
+    Pure registry edit — re-seeding the running container's ``~/.ssh/config`` so the change takes
+    effect is the caller's job (``lifecycle.set_ssh_auto_trust``). Enabling writes
+    ``ssh_auto_trust = true``; disabling deletes the key so a default-off project stays terse."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, ssh_auto_trust=enabled)
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if enabled:
+        proj["ssh_auto_trust"] = True
+    elif "ssh_auto_trust" in proj:
+        del proj["ssh_auto_trust"]
     _atomic_write(path, tomlkit.dumps(doc))
     return updated
 

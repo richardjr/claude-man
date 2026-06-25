@@ -69,6 +69,12 @@ def _base_probes() -> list[Probe]:
               required=True, expect="ok"),
         # gh must be installed + runnable as the agent (Debian has no `gh` package — it's the upstream .deb).
         Probe("gh present", ["gh", "--version"], required=True, expect="gh version"),
+        # The curated forge host keys (issue #4, fix B) must be baked as OpenSSH's global known_hosts,
+        # so in-container git-over-ssh verifies the forges with no prompt regardless of host history.
+        # `ssh-keygen -F` exits 0 + prints the match when github.com is present.
+        Probe("forge known_hosts baked (github.com)",
+              ["sh", "-lc", "ssh-keygen -F github.com -f /etc/ssh/ssh_known_hosts >/dev/null && echo ok"],
+              required=True, expect="ok"),
         # `git config --global` must write somewhere (GIT_CONFIG_GLOBAL -> writable .cache), not EROFS the
         # read-only ~/.gitconfig — else in-container git is unusable.
         Probe("git config --global writable",

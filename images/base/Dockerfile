@@ -49,6 +49,16 @@ RUN set -eux; \
     ln -s /usr/bin/batcat /usr/local/bin/bat; \
     rm -rf /var/lib/apt/lists/*
 
+# Curated forge host keys baked as OpenSSH's GLOBAL known_hosts (issue #4, fix B). With these,
+# in-container `git`-over-SSH verifies github/gitlab/bitbucket/azure WITHOUT a prompt regardless of the
+# host machine's SSH history, and the trust survives every `recreate` (the ~/.ssh tmpfs is ephemeral;
+# this read-only file is not). PUBLIC host keys only — no secret, so invariant 1 is untouched. ssh
+# trusts a host whose key is in EITHER this global file OR the user's ~/.ssh/known_hosts (the latter
+# seeded from the host + grown by the opt-in accept-new auto-trust). See images/base/ssh_known_hosts
+# for provenance + verified fingerprints, and docs/SECURITY.md for the per-project ssh_auto_trust flag.
+COPY images/base/ssh_known_hosts /etc/ssh/ssh_known_hosts
+RUN chmod 0644 /etc/ssh/ssh_known_hosts
+
 # GitHub CLI (`gh`) — not in Debian's repos, so install the pinned upstream .deb (arch-aware). Gives
 # every container `gh` for PRs/issues; auth is the operator's (GH_TOKEN env, or `gh auth login` into the
 # writable GH_CONFIG_DIR below).

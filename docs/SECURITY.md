@@ -82,6 +82,22 @@ What crosses each way, and what must never cross:
 - **A managed ssh-agent socket forward is ownership-guarded.** Only a socket owned by the host
   operator is adopted into the container, so a hostile world-writable socket left in the agent's
   reach can't be smuggled in as the forwarded agent.
+- **Forge host keys are pre-trusted from non-secret material; auto-trust is opt-in (issue #4).** The
+  common git forges' **public** host keys (github/gitlab/bitbucket/azure) are baked into the base
+  image as OpenSSH's global known_hosts (`/etc/ssh/ssh_known_hosts`, from `images/base/ssh_known_hosts`
+  — provenance + verified SHA256 fingerprints in that file's header). So in-container git-over-ssh
+  verifies the forges with **no prompt** regardless of whether the host machine ever SSH'd to them,
+  and the trust survives every `recreate` (the `~/.ssh` tmpfs is ephemeral; the baked file is not).
+  This is **non-secret** (public host keys, the same ones every SSH client records on first connect),
+  so invariant 1 is untouched and no private key/credential is involved. For a host **not** in the
+  baked set (a self-hosted/other forge), the default is to **fail closed**: ssh's default
+  `StrictHostKeyChecking=ask` rejects the unknown host non-interactively rather than trusting it
+  silently. The per-project `ssh_auto_trust` flag (default **off**; `project ssh-trust <slug> on`)
+  opts into **TOFU** — `_seed_ssh` **appends** a `Host * → StrictHostKeyChecking accept-new` block to
+  the seeded `~/.ssh/config` (placed last as a general default, so an operator's own host-specific
+  `StrictHostKeyChecking` pin still wins ssh's first-match; only unknown hosts fall through to
+  accept-new), recording an unknown host's key on first connect. Re-seed-to-apply (no
+  recreate); only meaningful with an `ssh` env-mount (the writable `~/.ssh` tmpfs).
 
 ### Network containment (Phase 4 — implemented)
 - Open egress by default; per-project **strict** mode (`project lock <slug>`) routes all egress

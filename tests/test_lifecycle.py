@@ -810,5 +810,130 @@ class RecreateOverlayTest(unittest.TestCase):
         self.assertNotIn("overlay", res.detail)
 
 
+class SeedSshTest(unittest.TestCase):
+    """`_seed_ssh` renders ~/.ssh/{config,known_hosts} for the container — the auto-trust opt-in (TOFU)
+    must add an accept-new block ONLY when set, and a writable known_hosts must always be written so
+    accept-new/keyscan has a target even when the host never SSH'd to the forge (issue #4)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ssh_dir = os.path.join(self.tmp.name, ".ssh")
+        os.makedirs(self.ssh_dir, exist_ok=True)
+        self.writes: dict[str, bytes] = {}
+
+    @contextlib.contextmanager
+    def _seed(self):
+        def _record(slug, path, data, **kw):
+            self.writes[path] = data
+            return subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(lifecycle.os.path, "expanduser", return_value=self.ssh_dir), \
+             mock.patch.object(lifecycle.runner, "exec_write_file", side_effect=_record):
+            yield
+
+    def _cfg(self) -> bytes:
+        return self.writes[f"{config.CONTAINER_SSH_DIR}/config"]
+
+    def _kh(self) -> bytes:
+        return self.writes[f"{config.CONTAINER_SSH_DIR}/known_hosts"]
+
+    def test_off_copies_host_config_without_block(self) -> None:
+        Path(self.ssh_dir, "config").write_text("Host foo\n  User bar\n")
+        Path(self.ssh_dir, "known_hosts").write_text("example.com ssh-rsa AAA\n")
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=False))
+        self.assertEqual(self._cfg(), b"Host foo\n  User bar\n")
+        self.assertNotIn(b"accept-new", self._cfg())
+        self.assertEqual(self._kh(), b"example.com ssh-rsa AAA\n")
+
+    def test_on_appends_accept_new_block_after_host_config(self) -> None:
+        # The block is APPENDED (general default last), so an operator's host-specific pin earlier in
+        # their config wins ssh's first-match — only unknown hosts fall through to accept-new.
+        Path(self.ssh_dir, "config").write_text("Host pinned.corp\n  StrictHostKeyChecking yes\n")
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=True))
+        cfg = self._cfg()
+        self.assertEqual(cfg, b"Host pinned.corp\n  StrictHostKeyChecking yes\n"
+                              + lifecycle._SSH_AUTO_TRUST_BLOCK)
+        self.assertTrue(cfg.startswith(b"Host pinned.corp\n"))             # operator config FIRST
+        self.assertTrue(cfg.rstrip().endswith(b"UserKnownHostsFile ~/.ssh/known_hosts"))  # block LAST
+        self.assertIn(b"StrictHostKeyChecking accept-new", cfg)
+
+    def test_on_newline_guard_when_host_config_lacks_trailing_newline(self) -> None:
+        Path(self.ssh_dir, "config").write_text("Host foo")  # no trailing newline
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=True))
+        cfg = self._cfg()
+        self.assertTrue(cfg.startswith(b"Host foo\n"))   # guard inserted a separating newline
+        self.assertNotIn(b"Host fooHost", cfg)           # block didn't glue onto the last line
+        self.assertTrue(cfg.endswith(lifecycle._SSH_AUTO_TRUST_BLOCK))
+
+    def test_missing_host_files_still_writes_deterministically(self) -> None:
+        # No host config/known_hosts: OFF writes an EMPTY config (clears any prior block on a toggle)
+        # and an empty known_hosts target; ON writes the block-only config.
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=False))
+        self.assertEqual(self._cfg(), b"")
+        self.assertEqual(self._kh(), b"")
+        self.writes.clear()
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=True))
+        self.assertEqual(self._cfg(), lifecycle._SSH_AUTO_TRUST_BLOCK)
+
+
+class SetSshAutoTrustTest(unittest.TestCase):
+    """`set_ssh_auto_trust`: registry write + re-seed-to-apply (no recreate). Stopped/no-ssh-mount
+    projects don't shell to docker; a running ssh-mount project re-seeds."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = str(Path(self.tmp.name) / "config")
+        os.environ["CLAUDE_MAN_STATE_HOME"] = str(Path(self.tmp.name) / "state")
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None))
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_MAN_STATE_HOME", None))
+        from claudeman.registry.schema import EnvMount
+        lifecycle.projects_registry.save(Project(slug="ssh", env_mount=(EnvMount(kind="ssh"),)))
+        lifecycle.projects_registry.save(Project(slug="nossh"))
+
+    @staticmethod
+    def _load(slug: str):
+        return lifecycle.projects_registry.load(slug)
+
+    def test_enable_persists_and_is_idempotent(self) -> None:
+        res = lifecycle.set_ssh_auto_trust("nossh", True)
+        self.assertTrue(res.ok)
+        self.assertTrue(self._load("nossh").ssh_auto_trust)
+        again = lifecycle.set_ssh_auto_trust("nossh", True)
+        self.assertIn("already on", again.detail)
+
+    def test_no_ssh_mount_hints_to_add_one_and_does_not_reseed(self) -> None:
+        with mock.patch.object(lifecycle, "_seed_ssh") as seed:
+            res = lifecycle.set_ssh_auto_trust("nossh", True)
+        seed.assert_not_called()
+        self.assertIn("env-mount", res.detail)
+
+    def test_running_ssh_project_reseeds(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=True), \
+             mock.patch.object(lifecycle, "_seed_ssh") as seed:
+            res = lifecycle.set_ssh_auto_trust("ssh", True)
+        seed.assert_called_once()
+        # The re-seed gets the UPDATED flag, not the stale pre-write project.
+        self.assertTrue(seed.call_args.args[0].ssh_auto_trust)
+        self.assertIn("re-seeded", res.detail)
+
+    def test_stopped_ssh_project_defers_to_up(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=False), \
+             mock.patch.object(lifecycle, "_seed_ssh") as seed:
+            res = lifecycle.set_ssh_auto_trust("ssh", True)
+        seed.assert_not_called()
+        self.assertIn("`up`", res.detail)
+
+    def test_unknown_project(self) -> None:
+        res = lifecycle.set_ssh_auto_trust("ghost", True)
+        self.assertFalse(res.ok)
+        self.assertIn("no project", res.detail)
+
+
 if __name__ == "__main__":
     unittest.main()
