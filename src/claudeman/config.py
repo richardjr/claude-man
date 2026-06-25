@@ -161,6 +161,25 @@ DEFAULT_CLAUDE_CHANNEL = "latest"
 
 
 # ---------------------------------------------------------------------------
+# Local model backend (Phase 9 — the dynamic model-management framework, models/)
+# ---------------------------------------------------------------------------
+# Ollama runs as a HOST daemon (default 127.0.0.1:11434, NO auth). claude-man's model management
+# (`claudemanctl model …`) drives its HTTP API host-side via stdlib urllib — installing Ollama itself is
+# a documented host PREREQUISITE (see docs/MODELS.md), claude-man manages the MODELS within it. The
+# registry endpoint is the token-less manifest probe used to detect a newer model build WITHOUT a
+# multi-GB pull (the updates.py shape). The daemon URL is overridable via CLAUDE_MAN_OLLAMA_URL
+# (secret-free — Ollama carries no token).
+OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
+OLLAMA_REGISTRY_URL = "https://registry.ollama.ai"   # /v2/library/<model>/manifests/<tag> -> manifest digest
+OLLAMA_URL_ENV = "CLAUDE_MAN_OLLAMA_URL"
+
+
+def ollama_url() -> str:
+    """The host Ollama daemon base URL (env override, else the 127.0.0.1 default). No trailing slash."""
+    return (os.environ.get(OLLAMA_URL_ENV) or OLLAMA_DEFAULT_URL).rstrip("/")
+
+
+# ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
 def _xdg(env_var: str, default_rel: str) -> Path:
