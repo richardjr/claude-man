@@ -49,9 +49,18 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama && sudo systemctl 
 ss -ltnp | grep 11434     # verify: expect 0.0.0.0:11434, not 127.0.0.1:11434
 ```
 
-On macOS use `launchctl setenv OLLAMA_HOST 0.0.0.0:11434`. On a hardened Linux host the firewall may also
-need to allow the Docker bridge subnet to reach `:11434`. (`OLLAMA_CONTEXT_LENGTH` addresses the
+On macOS use `launchctl setenv OLLAMA_HOST 0.0.0.0:11434`. (`OLLAMA_CONTEXT_LENGTH` addresses the
 context-truncation trap below — see "Two host-daemon config traps".)
+
+**Host firewall (the easy-to-miss one).** Even bound to `0.0.0.0`, a host firewall like **ufw** blocks
+Docker→host traffic by default, so the gateway's connect to `:11434` **times out** (the daemon answers
+fine from the host itself — the give-away that it's the firewall). Allow Docker's private ranges to reach
+the Ollama port:
+
+```bash
+sudo ufw allow from 172.16.0.0/12 to any port 11434 proto tcp   # scoped: only :11434, only Docker subnets
+sudo ufw reload
+```
 
 ### 3. Pull the model you pin
 
@@ -109,6 +118,11 @@ models. Two operator-side host-daemon settings matter:
    known-good template/build for tool-heavy agent work.
 
 `model show <ref>` reports whether a model advertises the `tools` capability.
+
+A third trap is **handled for you**: at higher reasoning effort Claude Code sends an Anthropic `thinking`
+block, which Ollama rejects on non-thinking coder models (`does not support thinking`). The gateway
+**force-drops** `thinking`/`reasoning_effort` on the local route (the Claude route keeps it), so a hybrid
+project works at any effort with no operator action.
 
 ## Hybrid mode — using a local model in Claude Code
 
