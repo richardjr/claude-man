@@ -43,6 +43,18 @@ class ConfigYamlTest(unittest.TestCase):
         self.assertIn("model: ollama_chat/qwen3-coder:30b", self.conf)
         self.assertIn("api_base: http://host.docker.internal:11434", self.conf)
 
+    def test_local_route_drops_thinking_not_the_claude_route(self) -> None:
+        # CC sends an Anthropic `thinking` block at higher effort; non-thinking local coder models
+        # (qwen3-coder, …) hard-error in Ollama (`does not support thinking`). Force-drop it on the
+        # LOCAL route only — the claude-* passthrough must keep thinking (Anthropic supports it).
+        self.assertIn('additional_drop_params: ["thinking", "reasoning_effort"]', self.conf)
+        self.assertEqual(self.conf.count("additional_drop_params"), 1)   # exactly one route drops it
+        drop_idx = self.conf.index("additional_drop_params")
+        local_idx = self.conf.index("model_name: claude-local")
+        claude_idx = self.conf.index("model_name: claude-*")
+        self.assertGreater(drop_idx, local_idx)   # the drop lives inside the local block …
+        self.assertGreater(local_idx, claude_idx)  # … which follows the claude-* block (so not on it)
+
     def test_forwards_client_headers_for_subscription(self) -> None:
         # Kept for the agent's anthropic-beta + x-* headers. NOTE: this setting does NOT itself forward
         # the OAuth Authorization — that rides LiteLLM's dedicated anthropic path (clean_headers +
