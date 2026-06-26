@@ -34,6 +34,7 @@ from .checkout import gitstate, repos
 from .docker import images, runner, status
 from .network import allowlist as allowlist_mod
 from .network import egress
+from .network import gateway
 from .packs import library as packs_library
 from .packs import materialize as packs_materialize
 from .profiles import seed as seed_mod
@@ -326,12 +327,18 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
             shell_hist_dir = str(d)
         except OSError:
             shell_hist_dir = None
+    # Hybrid gateway (Phase 9): when a local model is pinned (open egress — strict+hybrid is gated in
+    # `up`), the agent presents the per-project LiteLLM master key to the sidecar via the
+    # x-litellm-api-key header, supplied pass-through so the key never reaches argv.
+    hybrid_header = None
+    if project.model and project.egress != "strict":
+        hybrid_header = f"x-litellm-api-key: {gateway.ensure_master_key(project.slug)}"
     # Git author identity (config.toml [git] override, else inherited from the host git config),
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
     cp = runner.create(project, profile_name=profile_name, token=token,
                        gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
                        git_env=gitconfig.container_env(), version=version,
-                       shell_history_host_dir=shell_hist_dir)
+                       shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
@@ -475,10 +482,21 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     # Strict egress: the per-project --internal network must exist BEFORE `docker create --network`
     # (which ensure_created renders). The sidecar is started after create, before start (below).
     strict = project.egress == "strict"
+    hybrid = bool(project.model)
+    if strict and hybrid:
+        # Locked + hybrid (the two-sidecar air-gapped wiring) is deferred — ROADMAP 9c. Until then the
+        # combination is refused rather than silently dropping one (which would mislead on either the
+        # egress posture or the model backend).
+        return Result(False, f"locked + hybrid local-model is not yet supported (ROADMAP 9c) — "
+                             f"`project model clear {project.slug}` or `project unlock {project.slug}`")
     if strict:
         net = egress.ensure_network(project.slug)
         if not net.ok:
             return Result(False, net.detail)
+    # Hybrid: the per-project gateway network must likewise exist BEFORE create (which renders
+    # `--network <gateway-net>` for a hybrid project), same ordering as the strict-egress net.
+    if hybrid and not gateway.ensure_network(project.slug):
+        return Result(False, f"could not create gateway network {config.gateway_net_name(project.slug)}")
     created = ensure_created(project, on_progress=on_progress)
     if not created.ok:
         return created
@@ -489,6 +507,19 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
         px = egress.ensure_proxy(project, on_progress=on_progress)
         if not px.ok:
             return Result(False, px.detail)
+    # Hybrid: bring up the LiteLLM gateway sidecar BEFORE starting the agent (fail closed — a hybrid
+    # project must never start with a dead gateway, or the agent reaches NO model at all). The master
+    # key + config were already rendered (ensure_created); ensure_gateway (re)starts the sidecar.
+    if hybrid:
+        ok, detail = gateway.ensure_gateway(project.model, project.slug, on_progress=on_progress)
+        if not ok:
+            return Result(False, detail)
+        # Fail-open pre-flight: the gateway is up, but the LOCAL leg also needs host Ollama reachable +
+        # the pinned model pulled. Warn (never block — the Claude leg works) so selecting the local model
+        # doesn't silently hang on an unreachable/unpulled backend.
+        warn = gateway.check_local_backend(project.model, project.slug)
+        if warn and on_progress:
+            on_progress(warn)
     # Refresh the pack selection into the asset source BEFORE sync-in carries it to the binds, so
     # the materialized fragments/skills ride the same start. Best-effort, like the sync itself.
     packs_note = _packs_refresh(project, on_progress=on_progress)
@@ -518,6 +549,7 @@ def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
     if cp.returncode != 0:
         return Result(False, f"docker stop failed: {cp.stderr.strip() or cp.stdout.strip()}")
     egress.stop_proxy(slug)  # remove the squid sidecar (best-effort; no-op for an open project)
+    gateway.stop_gateway(slug)  # remove the hybrid gateway sidecar (best-effort; no-op for non-hybrid)
     sync_note = _sync_out(slug, on_progress=on_progress)  # binds -> asset source; best-effort
     scratch_note = _scratch_clear(slug)  # wipe the scratch dir at session end (best-effort)
     pending_note = _pending_syncback_note(slug)  # "N change(s) pending; review with sync review"
@@ -1181,6 +1213,7 @@ def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
         with _slug_lock(slug):
             runner.remove(slug)  # docker rm -f; idempotent — a non-zero "No such container" is fine
             egress.teardown(slug)  # remove any strict-egress sidecar + per-project network (best-effort)
+            gateway.teardown(slug)  # remove any hybrid gateway sidecar + network (best-effort)
             state_note = _remove_state(slug, keep_workspace=keep_workspace)
             projects_registry.delete_definition(slug)  # LAST: the source-of-truth removal
     except OSError as exc:

@@ -743,6 +743,174 @@ def cmd_project_packs_defaults(args) -> int:
     return 0 if res.ok else 1
 
 
+# --------------------------------------------------------------------------
+# model (local model management — Phase 9; wraps the host Ollama daemon)
+# --------------------------------------------------------------------------
+def _gb(n: int) -> str:
+    return f"{n / 1e9:.1f}GB" if n else "-"
+
+
+_DAEMON_HINT = "install + run Ollama on the host (bind 0.0.0.0:11434 for containers); see docs/MODELS.md"
+
+
+def _pull_with_progress(backend, tag: str) -> int:
+    """Stream a pull, rendering an aggregate percent. Returns a process exit code."""
+    from .models.ollama import aggregate_pull_progress
+
+    events = []
+
+    def on_progress(ev) -> None:
+        events.append(ev)
+        if ev.kind == "layer":
+            print(f"\r  {aggregate_pull_progress(events):5.1f}%  downloading …   ", end="", flush=True)
+        elif ev.kind in ("manifest", "verifying", "writing", "removing"):
+            print(f"\r  {ev.status} …                 ", end="", flush=True)
+
+    term = backend.pull(tag, on_progress=on_progress)
+    print()
+    if term.kind == "success":
+        print(f"  {tag}: installed")
+        return 0
+    print(f"  {tag}: pull failed — {term.status}", file=sys.stderr)
+    return 1
+
+
+def cmd_model_list(args) -> int:
+    from .models import get_backend
+
+    backend = get_backend()
+    models, note = backend.list_models()
+    if note:
+        print(f"ollama: {note}", file=sys.stderr)
+        print(_DAEMON_HINT, file=sys.stderr)
+        return 1
+    if not models:
+        print("(no models installed — `claudemanctl model add qwen3-coder`)")
+        return 0
+    head = f"{'MODEL':<28} {'SIZE':>8}  {'PARAMS':<16} {'QUANT':<10}"
+    print(head + ("  UPDATE" if args.check else ""))
+    for m in models:
+        upd = ""
+        if args.check:
+            st = backend.update_status(m)
+            upd = "  " + ("update-available" if st.behind else (st.note or "current"))
+        print(f"{m.name:<28} {_gb(m.size):>8}  {m.param_size:<16} {m.quant:<10}{upd}")
+    return 0
+
+
+def cmd_model_add(args) -> int:
+    from .models import get_backend, presets
+
+    preset = presets.resolve_preset(args.ref)
+    tag = preset.tag if preset else args.ref
+    if preset:
+        print(f"{preset.label}  ({preset.params}, ~{preset.size_gb:.0f}GB, ~{preset.vram_gb}GB GPU) -> {tag}")
+        print(f"  tool-use: {preset.tool_use}")
+    return _pull_with_progress(get_backend(), tag)
+
+
+def cmd_model_update(args) -> int:
+    from .models import get_backend
+
+    backend = get_backend()
+    if args.all:
+        models, note = backend.list_models()
+        if note:
+            print(f"ollama: {note}", file=sys.stderr)
+            print(_DAEMON_HINT, file=sys.stderr)
+            return 1
+        refs = [m.name for m in models]
+        if not refs:
+            print("(no models installed)")
+            return 0
+    elif args.ref:
+        refs = [args.ref]
+    else:
+        print("specify a model or --all", file=sys.stderr)
+        return 2
+    rc = 0
+    for ref in refs:
+        print(f"updating {ref} …")
+        rc |= _pull_with_progress(backend, ref)
+    return rc
+
+
+def cmd_model_rm(args) -> int:
+    from .models import get_backend
+
+    ok, note = get_backend().remove(args.ref)
+    if ok:
+        print(f"{args.ref}: {note or 'removed'}")
+        return 0
+    print(f"{args.ref}: {note}", file=sys.stderr)
+    return 1
+
+
+def cmd_model_show(args) -> int:
+    from .models import get_backend
+
+    info = get_backend().show(args.ref)
+    if info.note:
+        print(f"{args.ref}: {info.note}", file=sys.stderr)
+        return 1
+    print(info.name)
+    print(f"  family:       {info.family or '-'}")
+    print(f"  params:       {info.param_size or '-'}")
+    print(f"  quant:        {info.quant or '-'}")
+    print(f"  context:      {info.context_length or 'unknown'}")
+    print(f"  capabilities: {', '.join(info.capabilities) or '-'}")
+    if "tools" not in info.capabilities:
+        print("  note: model does not advertise the 'tools' capability — agentic use may be limited")
+    return 0
+
+
+def cmd_model_presets(_args) -> int:
+    from .models import presets
+
+    print(f"  {'KEY':<17} {'TAG':<22} {'VRAM':>5}  {'SIZE':>6}  NOTES")
+    for p in presets.PRESETS:
+        star = "*" if p.default else " "
+        print(f"{star} {p.key:<17} {p.tag:<22} {p.vram_gb:>3}GB  ~{p.size_gb:>4.0f}G  {p.note}")
+    print("\n* default. Install: `claudemanctl model add <key>` (or any raw `name:tag`).")
+    print("Tool-use fidelity is the make-or-break for agentic Claude Code — check `model show <ref>`.")
+    return 0
+
+
+def cmd_project_model_set(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    try:
+        updated = projects.set_model(args.slug, args.ref)
+    except Exception as exc:  # noqa: BLE001 - a malformed ref is operator error, surface it
+        print(f"invalid model: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.slug}: hybrid model pinned to {updated.model} (+ claude.ai passthrough) — "
+          f"recreate to apply: claudemanctl project recreate {args.slug}")
+    return 0
+
+
+def cmd_project_model_clear(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    projects.set_model(args.slug, "")
+    print(f"{args.slug}: hybrid mode off (subscription-direct) — recreate to apply")
+    return 0
+
+
+def cmd_project_model_show(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    p = projects.load(args.slug)
+    if p.model:
+        print(f"{args.slug}: hybrid — local model {p.model} (+ claude.ai passthrough via gateway)")
+    else:
+        print(f"{args.slug}: subscription-direct (no local model; `project model set {args.slug} <ref>`)")
+    return 0
+
+
 def cmd_project_delete(args) -> int:
     from . import lifecycle
 
@@ -1340,6 +1508,20 @@ def build_parser() -> argparse.ArgumentParser:
     pkd = pkp.add_parser("defaults", help="re-apply the library defaults for the project's language")
     pkd.add_argument("slug", type=_slug_arg)
     pkd.set_defaults(func=cmd_project_packs_defaults)
+    # project model (Phase 9 — the per-project hybrid local-model pin; recreate to apply)
+    pmd = proj.add_parser(
+        "model", help="per-project hybrid local-model pin (recreate to apply; docs/MODELS.md)"
+    ).add_subparsers(dest="modelcmd", required=True)
+    pms = pmd.add_parser("set", help="pin a local model (an ollama tag) → hybrid mode on")
+    pms.add_argument("slug", type=_slug_arg)
+    pms.add_argument("ref")
+    pms.set_defaults(func=cmd_project_model_set)
+    pmc = pmd.add_parser("clear", help="clear the pin → subscription-direct")
+    pmc.add_argument("slug", type=_slug_arg)
+    pmc.set_defaults(func=cmd_project_model_clear)
+    pmsh = pmd.add_parser("show", help="show the project's model backend")
+    pmsh.add_argument("slug", type=_slug_arg)
+    pmsh.set_defaults(func=cmd_project_model_show)
     prs = proj.add_parser("resync", help="re-validate env-mount sources + re-seed ssh (no recreate)")
     prs.add_argument("slug", type=_slug_arg)
     prs.set_defaults(func=cmd_project_resync)
@@ -1361,6 +1543,31 @@ def build_parser() -> argparse.ArgumentParser:
     pkls = pk.add_parser("list", help="list library packs (name, tier, default, contents)")
     pkls.add_argument("--tier", help="filter by tier (common, or a language like node/python)")
     pkls.set_defaults(func=cmd_packs_list)
+
+    # model (local model management — Phase 9; wraps the host Ollama daemon)
+    mdl = sub.add_parser("model", help="local model management (host Ollama)").add_subparsers(
+        dest="cmd", required=True
+    )
+    mls = mdl.add_parser("list", help="list installed local models")
+    mls.add_argument("--check", action="store_true",
+                     help="annotate each with update-available (token-less registry probe)")
+    mls.set_defaults(func=cmd_model_list)
+    madd = mdl.add_parser("add", help="install a model (a preset key or a raw ollama tag)")
+    madd.add_argument("ref", help="a preset key (see `model presets`) or a raw name:tag")
+    madd.set_defaults(func=cmd_model_add)
+    mup = mdl.add_parser("update", help="re-pull a model to the latest build (incremental)")
+    mup.add_argument("ref", nargs="?", help="the model to update (omit with --all)")
+    mup.add_argument("--all", action="store_true", help="update every installed model")
+    mup.set_defaults(func=cmd_model_update)
+    mrm = mdl.add_parser("rm", help="remove an installed model")
+    mrm.add_argument("ref")
+    mrm.set_defaults(func=cmd_model_rm)
+    msh = mdl.add_parser("show", help="model metadata (context length, capabilities, quant)")
+    msh.add_argument("ref")
+    msh.set_defaults(func=cmd_model_show)
+    mdl.add_parser("presets", help="the curated recommended coding-model presets").set_defaults(
+        func=cmd_model_presets
+    )
 
     # sync
     sy = sub.add_parser("sync", help="config sync-back").add_subparsers(dest="cmd", required=True)

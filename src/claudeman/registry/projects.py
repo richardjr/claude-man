@@ -119,6 +119,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         sync=sync,
         language=str(proj.get("language", "") or ""),
         packs=tuple(proj.get("packs", []) or ()),
+        model=str(proj.get("model", "") or ""),
     )
 
 
@@ -171,6 +172,8 @@ def save(project: Project) -> Path:
         proj["language"] = project.language
     if project.packs:
         proj["packs"] = list(project.packs)
+    if project.model:
+        proj["model"] = project.model
     if project.claude_version:
         proj["claude_version"] = project.claude_version
     if project.workdir:
@@ -497,6 +500,30 @@ def set_packs(slug: str, names: tuple[str, ...]) -> Project:
         proj["packs"] = list(updated.packs)
     elif "packs" in proj:
         del proj["packs"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
+def set_model(slug: str, model: str) -> Project:
+    """Set (or clear, with ``""``) the project's local-model PIN — the hybrid-mode switch (Phase 9).
+
+    Comment-preserving scalar patch, atomic write. SHAPE is validated via the dataclass; the model's
+    existence in Ollama is the caller's concern (the CLI can warn). Recreate-to-apply (the gateway
+    sidecar + the agent's hybrid env are fixed at create), like the overlay/egress switch."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, model=model)  # ValidationError on a malformed ref
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if updated.model:
+        proj["model"] = updated.model
+    elif "model" in proj:
+        del proj["model"]
     _atomic_write(path, tomlkit.dumps(doc))
     return updated
 

@@ -41,6 +41,7 @@ from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.shutdown import ShutdownScreen
 from .screens.stop_all_confirm import StopAllConfirmScreen
+from .screens.models import ModelsScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
 from .screens.splash import SplashScreen
@@ -68,7 +69,8 @@ _GIT_SWEEP_REPEATS = 3
 _KEYBAR = (
     "[dim]project[/] [b]↵[/b] shell  [b]c[/b] claude  [b]e[/b] editor  [b]b[/b] browse  "
     "[b]s[/b] start/stop  [b]g[/b] repos…  [b]p[/b] project…  [b]y[/b] sync-back\n"
-    "[dim]global[/]  [b]n[/b] new  [b]S[/b] stop-all  [b]v[/b] view…  [b],[/b] settings  [b]q[/b] quit"
+    "[dim]global[/]  [b]n[/b] new  [b]S[/b] stop-all  [b]v[/b] view…  [b]m[/b] models  "
+    "[b],[/b] settings  [b]q[/b] quit"
 )
 
 
@@ -122,6 +124,7 @@ class ClaudeManApp(App):
         Binding("shift+s", "stop_all", "Stop all", show=False),
         Binding("v", "view_menu", "View…"),
         Binding("comma", "settings", "Settings", key_display=","),
+        Binding("m", "models", "Models"),
         Binding("q", "quit", "Quit"),
     ]
     # Submenu rows: (key, label, token). Tokens are routed to the action_* handlers by the dict in
@@ -884,6 +887,9 @@ class ClaudeManApp(App):
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen())
+
+    def action_models(self) -> None:
+        self.push_screen(ModelsScreen())
 
     @work(thread=True, group="bootstrap")
     def _bootstrap_env(self) -> None:

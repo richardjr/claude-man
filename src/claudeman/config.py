@@ -43,6 +43,21 @@ PROXY_IMAGE = "proxy"                 # built as claude-man:proxy from images/pr
 PROXY_PORT = 3128                     # squid http_port — the agent's HTTP(S)_PROXY target
 EGRESS_NET_PREFIX = "claude-man-net-"          # per-project internal network: claude-man-net-<slug>
 PROXY_CONTAINER_PREFIX = "claude-man-proxy-"   # per-project squid sidecar: claude-man-proxy-<slug>
+
+# Phase 9 hybrid-model gateway: a per-project LiteLLM sidecar that fronts BOTH the claude.ai
+# subscription (Claude leg — passthrough; the agent's OAuth reaches Anthropic on LiteLLM's dedicated
+# anthropic path, keeping the subscription) AND a local Ollama model, so both appear in the /model picker
+# and switch mid-session. PINNED official image BY DIGEST (never pip — PyPI 1.82.7/8 were malware; the
+# official Docker image was not affected). Reachable in-network on GATEWAY_PORT; not published to the host.
+# Digest = litellm 1.89.4 — VERIFIED live (issue #14): Claude leg 200 + subscription preserved, OAuth
+# forwarded. (Upstream's "complete" OAuth fix lands ≥1.91.x; bump + re-run the live capture to move it.)
+GATEWAY_IMAGE_REF = ("docker.litellm.ai/berriai/litellm"
+                     "@sha256:afdc3cc37493d4f86d485ad7ac4445e7154c568a8d47c01bad15c9cf062c66b5")
+GATEWAY_PORT = 4000
+GATEWAY_NET_PREFIX = "claude-man-gwnet-"          # per-project gateway network: claude-man-gwnet-<slug>
+GATEWAY_CONTAINER_PREFIX = "claude-man-gw-"        # per-project gateway sidecar: claude-man-gw-<slug>
+GATEWAY_LOCAL_PREFIX = "claude-local-"             # the local model's id in the /model picker (CC ignores
+                                                  # ids not starting with claude/anthropic)
 # Buildable image tags: the project overlays + the standalone proxy sidecar (not an overlay of base).
 BUILDABLE_IMAGES = OVERLAYS + (PROXY_IMAGE,)
 
@@ -158,6 +173,25 @@ CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
 RELEASES_BASE_URL = "https://downloads.claude.ai/claude-code-releases"
 CLAUDE_CHANNELS = ("latest", "stable")
 DEFAULT_CLAUDE_CHANNEL = "latest"
+
+
+# ---------------------------------------------------------------------------
+# Local model backend (Phase 9 — the dynamic model-management framework, models/)
+# ---------------------------------------------------------------------------
+# Ollama runs as a HOST daemon (default 127.0.0.1:11434, NO auth). claude-man's model management
+# (`claudemanctl model …`) drives its HTTP API host-side via stdlib urllib — installing Ollama itself is
+# a documented host PREREQUISITE (see docs/MODELS.md), claude-man manages the MODELS within it. The
+# registry endpoint is the token-less manifest probe used to detect a newer model build WITHOUT a
+# multi-GB pull (the updates.py shape). The daemon URL is overridable via CLAUDE_MAN_OLLAMA_URL
+# (secret-free — Ollama carries no token).
+OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
+OLLAMA_REGISTRY_URL = "https://registry.ollama.ai"   # /v2/library/<model>/manifests/<tag> -> manifest digest
+OLLAMA_URL_ENV = "CLAUDE_MAN_OLLAMA_URL"
+
+
+def ollama_url() -> str:
+    """The host Ollama daemon base URL (env override, else the 127.0.0.1 default). No trailing slash."""
+    return (os.environ.get(OLLAMA_URL_ENV) or OLLAMA_DEFAULT_URL).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +402,39 @@ def squid_conf_path(slug: str) -> Path:
     """Host path of the rendered squid.conf (bind-mounted read-only into the sidecar). State tier —
     derived from the registry allowlist, holds no secret."""
     return project_state_dir(slug) / "squid.conf"
+
+
+def gateway_net_name(slug: str) -> str:
+    """The per-project network the agent + LiteLLM gateway sidecar share (hybrid mode)."""
+    return f"{GATEWAY_NET_PREFIX}{slug}"
+
+
+def gateway_container_name(slug: str) -> str:
+    """The per-project gateway sidecar container name (also its in-network DNS name for the agent's
+    ANTHROPIC_BASE_URL)."""
+    return f"{GATEWAY_CONTAINER_PREFIX}{slug}"
+
+
+def gateway_conf_path(slug: str) -> Path:
+    """Host path of the rendered LiteLLM config.yaml (bind-mounted read-only into the gateway). State
+    tier — holds no secret (the master key is injected as env, never written here)."""
+    return project_state_dir(slug) / "litellm.config.yaml"
+
+
+def gateway_local_id(model: str) -> str:
+    """The id the pinned local model is exposed under in Claude Code's ``/model`` picker. CC ignores any
+    id not starting with ``claude``/``anthropic``, and ``:``/``/`` aren't id-safe — so an ollama tag like
+    ``qwen3-coder:30b`` becomes ``claude-local-qwen3-coder-30b``. Shared by ``runner`` (the agent's
+    ANTHROPIC_DEFAULT_HAIKU_MODEL) and ``network/gateway`` (the model_list row) — defined here so neither
+    imports the other."""
+    return f"{GATEWAY_LOCAL_PREFIX}{model.replace(':', '-').replace('/', '-')}"
+
+
+def gateway_key_path(slug: str) -> Path:
+    """The per-project LiteLLM master/virtual key (state-tier 0600, NEVER config.toml/synced) — the
+    agent presents it via ``x-litellm-api-key`` so its ``Authorization`` header stays free to carry the
+    forwarded claude.ai OAuth (the passthrough header trick; invariant 1 family)."""
+    return project_state_dir(slug) / "gateway-key"
 
 
 # ---------------------------------------------------------------------------
