@@ -176,6 +176,43 @@ _SSH_AUTO_TRUST_BLOCK = (
     b"    UserKnownHostsFile ~/.ssh/known_hosts\n\n"
 )
 
+# Per-forge SSH-over-443 alt endpoints (issue #12). Under STRICT egress the agent is on a no-route
+# `--internal` network and ssh ignores HTTP(S)_PROXY, so git-over-ssh dies at DNS resolution. Each forge
+# publishes an SSH endpoint on the HTTPS port; rewriting the forge host to it and ProxyCommand-ing
+# through the squid CONNECT proxy on 443 routes ssh over the SAME dstdomain allowlist as HTTPS. Azure
+# DevOps has no 443 SSH endpoint, so it is intentionally absent (HTTPS remote or open mode — see
+# docs/SECURITY.md). The alt host keys are baked (images/base/ssh_known_hosts) so there is no prompt.
+_SSH_PROXY_FORGES = (
+    ("github.com", "ssh.github.com"),
+    ("gitlab.com", "altssh.gitlab.com"),
+    ("bitbucket.org", "altssh.bitbucket.org"),
+)
+
+
+def _ssh_proxy_block(slug: str) -> bytes:
+    """Per-forge ~/.ssh/config Host blocks that tunnel git-over-ssh through the project's squid sidecar
+    via each forge's SSH-over-443 endpoint (issue #12; strict egress only). ``corkscrew`` does the HTTP
+    CONNECT; auth still rides the host-forwarded agent socket (no key enters — invariant 1). proxy host
+    + port are the same in-network squid name+port the agent's HTTP(S)_PROXY already targets. Scoped to
+    explicit per-forge ``Host`` stanzas (never a ``Host *`` catch-all) so localhost / non-forge ssh is
+    untouched, and placed before the auto-trust default so the forge rewrite wins ssh's first-match."""
+    proxy = config.proxy_container_name(slug)
+    port = config.PROXY_PORT
+    lines = [
+        "# claude-man: strict egress (issue #12) - git-over-ssh via the squid CONNECT proxy on 443.",
+        "# ssh ignores HTTP(S)_PROXY, so each forge is rewritten to its SSH-over-443 endpoint and",
+        f"# tunneled through {proxy}:{port} with corkscrew - the same dstdomain allowlist as HTTPS.",
+    ]
+    for host, alt in _SSH_PROXY_FORGES:
+        lines += [
+            f"Host {host}",
+            f"    Hostname {alt}",
+            "    Port 443",
+            "    User git",
+            f"    ProxyCommand corkscrew {proxy} {port} %h %p",
+        ]
+    return ("\n".join(lines) + "\n\n").encode()
+
 
 def _seed_ssh(project: Project) -> None:
     """Seed the container's ~/.ssh tmpfs (config + known_hosts) via exec-stdin (post-start).
@@ -183,13 +220,15 @@ def _seed_ssh(project: Project) -> None:
     Only NON-secret material is written (host aliases + public known host keys + an accept-new opt-in);
     private keys never leave the host agent (invariant 1). The host's ``~/.ssh/{config,known_hosts}``
     are copied through when present so in-container ssh resolves IdentityFile aliases and inherits the
-    operator's trusted hosts. When ``project.ssh_auto_trust`` is set, an accept-new ``Host *`` block is
-    APPENDED to the config (TOFU; placed last so an operator's host-specific pins still win — see
-    ``_SSH_AUTO_TRUST_BLOCK``). A writable ``known_hosts`` is ALWAYS ensured (host copy, else
-    empty) so accept-new has a target even when the host never SSH'd to the forge; combined with the
-    baked global known_hosts (``/etc/ssh/ssh_known_hosts``), the common forges verify with no prompt.
-    Both files are written deterministically (config too, even when empty) so toggling the flag off
-    reliably clears a previously-seeded accept-new block.
+    operator's trusted hosts. When the project is STRICT-egress, per-forge SSH-over-443 ProxyCommand
+    blocks are appended (``_ssh_proxy_block``) so git-over-ssh tunnels through the squid sidecar on the
+    same allowlist as HTTPS (issue #12). When ``project.ssh_auto_trust`` is set, an accept-new ``Host *``
+    block is APPENDED last (TOFU; placed after the forge blocks and the operator config so their
+    host-specific pins still win — see ``_SSH_AUTO_TRUST_BLOCK``). A writable ``known_hosts`` is ALWAYS
+    ensured (host copy, else empty) so accept-new has a target even when the host never SSH'd to the
+    forge; combined with the baked global known_hosts (``/etc/ssh/ssh_known_hosts``), the common forges
+    verify with no prompt. Both files are written deterministically (config too, even when empty) so
+    unlocking / toggling the flag off reliably clears a previously-seeded block.
 
     Best-effort: a stale container with no ~/.ssh tmpfs (ssh mount added without a recreate) just fails
     the write silently — ``project resync`` reports that case.
@@ -205,12 +244,20 @@ def _seed_ssh(project: Project) -> None:
         except OSError:
             continue  # absent/unreadable on the host — fine, we still seed our parts
     config_bytes = host.get("config", b"")
+
+    def _append(block: bytes) -> bytes:
+        # A newline guard stops a block gluing onto a hostless last line of the copied config (e.g. a
+        # config with no trailing newline). Each block is placed AFTER the operator's config so their
+        # host-specific pins win ssh's first-match.
+        sep = b"\n" if config_bytes and not config_bytes.endswith(b"\n") else b""
+        return config_bytes + sep + block
+
+    # STRICT egress: route git-over-ssh through the squid CONNECT proxy on 443 (issue #12). The forge
+    # rewrites go BEFORE the auto-trust `Host *` default so the forge-specific ProxyCommand wins.
+    if project.egress == "strict":
+        config_bytes = _append(_ssh_proxy_block(slug))
     if project.ssh_auto_trust:
-        # Append (general default last). A newline guard stops the block gluing onto a hostless last
-        # line of the copied config (e.g. a config with no trailing newline).
-        if config_bytes and not config_bytes.endswith(b"\n"):
-            config_bytes += b"\n"
-        config_bytes += _SSH_AUTO_TRUST_BLOCK
+        config_bytes = _append(_SSH_AUTO_TRUST_BLOCK)
     runner.exec_write_file(slug, f"{config.CONTAINER_SSH_DIR}/config", config_bytes)
     runner.exec_write_file(slug, f"{config.CONTAINER_SSH_DIR}/known_hosts", host.get("known_hosts", b""))
 

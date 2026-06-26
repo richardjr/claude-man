@@ -880,6 +880,40 @@ class SeedSshTest(unittest.TestCase):
             lifecycle._seed_ssh(Project(slug="demo", ssh_auto_trust=True))
         self.assertEqual(self._cfg(), lifecycle._SSH_AUTO_TRUST_BLOCK)
 
+    def test_strict_egress_appends_per_forge_ssh_proxy_block(self) -> None:
+        # issue #12: a LOCKED project gets per-forge SSH-over-443 ProxyCommand blocks so git-over-ssh
+        # tunnels through the squid CONNECT proxy on the same allowlist as HTTPS.
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", egress="strict"))
+        cfg = self._cfg()
+        self.assertIn(b"Host github.com", cfg)
+        self.assertIn(b"Hostname ssh.github.com", cfg)
+        self.assertIn(b"Hostname altssh.gitlab.com", cfg)
+        self.assertIn(b"Hostname altssh.bitbucket.org", cfg)
+        self.assertIn(b"Port 443", cfg)
+        proxy = config.proxy_container_name("demo")
+        self.assertIn(f"ProxyCommand corkscrew {proxy} {config.PROXY_PORT} %h %p".encode(), cfg)
+        self.assertNotIn(b"Host *", cfg)   # per-forge stanzas only — never a catch-all
+
+    def test_open_egress_has_no_ssh_proxy_block(self) -> None:
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", egress="open"))
+        self.assertNotIn(b"ProxyCommand", self._cfg())
+
+    def test_strict_plus_auto_trust_orders_config_proxy_then_default_last(self) -> None:
+        # operator host config FIRST, forge proxy blocks NEXT, accept-new `Host *` default LAST (so the
+        # forge-specific ProxyCommand wins ssh's first-match and operator pins win over both).
+        Path(self.ssh_dir, "config").write_text("Host pinned.corp\n  User me\n")
+        with self._seed():
+            lifecycle._seed_ssh(Project(slug="demo", egress="strict", ssh_auto_trust=True))
+        cfg = self._cfg()
+        i_host = cfg.index(b"Host pinned.corp")
+        i_proxy = cfg.index(b"ProxyCommand corkscrew")
+        i_default = cfg.index(b"Host *")
+        self.assertLess(i_host, i_proxy)
+        self.assertLess(i_proxy, i_default)
+        self.assertTrue(cfg.rstrip().endswith(b"UserKnownHostsFile ~/.ssh/known_hosts"))
+
 
 class SetSshAutoTrustTest(unittest.TestCase):
     """`set_ssh_auto_trust`: registry write + re-seed-to-apply (no recreate). Stopped/no-ssh-mount

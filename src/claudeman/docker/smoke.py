@@ -75,6 +75,15 @@ def _base_probes() -> list[Probe]:
         Probe("forge known_hosts baked (github.com)",
               ["sh", "-lc", "ssh-keygen -F github.com -f /etc/ssh/ssh_known_hosts >/dev/null && echo ok"],
               required=True, expect="ok"),
+        # The SSH-over-443 alt endpoint must ALSO be pre-trusted, or strict-egress git-over-ssh (tunneled
+        # to ssh.github.com:443) hits an unknown-host failure (issue #12).
+        Probe("forge known_hosts baked (ssh.github.com alt-443)",
+              ["sh", "-lc", "ssh-keygen -F ssh.github.com -f /etc/ssh/ssh_known_hosts >/dev/null && echo ok"],
+              required=True, expect="ok"),
+        # corkscrew is the ProxyCommand helper that tunnels git-over-ssh through the squid CONNECT proxy
+        # on 443 under strict egress (issue #12) — must be on PATH or a locked ssh push fails.
+        Probe("corkscrew present (ssh-through-proxy)", ["sh", "-lc", "command -v corkscrew"],
+              required=True, expect="/usr/bin/corkscrew"),
         # `git config --global` must write somewhere (GIT_CONFIG_GLOBAL -> writable .cache), not EROFS the
         # read-only ~/.gitconfig — else in-container git is unusable.
         Probe("git config --global writable",

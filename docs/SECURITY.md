@@ -121,8 +121,21 @@ What crosses each way, and what must never cross:
   code — this is the primary control against a compromised dependency exfiltrating the OAuth/`GH`
   token or any env-mount secret, or opening a reverse shell. The agent's strict flags are additive in
   `runner._render_egress`, so the hardened floor is byte-identical to an open project (invariant 2).
+- **git-over-ssh under strict egress (issue #12).** ssh ignores `HTTP(S)_PROXY`, so on the no-route
+  `--internal` network a plain `git@github.com` push dies at DNS. For a locked project with an `ssh`
+  env-mount, `_seed_ssh` writes per-forge `~/.ssh/config` blocks that rewrite **github.com / gitlab.com
+  / bitbucket.org** to their published **SSH-over-443** endpoints (`ssh.github.com`,
+  `altssh.gitlab.com`, `altssh.bitbucket.org`) and `ProxyCommand` through the sidecar with `corkscrew`
+  — so ssh rides the **same `dstdomain` allowlist** as HTTPS (squid permits `CONNECT` only to 443; the
+  `to_localhost`/`to_linklocal` SSRF denies still apply). Auth stays the host-forwarded agent socket
+  (no key enters — invariant 1); the alt host keys are pre-baked in the global known_hosts. Scoped to
+  explicit per-forge `Host` stanzas (never `Host *`), so localhost / non-forge ssh is untouched, and
+  emitted only in strict mode (unlock re-seeds without them). **Azure DevOps** has no 443 SSH endpoint,
+  so a `git@ssh.dev.azure.com` remote can't use this path under lock — use an HTTPS remote (rides the
+  proxy on 443) or open mode. `egress-smoke` proves an allowlisted forge is reachable over ssh-through
+  -proxy in addition to the HTTPS allow/deny legs.
   (Deferred defence-in-depth: `dnsmasq` direct-DNS forwarding + an in-container `iptables` default-DROP
-  layer — today's lock covers proxy-aware traffic only.)
+  layer — today's lock covers proxy-aware traffic plus the SSH-over-443 forges above.)
 
 ### Subscription-usage query (read-only, host-side)
 - claude-man queries `GET https://api.anthropic.com/api/oauth/usage` host-side, per profile, with that

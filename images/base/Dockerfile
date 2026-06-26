@@ -35,7 +35,10 @@ ARG MARKSMAN_VERSION=2026-02-08
 
 # Base tooling. ripgrep is installed from a read-only system path on purpose.
 # openssh-client provides `ssh` for in-container git-over-ssh when a project adds an `ssh` env-mount
-# (agent-forwarded — no keys baked or stored here).
+# (agent-forwarded — no keys baked or stored here). corkscrew tunnels that ssh through the squid CONNECT
+# proxy on 443 under STRICT egress (issue #12): ssh ignores HTTP(S)_PROXY, so a locked project rewrites
+# each forge to its SSH-over-443 endpoint and ProxyCommands through corkscrew — same allowlist as HTTPS.
+# corkscrew is pure stdin/stdout (no disk writes) so it runs clean under the read-only floor (invariant 2).
 #
 # Shell dev environment (Phase 8a — see images/bash/ + docs/DEVENV.md): starship (git-aware prompt),
 # fzf (Ctrl-R history), eza (ls), zoxide (smart cd), bat (pager/man), bash-completion — all from
@@ -44,7 +47,7 @@ ARG MARKSMAN_VERSION=2026-02-08
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl git ripgrep nodejs npm openssh-client \
+        ca-certificates curl git ripgrep nodejs npm openssh-client corkscrew \
         bash-completion starship fzf eza zoxide bat; \
     ln -s /usr/bin/batcat /usr/local/bin/bat; \
     rm -rf /var/lib/apt/lists/*
