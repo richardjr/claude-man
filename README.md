@@ -10,7 +10,7 @@ profile** (e.g. work / home), for a set of long-lived **git-checkout projects** 
 host. Each container is a **working hardened dev environment** — a curated shell and editor you
 can work in alongside the agent, not just a box the agent runs in.
 
-It exists to solve six things at once:
+It exists to solve seven things at once:
 
 1. **Multiple accounts** — launch each Claude instance under a chosen profile. A profile is one
    OAuth identity minted once with `claude setup-token` and injected per-launch as
@@ -36,6 +36,13 @@ It exists to solve six things at once:
    baked neovim with LSP/treesitter. A shell-open banner sums up the keys; bash history is
    ephemeral by default and persistable with the opt-in `config shell-history`. All baked
    read-only — the hardened floor is unchanged.
+7. **Hybrid local models** — pin a self-hosted model (via host **[Ollama](https://ollama.com)**) to a
+   project and it joins Claude Code's `/model` picker **alongside** your claude.ai subscription,
+   switchable mid-session. A per-project **LiteLLM gateway sidecar** fronts both legs on one endpoint:
+   the built-in Claude tiers pass through to Anthropic so your **Max/Pro subscription stays the active
+   credential** (no API key is ever injected — invariant 1 holds, never mis-billed), while the local
+   model routes to your GPU. claude-man installs/updates/inspects the models (`model add/list`, curated
+   coding-model presets); you run the Ollama daemon. See [`docs/MODELS.md`](docs/MODELS.md).
 
 <p align="center">
   <img src="docs/images/shell-banner.png" alt="claude-man dev-shell banner — the CLAUDE MAN block wordmark over a cheat-sheet of shell commands (n, ls/lt, g/gcm, Ctrl-R), history mode, and the git-prompt legend" width="680">
@@ -51,9 +58,11 @@ It exists to solve six things at once:
 > skills per project (defaults by language, drift-tracked, applied live); and open a **curated
 > hardened dev shell** (starship git-prompt, prefix + `Ctrl-R` history search, `n` for neovim,
 > `eza`/`zoxide`/`fzf`/`bat`, a shell-open cheat-sheet banner, opt-in persistent history) + a baked
-> neovim in any container — all from both the CLI and the TUI.
+> neovim in any container; and **pin a local model** for hybrid mode — your claude.ai subscription **and**
+> a host Ollama model in one `/model` picker, the subscription passthrough verified live (Phase 9, issue
+> #14) — all from both the CLI and the TUI.
 > **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 632 dependency-free tests; the hardened image is
+> sync-back — see [`ROADMAP.md`](ROADMAP.md). 709 dependency-free tests; the hardened image is
 > `image smoke`-gated.
 
 ## Platform support
@@ -413,6 +422,44 @@ uv run claudemanctl project recreate demo
 In the TUI, the **Settings** screen (press `,`) shows the resolved identity and ssh-key status; press
 `g` there to open the git-identity edit modal (leave a field blank to inherit the host). Recreate a
 project afterwards to apply.
+
+## Local models (hybrid mode)
+
+Run a project's in-container `claude` against a **self-hosted model** *alongside* your claude.ai
+subscription. Pinning a model turns on **hybrid mode**: a per-project **LiteLLM gateway sidecar** fronts
+both legs on one endpoint, so both appear in Claude Code's `/model` picker and switch **mid-session**.
+
+- **Claude leg** — the built-in tiers pass through to `api.anthropic.com` on your **subscription** (the
+  agent's OAuth is forwarded; **no API key is ever injected**, so billing can't slip to console
+  pay-per-token — invariant 1). The gateway maps `claude-*` ids straight through, so new Claude models
+  work with no config edit.
+- **Local leg** — the pinned model shows as `Local: <model>` and routes to your host GPU via Ollama.
+
+```bash
+# Manage the models claude-man can use (host Ollama — see docs/MODELS.md for GPU + bind setup):
+uv run claudemanctl model presets                 # the curated coding-model table (Qwen3-Coder default)
+uv run claudemanctl model add qwen3-coder:30b      # install a preset key or any raw ollama tag (streamed)
+uv run claudemanctl model list [--check]           # installed models; --check = update-available probe
+uv run claudemanctl model show qwen3-coder:30b     # context length, `tools` capability, quant, family
+
+# Pin / unpin a local model on a project (recreate to apply):
+uv run claudemanctl project model set demo qwen3-coder:30b   # -> hybrid mode
+uv run claudemanctl project model show demo
+uv run claudemanctl project model clear demo                 # back to subscription-direct
+uv run claudemanctl project recreate demo
+```
+
+**Prerequisite:** Ollama runs on the **host** (claude-man manages models, not the server). It needs a
+**GPU build**, a `0.0.0.0:11434` bind so containers can reach it, and the pinned model pulled — all in
+[`docs/MODELS.md`](docs/MODELS.md). On `up`, a hybrid project **pre-flights** the local backend and
+prints a one-line warning if Ollama is unreachable or the model isn't pulled (the Claude leg works
+regardless). The hardened floor is byte-identical whether or not a model is pinned; strict-egress +
+hybrid (air-gapped) is not yet supported and is refused with a clear message.
+
+> **Status (Phase 9, issue #14):** the model framework, the per-project pin, the gateway sidecar, and
+> the **Claude subscription passthrough** are working and **verified live** (a Claude request through the
+> gateway returns 200 and stays on the subscription). The local leg works once the host Ollama
+> prerequisites above are met.
 
 ## Terminal & file-manager preferences
 

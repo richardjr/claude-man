@@ -9,13 +9,62 @@ the agent's calls to a local model (the `/model`-picker + mid-session switching)
 ## Prerequisite: Ollama on the host
 
 claude-man manages **models**, not the model server. Install and run **[Ollama](https://ollama.com)** on
-the host (it's a long-lived daemon on `127.0.0.1:11434`, no auth):
+the host (a long-lived daemon on `:11434`, no auth). For **hybrid mode** (a local model inside Claude
+Code) three things must be true, in this order — get any wrong and selecting the local model in `/model`
+just **hangs**. (claude-man now pre-flights this on `up` and prints a one-line warning naming the gap;
+the claude.ai leg keeps working regardless.)
 
-- **For host-side `claudemanctl model …`** the default `127.0.0.1:11434` is all you need.
-- **For containers to reach it** (the Phase-9 gateway), the daemon must bind a reachable interface —
-  set `OLLAMA_HOST=0.0.0.0:11434` in the systemd unit (`systemctl edit ollama`) / `launchctl setenv` on
-  macOS. On Linux a hardened host firewall may also need to allow the Docker bridge subnet.
+### 1. Install a GPU build (don't settle for the CPU package)
 
+A capable coding model (the 30B reference) needs a **GPU**. On a 24 GB card (e.g. RTX 3090/4090) the
+default `qwen3-coder:30b` fits; CPU-only inference of a 30B model is unusably slow and looks like a hang.
+
+- **Arch / Omarchy:** the plain `ollama` package is **CPU-only**. Install the CUDA (NVIDIA) or ROCm (AMD)
+  build instead:
+  ```bash
+  sudo pacman -S ollama-cuda      # NVIDIA   (or: ollama-rocm for AMD)
+  ```
+- **Other distros / the official installer** bundle GPU support when the driver + CUDA/ROCm runtime are
+  present.
+- **Verify the GPU is actually seen** (the common silent failure — a present GPU but a CPU-only daemon):
+  ```bash
+  journalctl -u ollama -n 40 | grep -iE "vram|cuda|gpu|compute"
+  ```
+  A working setup reports a non-zero VRAM / a CUDA (or ROCm) runner. `total_vram="0 B"` + `id=cpu` means
+  Ollama is on the CPU (wrong package, or a missing driver/runtime) — fix that before pinning a big model.
+
+### 2. Bind it so containers can reach it
+
+The hybrid gateway sidecar reaches the host at `host.docker.internal:11434`. Ollama's **default
+`127.0.0.1` bind is not reachable from a container** — the gateway connect times out (the classic
+"local model hangs" symptom). Bind all interfaces:
+
+```bash
+# Linux (systemd): a drop-in is cleaner than editing the unit
+sudo install -d /etc/systemd/system/ollama.service.d
+printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\nEnvironment="OLLAMA_CONTEXT_LENGTH=65536"\n' \
+  | sudo tee /etc/systemd/system/ollama.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart ollama && sudo systemctl enable ollama
+
+ss -ltnp | grep 11434     # verify: expect 0.0.0.0:11434, not 127.0.0.1:11434
+```
+
+On macOS use `launchctl setenv OLLAMA_HOST 0.0.0.0:11434`. On a hardened Linux host the firewall may also
+need to allow the Docker bridge subnet to reach `:11434`. (`OLLAMA_CONTEXT_LENGTH` addresses the
+context-truncation trap below — see "Two host-daemon config traps".)
+
+### 3. Pull the model you pin
+
+```bash
+claudemanctl model add qwen3-coder:30b   # ~19 GB; or `ollama pull qwen3-coder:30b`
+```
+
+A model that isn't pulled would otherwise trigger a multi-GB download on the first request (another
+apparent hang) — the pre-flight warns when the pinned model is absent.
+
+---
+
+For **host-side `claudemanctl model …`** alone (no containers), the default `127.0.0.1:11434` is enough.
 Override the URL claude-man talks to with `CLAUDE_MAN_OLLAMA_URL` (secret-free — Ollama has no token).
 Every `model` command **fails open**: with no daemon it prints an actionable hint and exits non-zero,
 never hangs.
@@ -88,20 +137,37 @@ Invariants hold: the agent keeps the hard `ANTHROPIC_*` scrub and still gets the
 hardened floor is byte-identical (the hybrid env is additive); the only posture change is that the OAuth
 token now transits claude-man's *own* sidecar (never a third party).
 
-## Status (Phase 9 — work in progress, issue #14)
+## Status (Phase 9 — issue #14)
 
 **Working:** the model-management framework + CLI + TUI; the per-project pin; the gateway sidecar comes up
 fail-closed; the local model is **selectable in `/model` and routes to Ollama correctly** (verified live —
 the exact `claude-local-*` route beats the wildcard). The 30B reference model cold-loads slowly (~19 GB);
 pin a smaller preset (`gpt-oss:20b`, `qwen2.5-coder:7b`) for snappy local inference.
 
-**Open issue — the Claude passthrough leg does NOT work yet (the 9a spike).** Claude Code sends Claude
-models to the gateway as short aliases (e.g. `opus-4-8`) via `POST /v1/messages?beta=true`, which LiteLLM
-routes to its **anthropic passthrough** handler (not the `model_list` router) and forwards verbatim to
-`api.anthropic.com` → `404 not_found_error: model: opus-4-8`. So **selecting a built-in Claude tier in a
-hybrid project currently fails.** The background/Haiku tier (which also targets Claude) is affected the
-same way. Until this is fixed: use a hybrid project for the **local model**, and a normal
-(subscription-direct) project for Claude. Tracking + the debug findings + fix directions are in issue #14.
+**The Claude passthrough leg now works (the 9a blocker is fixed).** The earlier `404 not_found_error:
+model: opus-4-8` was a **model-mapping bug in our own gateway config, not an auth bug** (a 404 not a 401
+means the OAuth already reached Anthropic). Claude Code 2.1.193 sends the **full** id `claude-opus-4-8`
+(not the short `opus-4-8` — verified first-hand in the binary), and the old `model: anthropic/*` wildcard
+captured the suffix after `claude-` and forwarded the invalid bare `opus-4-8`. The fix is a one-line
+change to a **prefix-preserving** wildcard, `model: anthropic/claude-*`, which forwards the full valid id
+and covers Opus/Sonnet/Haiku(background)/Fable + any future Claude id in a single row (LiteLLM substitutes
+the captured `*` into the target `*`). The `?beta=true` query string is **irrelevant** to LiteLLM routing
+(FastAPI ignores it). See [`issue-14-hybrid-passthrough-protocol.md`](issue-14-hybrid-passthrough-protocol.md)
+for the wire-level write-up.
+
+**Subscription preserved — verified live.** A real Claude request through the gateway returns `200` and is
+served on the **subscription** (`anthropic-ratelimit-unified-status: allowed`, counted against the 5h/7d
+unified windows; this account's overage is `org_level_disabled`, so a 200 completion can only be the
+subscription). The OAuth `Authorization` rides LiteLLM's dedicated anthropic path (not
+`forward_client_headers_to_llm_api`), and the agent auths to the proxy via `x-litellm-api-key`. The proxy's
+header munging (it replaces `User-Agent` with `litellm/<ver>`) did **not** demote the request.
+
+**Observability caveat:** LiteLLM **strips Anthropic's response headers**, so an operator can't read their
+own `anthropic-ratelimit-unified-*` lane through the gateway. That's harmless on overage-disabled accounts
+(200 ⇒ subscription) but on accounts where pay-as-you-go overage IS enabled a silent demotion would bill as
+overage with no visible signal — an argument for a thin custom passthrough front that forwards response
+headers verbatim (issue #14 "Option C"). Pin the LiteLLM image by **digest** before relying on it (the
+official Docker image, never the PyPI package — `litellm` 1.82.7/1.82.8 on PyPI were briefly malware).
 
 **Other limits:** hybrid requires **open** egress — locked + hybrid (the air-gapped two-sidecar wiring) is
 deferred (ROADMAP 9c) and refused with a clear message. `/model` selections save "for new sessions", so
