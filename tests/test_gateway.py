@@ -34,19 +34,53 @@ class ConfigYamlTest(unittest.TestCase):
 
     def test_claude_passthrough_and_local_route(self) -> None:
         self.assertIn("model_name: claude-*", self.conf)          # any claude-* id -> Anthropic
-        self.assertIn("model: anthropic/*", self.conf)
+        # The target MUST keep the `claude-` prefix: LiteLLM substitutes the captured wildcard suffix
+        # into the target `*`, so `anthropic/*` forwards the invalid bare `opus-4-8` (the issue #14 404)
+        # while `anthropic/claude-*` forwards the full valid `claude-opus-4-8`.
+        self.assertIn("model: anthropic/claude-*", self.conf)
+        self.assertNotIn("model: anthropic/*\n", self.conf)       # the suffix-capturing bug must be gone
         self.assertIn("model_name: claude-local-qwen3-coder-30b", self.conf)
         self.assertIn("model: ollama_chat/qwen3-coder:30b", self.conf)
         self.assertIn("api_base: http://host.docker.internal:11434", self.conf)
 
     def test_forwards_client_headers_for_subscription(self) -> None:
-        # The make-or-break for keeping the subscription: the agent's OAuth Authorization is forwarded.
+        # Kept for the agent's anthropic-beta + x-* headers. NOTE: this setting does NOT itself forward
+        # the OAuth Authorization — that rides LiteLLM's dedicated anthropic path (clean_headers +
+        # optionally_handle_anthropic_oauth); the subscription survives regardless.
         self.assertIn("forward_client_headers_to_llm_api: true", self.conf)
 
     def test_secret_free(self) -> None:
         # The master key is injected as env, NEVER written into the (state-tier) config.
         self.assertNotIn("master_key", self.conf)
         self.assertNotIn("sk-", self.conf)
+
+
+class LocalBackendWarningTest(unittest.TestCase):
+    """The fail-open hybrid pre-flight verdict (pure half of ``check_local_backend``)."""
+
+    def test_unreachable_warns_about_bind(self) -> None:
+        w = gateway.local_backend_warning(False, None, "qwen3-coder:30b")
+        self.assertIsNotNone(w)
+        self.assertIn("unreachable", w)
+        self.assertIn("0.0.0.0:11434", w)            # points at the loopback-bind trap
+        self.assertIn("claude.ai leg still works", w)  # fail-open framing
+
+    def test_reachable_but_model_absent_warns_to_pull(self) -> None:
+        tags = {"models": [{"name": "qwen2.5-coder:7b"}, {"name": "llama3:latest"}]}
+        w = gateway.local_backend_warning(True, tags, "qwen3-coder:30b")
+        self.assertIsNotNone(w)
+        self.assertIn("not pulled", w)
+        self.assertIn("model add qwen3-coder:30b", w)
+        self.assertIn("qwen2.5-coder:7b", w)          # lists what IS installed
+
+    def test_present_model_is_no_warning(self) -> None:
+        tags = {"models": [{"name": "qwen3-coder:30b"}]}
+        self.assertIsNone(gateway.local_backend_warning(True, tags, "qwen3-coder:30b"))
+
+    def test_bare_name_matches_latest_tag(self) -> None:
+        # A bare pin (no :tag) is stored by Ollama as `<name>:latest` — must still count as present.
+        tags = {"models": [{"name": "qwen3-coder:latest"}]}
+        self.assertIsNone(gateway.local_backend_warning(True, tags, "qwen3-coder"))
 
 
 class NetworkArgvTest(unittest.TestCase):

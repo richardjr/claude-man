@@ -4,30 +4,45 @@ Mirrors the squid ``egress.py`` pattern — PURE ``*_argv`` / config renderers (
 daemon) + thin daemon wrappers over ``docker/runner._run``. The sidecar fronts BOTH legs of hybrid mode
 on one Anthropic ``/v1/messages`` endpoint the agent points ``ANTHROPIC_BASE_URL`` at:
 
-  * **Claude leg — passthrough.** ``forward_client_headers_to_llm_api`` sends the agent's forwarded
-    ``Authorization`` (the claude.ai OAuth) + ``anthropic-beta`` to Anthropic UNCHANGED, so the
-    SUBSCRIPTION is used (no console key anywhere — invariant 1). The agent authenticates to THIS proxy
-    via ``x-litellm-api-key`` (the master key) so its ``Authorization`` stays free for the OAuth
-    passthrough (works around LiteLLM's Authorization-wins precedence).
+  * **Claude leg — passthrough.** Any ``claude-*`` id the agent sends (the full canonical wire id, e.g.
+    ``claude-opus-4-8``) routes to Anthropic via the ``model_list`` wildcard. The agent's claude.ai OAuth
+    ``Authorization`` reaches Anthropic on LiteLLM's DEDICATED anthropic path (``clean_headers`` preserves
+    it when the proxy was authed via ``x-litellm-api-key``; ``optionally_handle_anthropic_oauth`` drops
+    ``x-api-key`` and sets ``anthropic-beta: oauth-2025-04-20``) — so the SUBSCRIPTION is used (no console
+    key anywhere — invariant 1). The agent authenticates to THIS proxy via ``x-litellm-api-key`` (the
+    master key, checked BEFORE ``Authorization`` in LiteLLM auth) so its ``Authorization`` stays free for
+    the upstream OAuth. ``forward_client_headers_to_llm_api: true`` is kept for the ``anthropic-beta`` +
+    agent ``x-*`` headers — it does NOT itself forward ``Authorization`` (that rides the dedicated path
+    above); the OAuth survives regardless.
   * **Local leg — translate.** ``claude-local-<model>`` routes to the HOST Ollama daemon
-    (``ollama_chat/<model>`` + ``api_base`` over ``host.docker.internal``).
+    (``ollama_chat/<model>`` + ``api_base`` over ``host.docker.internal``). Its EXACT ``model_list`` row
+    beats the ``claude-*`` wildcard by precedence, so the local id never leaks to Anthropic.
 
-Both appear in Claude Code's ``/model`` picker (gateway model-discovery) and switch mid-session.
+Both appear in Claude Code's ``/model`` picker (the local one via ``ANTHROPIC_CUSTOM_MODEL_OPTION``) and
+switch mid-session.
 
-NOTE (9a spike): whether one LiteLLM daemon both forwards the client OAuth for the Claude leg AND
-translates the local leg is the open validation — if LiteLLM forces its own console key for the
-Anthropic route, the Claude leg moves to a thin custom passthrough front. The render here is the
-first-cut artifact to validate. The master KEY is the only secret — state-tier ``0600``, injected
-pass-through (never in the rendered config, never config.toml/synced).
+NOTE (issue #14, 9a): the original blocker — Claude requests 404'ing as ``model: opus-4-8`` — was a
+model-MAPPING bug, not an auth bug (a 404 not a 401 proves the OAuth already reached Anthropic). The old
+``model: anthropic/*`` wildcard captured the suffix of ``claude-opus-4-8`` (``opus-4-8``) and forwarded
+that invalid id; ``anthropic/claude-*`` preserves the ``claude-`` prefix so the full valid id is
+forwarded (LiteLLM substitutes the captured ``*`` into the target ``*`` — verified against
+``pattern_match_deployments.set_deployment_model_name``). The one thing config can't settle is whether a
+RE-ORIGINATED request keeps the Max subscription LANE (LiteLLM re-originates TLS via httpx and replaces
+``User-Agent``) — that needs a live capture (read the response header
+``anthropic-ratelimit-unified-overage-in-use``: ``false`` = subscription kept). See
+``docs/issue-14-hybrid-passthrough-protocol.md``. The master KEY is the only secret — state-tier
+``0600``, injected pass-through (never in the rendered config, never config.toml/synced).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 
 from .. import config, hostplatform
 from ..docker import runner
+from ..models import ollama
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +57,35 @@ def local_model_id(model: str) -> str:
     """The id the local model is exposed under in the ``/model`` picker (``config.gateway_local_id`` —
     defined in config so runner + gateway share it without importing each other)."""
     return config.gateway_local_id(model)
+
+
+def _model_present(model: str, installed: list[ollama.InstalledModel]) -> bool:
+    """Is the pinned ``model`` among the host's installed Ollama tags? A bare name defaults to
+    ``:latest`` (Ollama's scheme), so match that too."""
+    want = model if ":" in model else f"{model}:latest"
+    names = {m.name for m in installed}
+    return model in names or want in names
+
+
+def local_backend_warning(reachable: bool, tags_obj: object, model: str) -> str | None:
+    """PURE: turn a host-Ollama probe outcome into an operator warning (or ``None`` when the local leg
+    is ready). Fail-OPEN by design — a hybrid project's Claude leg works regardless; this only flags the
+    two reasons selecting the LOCAL model in ``/model`` would silently hang/fail: host Ollama is
+    unreachable from the gateway (down, or bound to loopback instead of ``0.0.0.0:11434``), or the pinned
+    model isn't pulled. Unit-tested; the daemon wrapper ``check_local_backend`` feeds it a live probe."""
+    local_id = local_model_id(model)
+    host = hostplatform.host_loopback_host()
+    if not reachable:
+        return (f"local model unreachable: the gateway can't reach host Ollama at {host}:11434 — is "
+                f"Ollama running and bound to 0.0.0.0:11434? (the claude.ai leg still works; selecting "
+                f"'{local_id}' in /model would hang). See docs/MODELS.md.")
+    installed = ollama.parse_tags(tags_obj)
+    if not _model_present(model, installed):
+        have = ", ".join(sorted(m.name for m in installed)) or "none"
+        return (f"local model '{model}' is not pulled on host Ollama (have: {have}) — run "
+                f"`claudemanctl model add {model}` (the claude.ai leg still works; selecting "
+                f"'{local_id}' would fail until then).")
+    return None
 
 
 def network_create_argv(slug: str) -> list[str]:
@@ -61,9 +105,13 @@ def gateway_config_yaml(model: str, *, ollama_host: str) -> str:
         "model_list:",
         "  # Claude leg: any claude-* id passes through to Anthropic; the forwarded client OAuth (below)",
         "  # is the credential, so the subscription is used. New Claude model ids work with no edit.",
+        "  # The target MUST keep the `claude-` prefix (`anthropic/claude-*`, not `anthropic/*`): LiteLLM",
+        "  # substitutes the captured wildcard suffix into the target's `*`, so `anthropic/*` would forward",
+        "  # the invalid bare id `opus-4-8` (the issue #14 404); `anthropic/claude-*` forwards the full",
+        "  # valid `claude-opus-4-8`. Covers Opus/Sonnet/Haiku(background)/Fable + future ids in one row.",
         "  - model_name: claude-*",
         "    litellm_params:",
-        "      model: anthropic/*",
+        "      model: anthropic/claude-*",
         "  # Local leg: the pinned ollama model, exposed under a claude-local-* id for the picker.",
         f"  - model_name: {local_id}",
         "    litellm_params:",
@@ -196,6 +244,26 @@ def stop_gateway(slug: str) -> None:
     still-attached (stopped) agent container; ``up`` recreates the sidecar. No-op for a non-hybrid
     project (rm of a non-existent container). Mirrors ``egress.stop_proxy``."""
     runner._run(["docker", "rm", "-f", config.gateway_container_name(slug)], timeout=_TEARDOWN_TIMEOUT_S)
+
+
+def check_local_backend(model: str, slug: str) -> str | None:
+    """Fail-OPEN pre-flight (on hybrid ``up``): probe host Ollama FROM THE GATEWAY — the exact path the
+    local leg uses (``host.docker.internal:11434/api/tags``) — and return an operator warning if it's
+    unreachable or the pinned model isn't pulled, else ``None``. Never raises / never blocks start (the
+    Claude leg works regardless); the LiteLLM image's own ``python`` runs the probe (it ships no curl).
+    The IO half; the verdict is the pure ``local_backend_warning``."""
+    gw = config.gateway_container_name(slug)
+    host = hostplatform.host_loopback_host()
+    url = f"http://{host}:11434/api/tags"
+    script = f"import urllib.request,sys; sys.stdout.write(urllib.request.urlopen('{url}',timeout=4).read().decode())"
+    cp = runner._run(["docker", "exec", gw, "python", "-c", script], timeout=10)
+    if cp.returncode != 0 or not cp.stdout.strip():
+        return local_backend_warning(False, None, model)
+    try:
+        obj = json.loads(cp.stdout)
+    except (ValueError, TypeError):
+        return local_backend_warning(False, None, model)
+    return local_backend_warning(True, obj, model)
 
 
 def teardown(slug: str) -> None:

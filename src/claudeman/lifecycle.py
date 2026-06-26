@@ -467,6 +467,12 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
         ok, detail = gateway.ensure_gateway(project.model, project.slug, on_progress=on_progress)
         if not ok:
             return Result(False, detail)
+        # Fail-open pre-flight: the gateway is up, but the LOCAL leg also needs host Ollama reachable +
+        # the pinned model pulled. Warn (never block — the Claude leg works) so selecting the local model
+        # doesn't silently hang on an unreachable/unpulled backend.
+        warn = gateway.check_local_backend(project.model, project.slug)
+        if warn and on_progress:
+            on_progress(warn)
     # Refresh the pack selection into the asset source BEFORE sync-in carries it to the binds, so
     # the materialized fragments/skills ride the same start. Best-effort, like the sync itself.
     packs_note = _packs_refresh(project, on_progress=on_progress)

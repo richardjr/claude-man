@@ -45,10 +45,14 @@ EGRESS_NET_PREFIX = "claude-man-net-"          # per-project internal network: c
 PROXY_CONTAINER_PREFIX = "claude-man-proxy-"   # per-project squid sidecar: claude-man-proxy-<slug>
 
 # Phase 9 hybrid-model gateway: a per-project LiteLLM sidecar that fronts BOTH the claude.ai
-# subscription (passthrough — forwards the agent's OAuth + anthropic-beta) AND a local Ollama model,
-# so both appear in the /model picker and switch mid-session. PINNED official image (never pip — PyPI
-# 1.82.7/8 were malware). Reachable in-network on GATEWAY_PORT; not published to the host.
-GATEWAY_IMAGE_REF = "docker.litellm.ai/berriai/litellm:main-stable"   # pin to a digest before relying on it
+# subscription (Claude leg — passthrough; the agent's OAuth reaches Anthropic on LiteLLM's dedicated
+# anthropic path, keeping the subscription) AND a local Ollama model, so both appear in the /model picker
+# and switch mid-session. PINNED official image BY DIGEST (never pip — PyPI 1.82.7/8 were malware; the
+# official Docker image was not affected). Reachable in-network on GATEWAY_PORT; not published to the host.
+# Digest = litellm 1.89.4 — VERIFIED live (issue #14): Claude leg 200 + subscription preserved, OAuth
+# forwarded. (Upstream's "complete" OAuth fix lands ≥1.91.x; bump + re-run the live capture to move it.)
+GATEWAY_IMAGE_REF = ("docker.litellm.ai/berriai/litellm"
+                     "@sha256:afdc3cc37493d4f86d485ad7ac4445e7154c568a8d47c01bad15c9cf062c66b5")
 GATEWAY_PORT = 4000
 GATEWAY_NET_PREFIX = "claude-man-gwnet-"          # per-project gateway network: claude-man-gwnet-<slug>
 GATEWAY_CONTAINER_PREFIX = "claude-man-gw-"        # per-project gateway sidecar: claude-man-gw-<slug>
