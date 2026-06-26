@@ -48,12 +48,24 @@ APT = (
 
 # GitHub (clone / fetch / raw / release assets). The two wildcards cover codeload.github.com,
 # raw.githubusercontent.com, objects.githubusercontent.com — listing those bare too would break squid.
+# `.github.com` also covers ssh.github.com, GitHub's SSH-over-443 endpoint (issue #12).
 GITHUB = (
     ".github.com",
     ".githubusercontent.com",
 )
 
-BASE_ALLOWLIST: tuple[str, ...] = ANTHROPIC + PACKAGES + APT + GITHUB
+# GitLab / Bitbucket. Needed so a LOCKED project reaches these forges, AND so git-over-ssh works under
+# strict egress via their SSH-over-443 alt endpoints — altssh.gitlab.com / altssh.bitbucket.org, which
+# the `.gitlab.com` / `.bitbucket.org` wildcards cover (issue #12). Azure DevOps has no 443 SSH endpoint,
+# so it gets no SSH path under lock (HTTPS remote or open mode — see docs/SECURITY.md).
+GITLAB = (
+    ".gitlab.com",
+)
+BITBUCKET = (
+    ".bitbucket.org",
+)
+
+BASE_ALLOWLIST: tuple[str, ...] = ANTHROPIC + PACKAGES + APT + GITHUB + GITLAB + BITBUCKET
 
 # A valid dstdomain: an optional leading dot (subdomain wildcard) then ≥2 dot-separated labels ending
 # in an alphabetic TLD. This rejects the squid catch-all ``.``, a bare ``*``, anything with a
