@@ -27,24 +27,26 @@ class JoinTest(unittest.TestCase):
     """status.join is the invariant-4 registry<->docker reconciliation; pin its outer-join branches."""
 
     def test_defined_with_no_container(self) -> None:
-        rows = status.join([("alpha", "work", "open", 2)], {})
+        rows = status.join([("alpha", "work", "open", 2, "qwen3-coder:30b")], {})
         self.assertEqual(len(rows), 1)
         r = rows[0]
-        self.assertEqual((r.slug, r.kind, r.profile, r.egress, r.repos, r.version),
-                         ("alpha", status.DEFINED, "work", "open", "2", ""))
+        self.assertEqual((r.slug, r.kind, r.profile, r.egress, r.repos, r.version, r.model),
+                         ("alpha", status.DEFINED, "work", "open", "2", "", "qwen3-coder:30b"))
 
     def test_running_clean_row_uses_container_state(self) -> None:
         cs = _cs("alpha", state="running", profile="work", egress="strict", repos="2", version="2.1.0")
-        rows = status.join([("alpha", "work", "strict", 2)], {"alpha": cs})
+        rows = status.join([("alpha", "work", "strict", 2, "qwen3-coder:30b")], {"alpha": cs})
         self.assertEqual(rows[0].kind, status.UP)
         self.assertEqual(rows[0].repos, "2")            # counts match -> no drift marker
         self.assertEqual(rows[0].version, "2.1.0")
+        # model is registry-sourced (no docker label carries it) — it must flow onto the running row.
+        self.assertEqual(rows[0].model, "qwen3-coder:30b")
         self.assertNotIn("stale", rows[0].status_text)
 
     def test_registry_wins_repo_count_with_drift_marker(self) -> None:
         # Container label says 1 repo; registry says 3 (a repo was added post-create, BUG-5).
         cs = _cs("alpha", repos="1", status_text="Up 2h")
-        rows = status.join([("alpha", "work", "open", 3)], {"alpha": cs})
+        rows = status.join([("alpha", "work", "open", 3, "")], {"alpha": cs})
         self.assertEqual(rows[0].repos, "3*")           # registry count wins + '*' drift marker
         self.assertIn("repos label stale", rows[0].status_text)
 
@@ -53,9 +55,10 @@ class JoinTest(unittest.TestCase):
         rows = status.join([], {"ghost": cs})
         self.assertEqual(rows[0].kind, status.STOPPED)
         self.assertIn("orphan", rows[0].status_text)
+        self.assertEqual(rows[0].model, "")             # no registry entry -> no pin
 
     def test_rows_sorted_by_slug(self) -> None:
-        rows = status.join([("zeta", "", "open", 0), ("alpha", "", "open", 0)], {})
+        rows = status.join([("zeta", "", "open", 0, ""), ("alpha", "", "open", 0, "")], {})
         self.assertEqual([r.slug for r in rows], ["alpha", "zeta"])
 
 

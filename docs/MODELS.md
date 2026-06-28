@@ -139,6 +139,17 @@ project model clear <slug>                 # back to subscription-direct
 After `project model set …`, **recreate** the project (`project recreate <slug>`). On `up`, claude-man
 brings up the gateway sidecar (fail-closed) and points the agent's `ANTHROPIC_BASE_URL` at it.
 
+**TUI.** The same pin is available from the projects table: Project… menu (`p`) → **Model (local)…** (`m`).
+The picker lists the host-Ollama installed models, a *subscription-direct* row to unpin, and a raw-tag
+input (to pin a tag that isn't pulled yet, or when the daemon is briefly unreachable). Choosing a model
+persists the pin and recreates the project off-thread (no separate recreate step). A **Model** column in
+the projects table shows each project's current pin (`-` = subscription-direct), so hybrid mode is never
+silent — billing is on the subscription for the Claude tiers and on-host (free) for the local model.
+
+You **cannot pin a model on a *locked* (strict-egress) project** — locked + hybrid is deferred (ROADMAP
+9c) and refused at `up`, so both the TUI and `project model set` reject it up front (the registry mutator
+enforces it too); `project unlock <slug>` first. Unpinning a locked project is always allowed.
+
 How the two legs are meant to work:
 - **Local leg.** The local model appears in `/model` as `Local: <model>` (added via
   `ANTHROPIC_CUSTOM_MODEL_OPTION`); selecting it sends `claude-local-<model>`, which the gateway routes to

@@ -516,6 +516,15 @@ def set_model(slug: str, model: str) -> Project:
         raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
 
     project = load(slug)
+    if model and project.egress == "strict":
+        # Locked + hybrid (the two-sidecar air-gapped wiring) is refused at `up` — ROADMAP 9c. Reject it
+        # at the SET so the registry never enters a state every start refuses, and so a recreate-to-apply
+        # caller (the TUI) can't tear a running container down only for up() to refuse the restart.
+        # Clearing the pin (model == "") is always allowed, so a locked project can still unpin.
+        raise ValueError(
+            f"{slug} is locked (strict egress) — locked + hybrid local-model isn't supported yet "
+            f"(ROADMAP 9c); unlock the project first"
+        )
     updated = dataclasses.replace(project, model=model)  # ValidationError on a malformed ref
     path = config.project_toml_path(slug)
     doc = tomlkit.parse(path.read_text())

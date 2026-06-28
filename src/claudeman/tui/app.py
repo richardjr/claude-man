@@ -36,6 +36,7 @@ from .screens.env_mounts import EnvMountsScreen
 from .screens.logs import LogsScreen
 from .screens.menu import MenuScreen
 from .screens.overlay_select import OverlaySelectScreen
+from .screens.model_pin import ModelPinScreen
 from .screens.packs import PacksScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
@@ -50,7 +51,7 @@ from .screens.update_confirm import UpdateConfirmScreen
 from ..registry import settings as settings_registry
 from . import splash as splash_mod
 
-_COLUMNS = ("Project", "Status", "Profile", "Egress", "Repos", "Version", "Detail")
+_COLUMNS = ("Project", "Status", "Profile", "Egress", "Model", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
 # Per-project network panel. Traffic = whole-container NetIO since start (docker stats). Blocked/Allowed
 # = distinct destinations from the squid access log — locked projects only (open ones have no sidecar).
@@ -141,6 +142,7 @@ class ClaudeManApp(App):
         ("p", "Packs…", "packs"),
         ("g", "Egress…", "egress"),
         ("i", "Overlay (image)…", "overlay"),
+        ("m", "Model (local)…", "model_pin"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -235,7 +237,7 @@ class ClaudeManApp(App):
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
         defined = [
-            (p.slug, p.profile or "(default)", p.egress, len(p.repos))
+            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -268,7 +270,7 @@ class ClaudeManApp(App):
         self._last_rows = rows
         cells_map: dict[str, list[str]] = {}
         for row in rows:
-            cells = [row.slug, row.kind, row.profile, row.egress,
+            cells = [row.slug, row.kind, row.profile, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
             # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
@@ -938,6 +940,7 @@ class ClaudeManApp(App):
             "packs": self.action_packs,
             "egress": self.action_egress,
             "overlay": self.action_overlay,
+            "model_pin": self.action_model_pin,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1261,6 +1264,48 @@ class ClaudeManApp(App):
             res = lifecycle.recreate(slug, overlay=overlay, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"overlay change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- model (local hybrid pin) -----------------------------------------
+    def action_model_pin(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]model: select a defined project (orphan rows aren't managed)[/]")
+            return
+        current = projects.load(slug).model
+        self._log(f"pinning a local model for {slug} (recreates to apply; needs host Ollama)")
+        self.push_screen(ModelPinScreen(slug, current), lambda ref: self._on_model_pin(slug, ref))
+
+    def _on_model_pin(self, slug: str, ref) -> None:
+        if ref is None:  # cancelled, or picked the current pin — nothing to recreate
+            return
+        model = "" if ref == ModelPinScreen.CLEAR else ref
+        # Locked + hybrid is refused at `up` (ROADMAP 9c). Guard BEFORE persist/recreate: otherwise
+        # set_model would persist the pin and the recreate would `docker rm -f` the running container
+        # only for up() to refuse the restart — a healthy container destroyed by one keystroke. Unpin
+        # (model == "") stays allowed. (registry.set_model enforces the same, this is the clean-message
+        # front so the operator never sees a half-applied failure.)
+        if model and projects.load(slug).egress == "strict":
+            self._log(f"[red]model: {slug} is locked (strict egress) — locked + hybrid isn't supported "
+                      f"yet (ROADMAP 9c); unlock it first (Project… → Egress…)[/]")
+            return
+        if not self._reserve(slug, "model"):
+            return
+        desc = "subscription-direct" if model == "" else f"local model {model!r}"
+        self._log(f"switching {slug} to {desc} (recreating to apply) …")
+        self._model_pin_worker(slug, model)
+
+    @work(thread=True, group="create")
+    def _model_pin_worker(self, slug: str, model: str) -> None:
+        """Apply a local-model pin off the UI thread: persist the registry pin, then recreate (the
+        gateway sidecar comes up/down at the container boundary). set_model validates the tag SHAPE
+        before writing, so a malformed raw tag surfaces here as a failure and never recreates. Mirrors
+        the overlay/egress workers."""
+        try:
+            projects.set_model(slug, model)
+            res = lifecycle.recreate(slug, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"model pin failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- sync-back (review-gated three-way merge into the host ~/.claude) --
