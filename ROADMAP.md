@@ -378,13 +378,15 @@ reliable); `thinking`/`reasoning_effort` are force-dropped on the LOCAL route on
 hard-error in Ollama). The hybrid switch is `Project.model` (an ollama tag) presence, not a separate
 `mode` enum. A fail-open `up` pre-flight warns on an unreachable/unpulled local backend. LiteLLM image
 pinned BY DIGEST. **Still open:** `ANTHROPIC_DEFAULT_HAIKU_MODEL` match-to-primary (background stays Claude
-passthrough), LOCKED+hybrid air-gap (9c), the TUI mode/billing badge, and the optional custom passthrough
-front (header fidelity + smaller OAuth blast radius — see `docs/issue-14-hybrid-passthrough-protocol.md`).
+passthrough), LOCKED+hybrid air-gap (9c), and the optional custom passthrough front (header fidelity +
+smaller OAuth blast radius — see `docs/issue-14-hybrid-passthrough-protocol.md`). The **TUI pin landed**:
+Project… → Model (local)… (`m`) sets/clears `Project.model` (set_model + recreate, off-thread), and a
+**Model** column surfaces each project's pin so hybrid mode is never silent.
 
 - [x] **9a (spike):** validate ONE per-project gateway sidecar that PASSES THROUGH the claude.ai login for `claude-*`/`anthropic-*` ids (forwarding `Authorization` + `anthropic-beta`, subscription billing intact) AND translates `local-*` ids to a host Ollama/vLLM, exposing both via `/v1/models` for `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. Confirm a mid-session `/model` switch works and the latest Claude ids appear with no config edit (wildcard route). Pinned LiteLLM image, else a thin custom front if one daemon can't cleanly do passthrough-Claude + translate-local + unified discovery
 - [x] **9-models (dynamic model framework):** an Ollama-backed model-management layer — `claudemanctl model list/add/update/rm` (+ TUI) wrapping the host Ollama HTTP API (`/api/tags`, `/api/pull` with streamed progress, `/api/delete`, `/api/show`, `/api/version`) so the operator installs/updates local models (reference: Qwen3-Coder) without leaving claude-man; a `models/` package with a provider-shaped backend seam (Ollama now, vLLM later) feeding the gateway's local route. Update = re-pull tag + digest compare
 - [x] **9b:** `Project.mode = subscription | hybrid` + a provider-shaped model-backend descriptor (state/registry); `lifecycle.recreate(mode=…)` (validated + persisted before teardown); gateway-sidecar orchestration paralleling `network/egress.py` (ensure/teardown, read-only config bind, fail-closed); additive agent env (`ANTHROPIC_BASE_URL` + discovery flag) rendered like `_render_egress` (floor byte-identical, unit-pinned); `ANTHROPIC_*` scrub UNCHANGED; `ANTHROPIC_DEFAULT_HAIKU_MODEL` set to match the primary backend
-- [~] **9c:** egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server; TUI mode/billing badge; `image build`-style pin/verify for the gateway image; CLI/TUI verbs (`project model …`); `docs/MODELS.md`
+- [~] **9c:** ~~CLI/TUI verbs (`project model …`)~~ DONE (CLI `project model set/clear/show` + the TUI Project… → Model (local)… picker `m`); ~~TUI mode/billing badge~~ DONE (the **Model** column on the projects table + the CLI `project status` MODEL column); ~~`docs/MODELS.md`~~ DONE; gateway image pinned BY DIGEST. **Open:** egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server (locked+hybrid is currently refused at `up`)
 - [ ] **9d (optional, deferred):** the terminating-router flavor (console API key ON THE SIDECAR ONLY + transparent LiteLLM router failover Anthropic→local) as an alternative per-project hybrid auth — only if auto-failover ever outweighs the subscription
 
 ---

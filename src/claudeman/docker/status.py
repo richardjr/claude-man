@@ -52,6 +52,7 @@ class Row:
     repos: str
     version: str
     status_text: str
+    model: str = ""      # the registry local-model pin ("" = subscription-direct); hybrid badge
 
 
 def query_containers() -> dict[str, ContainerStatus]:
@@ -103,16 +104,17 @@ def _parse_label_csv(raw: str) -> dict[str, str]:
 def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
     """Outer-join the registry's defined projects with live container status.
 
-    ``defined_slugs`` is an iterable of (slug, profile, egress, repos_count) tuples
-    from the registry, so DEFINED projects with no container still appear.
+    ``defined_slugs`` is an iterable of (slug, profile, egress, repos_count, model) tuples
+    from the registry, so DEFINED projects with no container still appear. ``model`` is the
+    registry-only local-model pin (no docker label carries it) — registry-sourced like profile/egress.
     """
     rows: list[Row] = []
     seen: set[str] = set()
-    for slug, profile, egress, repos in defined_slugs:
+    for slug, profile, egress, repos, model in defined_slugs:
         seen.add(slug)
         cs = containers.get(slug)
         if cs is None:
-            rows.append(Row(slug, DEFINED, profile or "", egress or "", str(repos), "", ""))
+            rows.append(Row(slug, DEFINED, profile or "", egress or "", str(repos), "", "", model))
         else:
             # Registry wins for the repo count (invariant 4 / review BUG-5): the container's
             # `claude-man.repos` label is a create-time projection and goes stale the instant a repo
@@ -127,7 +129,7 @@ def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
                 detail = cs.status_text
             rows.append(
                 Row(slug, cs.kind, cs.profile or profile or "", cs.egress or egress or "",
-                    repos_cell, cs.version, detail)
+                    repos_cell, cs.version, detail, model)
             )
     # Containers with no registry entry (orphans) — surface them so they can be reconciled.
     for slug, cs in containers.items():

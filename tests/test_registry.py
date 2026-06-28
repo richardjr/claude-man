@@ -150,6 +150,22 @@ class RegistryTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             projects.set_packs("packed", ("Bad Name",))
 
+    def test_set_model_rejects_locked_hybrid_but_allows_unpin(self) -> None:
+        # Locked (strict egress) + hybrid is refused at `up` (ROADMAP 9c); set_model must reject it so
+        # the registry can never enter the state — else a recreate-to-apply caller (the TUI) tears a
+        # running container down for a project that then can't start.
+        projects.save(Project(slug="locked", egress="strict"))
+        with self.assertRaises(ValueError):
+            projects.set_model("locked", "qwen3-coder:30b")
+        self.assertEqual(projects.load("locked").model, "")        # registry left unchanged
+        projects.set_model("locked", "")                            # ...but UNPIN stays allowed
+        self.assertEqual(projects.load("locked").model, "")
+        # An OPEN project pins fine (the common case).
+        projects.save(Project(slug="openp", egress="open"))
+        p = projects.set_model("openp", "qwen3-coder:30b")
+        self.assertEqual(p.model, "qwen3-coder:30b")
+        self.assertEqual(projects.load("openp").model, "qwen3-coder:30b")
+
     def test_set_allowlist_patches_clears_and_keeps_comments(self) -> None:
         commented = (
             '[project]\n'

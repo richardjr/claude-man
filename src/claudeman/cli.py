@@ -198,7 +198,7 @@ def cmd_profile_seed(args) -> int:
 # --------------------------------------------------------------------------
 def cmd_project_status(args) -> int:
     defined = [
-        (p.slug, p.profile or "(default)", p.egress, len(p.repos))
+        (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model)
         for p in projects.list_projects()
     ]
     rows = status.join(defined, status.query_containers())
@@ -207,9 +207,10 @@ def cmd_project_status(args) -> int:
         if not rows:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
-    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'REPOS':<5} VERSION")
+    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'REPOS':<5} {'VERSION':<10} MODEL")
     for r in rows:
-        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.repos:<5} {r.version or '-'}")
+        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.repos:<5} "
+              f"{(r.version or '-'):<10} {r.model or '-'}")
     # For a single project, also show its published ports (config — registry-only, recreate to apply).
     if args.slug and projects.exists(args.slug):
         ports = projects.load(args.slug).ports
@@ -879,6 +880,12 @@ def cmd_model_presets(_args) -> int:
 def cmd_project_model_set(args) -> int:
     if not projects.exists(args.slug):
         print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    # Locked + hybrid is refused at `up` (ROADMAP 9c); reject it here so the registry can't be put into
+    # a state every start refuses (set_model enforces the same — this is the clean operator message).
+    if args.ref and projects.load(args.slug).egress == "strict":
+        print(f"{args.slug} is locked (strict egress) — locked + hybrid local-model isn't supported "
+              f"yet (ROADMAP 9c); `claudemanctl project unlock {args.slug}` first", file=sys.stderr)
         return 1
     try:
         updated = projects.set_model(args.slug, args.ref)
