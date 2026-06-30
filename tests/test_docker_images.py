@@ -80,9 +80,30 @@ class ConfigPathsTest(unittest.TestCase):
         self.assertTrue((root / "src" / "claudeman").is_dir())
 
     def test_dockerfiles_resolve_to_real_files(self) -> None:
-        # Guards the parents[2] resolution against a layout drift.
+        # Guards the data-root resolution against a layout drift.
         self.assertTrue(config.image_dockerfile("base").is_file())
         self.assertTrue(config.image_dockerfile("node").is_file())
+
+    def test_build_context_holds_dockerfile_copy_sources(self) -> None:
+        # The base Dockerfile COPYs images/{nvim,bash,base/ssh_known_hosts} relative to the build
+        # context, so the context must contain them — whether resolved from the checkout or a wheel.
+        ctx = config.image_build_context()
+        self.assertTrue((ctx / "images" / "nvim").is_dir(), ctx)
+        self.assertTrue((ctx / "images" / "bash" / "bashrc").is_file(), ctx)
+        self.assertTrue((ctx / "images" / "base" / "ssh_known_hosts").is_file(), ctx)
+        self.assertTrue(config.library_packs_dir().is_dir())
+
+    def test_wheel_bundles_runtime_data(self) -> None:
+        # The wheel must force-include images/ + library/ under the package (claudeman/_data/), or an
+        # installed copy breaks at image-build / packs time. The dependency-free suite runs from the
+        # checkout (where _data_root falls back to the repo root), so it can't catch a broken wheel
+        # by resolution alone — pin the packaging config itself instead.
+        import tomllib
+        pyproject = config.repo_root() / "pyproject.toml"
+        cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        force = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+        self.assertEqual(force.get("images"), "claudeman/_data/images")
+        self.assertEqual(force.get("library"), "claudeman/_data/library")
 
     def test_image_tag(self) -> None:
         self.assertEqual(config.image_tag("node"), "claude-man:node")

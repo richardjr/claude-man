@@ -156,17 +156,29 @@ guarantees true.
 
 ## Install
 
-claude-man runs **from a git checkout** (no PyPI package yet):
+Not on PyPI yet, but the wheel is **self-contained** — the Dockerfiles, image assets, and the curated
+pack library are bundled into it, so an installed copy works with no source checkout.
+
+**As a tool** (a `claudemanctl` / `claudeman` on your PATH):
+
+```bash
+git clone https://github.com/richardjr/claude-man.git && cd claude-man
+uv build                                 # -> dist/claude_man-<ver>-py3-none-any.whl
+uv tool install dist/*.whl               # or: pipx install dist/*.whl
+```
+
+**From a checkout** (for development / hacking on claude-man itself):
 
 ```bash
 git clone https://github.com/richardjr/claude-man.git
 cd claude-man
 uv sync          # installs textual + tomlkit into .venv
+uv run claudemanctl --help
 ```
 
-The checkout location matters: image builds resolve `images/` relative to the source tree, so keep
-the clone around (it *is* the install). Runtime state lives outside it, under
-`~/.config/claude-man` and `~/.local/state/claude-man`.
+Either way, runtime state lives outside the install, under `~/.config/claude-man` and
+`~/.local/state/claude-man`. (A built wheel finds its bundled data under the package; a checkout
+reads `images/` + `library/` from the source tree — see `config._data_root`.)
 
 ## Quick start
 

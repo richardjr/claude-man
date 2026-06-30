@@ -59,16 +59,17 @@ def build_chain(overlay: str) -> list[str]:
 def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION) -> list[str]:
     """Pure renderer for the ``docker build`` argv (no daemon, no IO) — unit-testable.
 
-    Uses absolute, package-relative paths for the Dockerfile and build context so the command is
-    CWD-independent. The base Dockerfile ``COPY``s ``images/nvim`` (the curated neovim config) from
-    the context (= the repo root), so the context must be the repo root — which it is.
+    Uses absolute paths for the Dockerfile and build context so the command is CWD-independent. The
+    base Dockerfile ``COPY``s ``images/...`` (nvim config, bash rc, the forge known_hosts) from the
+    context, so the context is the dir that CONTAINS ``images/`` — ``config.image_build_context()``
+    (the checkout root, or the wheel-bundled ``claude-man/_data/``).
     """
     return [
         "docker", "build",
         "-f", str(config.image_dockerfile(overlay)),
         "--build-arg", f"CLAUDE_VERSION={claude_version}",
         "-t", config.image_tag(overlay),
-        str(config.repo_root()),
+        str(config.image_build_context()),
     ]
 
 
