@@ -65,10 +65,16 @@ class OverlayProbesTest(unittest.TestCase):
 
     def test_terraform_overlay_adds_core_op_probes(self) -> None:
         from claudeman.docker.smoke import _overlay_probes
-        names = [p.name for p in _overlay_probes("terraform")]
-        # Not just --version: an actual `terraform init` write to /workspace + packer plugin-path write.
+        probes = _overlay_probes("terraform")
+        names = [p.name for p in probes]
+        # Not just --version: an actual `terraform init` write to /workspace + packer plugin-path write
+        # + an aws config write proving the AWS_CONFIG_FILE redirect off the read-only HOME.
         self.assertTrue(any("terraform init" in n for n in names), names)
         self.assertTrue(any("packer plugin path" in n for n in names), names)
+        self.assertTrue(any("aws config writes" in n for n in names), names)
+        # The aws write probe must actually exercise a write (`aws configure set`), not just --version.
+        aws_write = next(p for p in probes if "aws config writes" in p.name)
+        self.assertIn("configure set", " ".join(aws_write.argv))
 
     def test_overlays_without_extra_probes_return_empty(self) -> None:
         # node/python/base tools are already covered by the base battery — no extra probes.
