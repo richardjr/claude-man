@@ -158,6 +158,14 @@ def _overlay_probes(overlay: str) -> list[Probe]:
             Probe("packer plugin path writable (read-only floor)",
                   ["sh", "-lc", 'mkdir -p "$PACKER_PLUGIN_PATH" && echo ok'],
                   required=True, expect="ok"),
+            # aws CLI v2 (its own bundled Python) must resolve + run as uid 1000.
+            Probe("aws cli version", ["aws", "--version"], required=True, expect="aws-cli/2"),
+            # CORE op under the floor: `aws configure set` WRITES to AWS_CONFIG_FILE, whose default
+            # (~/.aws/config) is on the read-only HOME. Round-trip a write→read to prove the redirect
+            # onto the .cache tmpfs works (this is the EROFS it would hit without the redirect).
+            Probe("aws config writes to the .cache tmpfs (read-only floor)",
+                  ["sh", "-lc", "aws configure set region eu-west-1 && aws configure get region"],
+                  required=True, expect="eu-west-1"),
         ]
     return []
 
