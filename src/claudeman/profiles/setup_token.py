@@ -70,16 +70,13 @@ def _account_email() -> str:
 def _mint_token() -> str:
     """Run ``claude setup-token`` interactively and return the pasted token.
 
-    Mints with ``CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"`` so the token can BOTH run
-    inference (in the container) AND read the account's subscription usage (``/api/oauth/usage`` — the
-    5h/weekly bars). The default ``user:inference``-only token 403s on the usage endpoint.
+    Uses ``setup-token``'s default scope (``user:inference``) — enough to run inference inside the
+    container, which is all claude-man needs.
     """
     print("→ minting a long-lived token (claude setup-token).", file=sys.stderr)
     print("  Complete the flow in the browser; the token is printed at the end — copy it.",
           file=sys.stderr)
-    env = dict(os.environ)
-    env["CLAUDE_CODE_OAUTH_SCOPES"] = config.OAUTH_USAGE_SCOPES
-    rc = _run_interactive(["claude", "setup-token"], env=env)
+    rc = _run_interactive(["claude", "setup-token"])
     if rc != 0:
         raise RuntimeError(f"`claude setup-token` exited {rc} (cancelled or failed)")
     token = input("Paste the long-lived token: ").strip()

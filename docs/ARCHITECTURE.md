@@ -92,43 +92,6 @@ separate from sync-back — nothing crosses the denylist boundary) and counts on
 *inside* claude-man containers, not the operator's host `~/.claude`. Surfaced via
 `claudemanctl profile usage` and a worker-refreshed TUI panel (`u` to refresh).
 
-## Subscription usage (per-account 5-hour + weekly limits)
-
-Transcript token-totals (above) measure what claude-man *itself* spent; they cannot reveal how close
-an **account** is to the rolling-window subscription caps Claude Code's `/usage` shows — that figure
-spans *all* usage on the account, including the operator's own host sessions. `usage_api.py` reads it
-straight from the source: `GET https://api.anthropic.com/api/oauth/usage` (`config.OAUTH_USAGE_URL`,
-beta header `oauth-2025-04-20`) with a profile's stored OAuth bearer token, returning the `five_hour`
-and `seven_day` *utilization* percentages (0–100) plus reset timestamps (the endpoint also carries
-`seven_day_opus`/`seven_day_sonnet`, parsed into `Utilization` for a future per-model view but not yet
-surfaced). The fetch is **read-only and does not consume quota** — it's a status read, safe to poll.
-
-- **The token-scope split (why minting now requests both).** `claude setup-token` mints a token with
-  the `user:inference` scope only — enough to *run* Claude in the container, but a **403** on
-  `/api/oauth/usage`, which needs `user:profile`. Rather than carry a second token, `profiles/setup_token.py`
-  mints with `CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"` (`config.OAUTH_USAGE_SCOPES`) so the
-  **same** token both runs inference *and* reads usage. Tokens minted before this change lack the scope;
-  the fetch folds their 403 into the note `re-mint`, and the operator re-mints in place with
-  `claudemanctl profile renew <name>` to gain it.
-- **The no-redirect opener (a credential-leak fix).** The fetch uses a module-level
-  `urllib.request.build_opener(_NoRedirect())` whose `redirect_request` returns `None`, so a `30x` is
-  turned into an `HTTPError` instead of being followed. urllib's default redirect handler copies the
-  `Authorization` bearer onto the redirect target *without* stripping it on a cross-host hop — for this
-  fixed JSON endpoint a redirect is anomalous, and following one would re-send the account credential to
-  another host (invariant 1). The token is therefore never sent twice. Standard TLS verification is kept.
-- **User-Agent matters.** The endpoint rate-limits a generic UA aggressively, so requests send
-  `User-Agent: claude-code/<ver>` (`config.CLAUDE_CODE_USER_AGENT`).
-- **Pure/network split + failure handling.** `parse_utilization` / `render_bar` / `level` are pure
-  (unit-tested without sockets); `fetch_utilization` / `fetch_for_profile` do the I/O and **never raise** —
-  every failure folds into a short `UsageResult.note` (`no token`, `re-mint` for the 403, `auth` for a
-  401, `offline`, `http NNN`, `bad resp`). `_window` rejects `bool`/`NaN`/`inf` so a junk utilization can't
-  read as a colour band in `level()`.
-- **Worker + surfaces.** The TUI runs a **separate 60 s `refresh_utilization` worker** off the UI thread,
-  caching results in `self._util`; the usage panel reads that cache and renders 5h + Week columns as
-  coloured mini bars (green `<70%` < yellow `<90%` < red, via `level`), with a panel title noting the
-  figures are account-wide subscription limits, not claude-man's slice. `u` refreshes both the transcript
-  totals and the utilization cache. The CLI surface is `claudemanctl profile limits [name]`.
-
 ## Persistence + container lifecycle
 
 - **Definition:** `projects/<slug>.toml` — slug, profile, overlay (image variant), egress mode,
@@ -472,7 +435,7 @@ Textual app (`tui/app.py`). The **projects screen** is a `DataTable`
 (Project · Status · Profile · Egress · Repos · Version · Detail) populated by an async worker running
 `docker ps -a --filter label=claude-man.slug --format '{{json .}}'`, JOINed with the registry so
 DEFINED projects with no container still show. A 10 s `set_interval` poll drives the refresh (a
-`docker events` event-driven worker is deferred to Phase 2). The **Repos column** is the live git-state summary (`3 ✓`, `2 ✓ client:~↑1`,
+`docker events` event-driven worker is deferred to Phase 2). The **Repos column** is the live git-state summary — an aggregate per-flag rollup (`3 ✓`, `1 ✓ 2 ⚠ 1 ~`,
 `1 uncloned`) from a separate **30 s fetch-less gitstate worker** (`checkout/gitstate.py`, off the UI
 thread, cached between scans — host-FS state, distinct from the never-cached container liveness); a
 **repo-detail panel** below the table lists the cursor project's repos (Dir · Branch · State · ↑/↓ ·

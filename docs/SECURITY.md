@@ -137,27 +137,6 @@ What crosses each way, and what must never cross:
   (Deferred defence-in-depth: `dnsmasq` direct-DNS forwarding + an in-container `iptables` default-DROP
   layer — today's lock covers proxy-aware traffic plus the SSH-over-443 forges above.)
 
-### Subscription-usage query (read-only, host-side)
-- claude-man queries `GET https://api.anthropic.com/api/oauth/usage` host-side, per profile, with that
-  profile's stored OAuth token, to show how close each **account** is to its 5-hour and weekly
-  subscription limits (`usage_api.py`). The fetch is **read-only and consumes no quota**; it never runs
-  inside a container.
-- **The token carries a broadened `user:profile` scope.** `claude setup-token` defaults to
-  `user:inference` only (which `403`s on the usage endpoint), so `setup_token.py` mints with
-  `CLAUDE_CODE_OAUTH_SCOPES="user:profile user:inference"` (`config.OAUTH_USAGE_SCOPES`). `user:profile`
-  is a **read-only profile/usage scope** — it adds no billing, write, or admin power; the trade-off is
-  that the same token, when present in a container, can also read the account's profile/usage. Existing
-  `user:inference`-only tokens keep working for inference but read `re-mint` on the bars until
-  re-minted (`claudemanctl profile renew <name>`).
-- **The OAuth bearer can't leak via a redirect.** The query uses a no-redirect urllib opener
-  (`usage_api._NoRedirect`): urllib's default redirect handler copies `Authorization` onto a redirect
-  target without stripping it on a cross-host hop, so a `30x` could exfiltrate the account bearer to an
-  attacker host. The opener turns any redirect into an `HTTPError` instead — the token is never sent
-  twice. (Default TLS verification is kept; the host is pinned in `config.OAUTH_USAGE_URL`.) The
-  `User-Agent` must be `claude-code/<ver>` (`config.CLAUDE_CODE_USER_AGENT`) or the endpoint
-  rate-limits hard. Every failure folds into a short note (`re-mint`/`auth`/`offline`/`http NNN`) —
-  no token or response detail is surfaced.
-
 ### Curated packs (host-side materialization — no new container surfaces)
 - Pack delivery **adds no mount, env var, or docker flag**: materialization writes into the
   per-project asset source (`~/.config/claude-man/assets/<slug>/`, config tier, secret-free), and
@@ -203,10 +182,8 @@ What crosses each way, and what must never cross:
 2. **The token is readable from inside its own container** (`docker inspect`, process env). This is
    inherent to env-var injection and the same caveat Anthropic flags for sandboxed agents. →
    Per-project isolation + strict egress (no arbitrary exfil path) is the real mitigation; recommend
-   strict egress for untrusted code. The token also carries the `user:profile` scope (for usage bars),
-   so a token read from inside its container can additionally read that account's profile/usage — but
-   it grants no billing/write power beyond the inference the token already authorises, and the same
-   isolation + strict-egress mitigation applies.
+   strict egress for untrusted code. (The token carries only `setup-token`'s default `user:inference`
+   scope — no profile/usage/billing/write power beyond the inference it authorises.)
 3. **The hardened profile is stricter than Anthropic's reference devcontainer**; an undocumented
    write path may only surface at runtime (`EROFS`/`getpwuid`). → `image smoke` gate; add writable
    mounts reactively; re-verify per claude version bump.

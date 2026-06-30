@@ -135,6 +135,12 @@ nits**; the hardened floor (invariant 2) and the no-`.credentials.json`/no-`ANTH
 identity is non-secret name/email, and the `.cache`/git-config writable surfaces are all *additive*
 to the existing writable set, not relaxations of the floor.
 
+> **Note (2026-06-30):** the usage-bars feature was later **removed** — `usage_api.py`, the
+> `profile limits` CLI, the TUI 5h/Week columns, and the `OAUTH_USAGE_*` config/scope are gone (the
+> `user:profile` scope was never mintable; see the deleted DEBUGGING note). The **USE-1/2/3** rows
+> below are kept as a historical record; the no-redirect-opener pattern they established lives on in
+> `updates.py`. **CACHE-1** and the git-identity notes are unaffected.
+
 ## High
 
 | ID | Location | Finding | Fix | Status |

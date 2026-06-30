@@ -3,8 +3,8 @@
 A *backend* abstracts a local model server (Ollama first; vLLM later) behind one interface so claude-man
 can list / install / update / inspect / remove local models from inside ``claudemanctl model …``. The
 PURE return types live here (frozen dataclasses, no IO) so this module imports dependency-free; each
-backend (``models/ollama.py``) splits its urllib daemon calls from PURE parsers (the ``updates.py`` /
-``usage_api.py`` pattern) and FAILS OPEN — an absent/offline daemon degrades to a ``note``, never raises.
+backend (``models/ollama.py``) splits its urllib daemon calls from PURE parsers (the ``updates.py``
+pattern) and FAILS OPEN — an absent/offline daemon degrades to a ``note``, never raises.
 
 This first cut manages MODELS only; bringing up the model server (and the Phase-9 gateway sidecar that
 routes the agent's ``local-*`` calls to it) is separate. ``Project.model`` (a thin per-project pin in the

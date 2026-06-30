@@ -149,17 +149,8 @@ def is_forbidden_env_name(name: str) -> bool:
     norm = name.strip("_").upper()
     return any(norm == f.strip("_").upper() for f in FORBIDDEN_ENV_NAMES)
 
-# ---------------------------------------------------------------------------
-# Subscription usage endpoint (the 5-hour + weekly windows Claude Code's /usage shows)
-# ---------------------------------------------------------------------------
-# GET this with a profile's OAuth bearer token to read per-account 5h/weekly utilization.
-OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-OAUTH_USAGE_BETA = "oauth-2025-04-20"
-# Mint scopes that enable /api/oauth/usage. `claude setup-token` defaults to `user:inference` only,
-# which 403s on the usage endpoint; minting with `user:profile user:inference` (via the
-# CLAUDE_CODE_OAUTH_SCOPES env var) lets the same token also read subscription usage.
-OAUTH_USAGE_SCOPES = "user:profile user:inference"
-# The usage endpoint rate-limits a generic User-Agent aggressively; send the claude-code UA.
+# Anthropic endpoints rate-limit a generic User-Agent aggressively; send the claude-code UA on the
+# token-less GETs claude-man makes host-side (the release-channel check — see updates.py).
 CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
 
 # ---------------------------------------------------------------------------
