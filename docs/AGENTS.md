@@ -113,7 +113,8 @@ refactor before any second-agent code exists.
    agent-specific — `SyncbackPolicy` isolates exactly that. Getting a Codex denylist wrong is a
    credential-leak risk, so it gets the same adversarial review the Claude denylist did.
 3. **Usage is optional.** Codex's transcript format differs; `usage=None` drops the feature cleanly.
-   (Claude's subscription-usage bars are already shelved upstream, so this is low-stakes.)
+   (The only usage surface is the transcript token-totals — the per-account subscription-usage bars
+   were removed — so this seam is low-stakes.)
 4. **Pack library content is Claude-flavoured** (skills/, `CLAUDE.md` fragments). Codex needs its own
    content or a translation layer; the materializer machinery itself carries over unchanged.
 
