@@ -10,7 +10,7 @@ confirmation — rebuilds the image pinned to it. The container itself stays byt
 ``~/.local`` install (which is exactly why ``claude update`` fails inside a container).
 
 Pure parse/compare (``parse_version`` / ``compare`` / ``is_newer``) is split from the network fetch
-(the usage_api.py pattern) so it is unit-testable with no sockets. The fetch NEVER raises — every
+so it is unit-testable with no sockets. The fetch NEVER raises — every
 failure folds into a note so the on-start check fails OPEN (start proceeds on the existing image).
 """
 
@@ -33,9 +33,8 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?$")
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Drop redirects: a 30x on this fixed plain-text endpoint is anomalous, and following one could
-    fetch an unrelated body we'd then try to parse as a version. Mirrors usage_api's hardened opener
-    (there it also stops an auth-bearer cross-host leak; here there's no token, but refusing the
-    redirect keeps the parse honest)."""
+    fetch an unrelated body we'd then try to parse as a version. There's no token on this GET, but
+    refusing the redirect keeps the parse honest."""
 
     def redirect_request(self, *args, **kwargs):  # noqa: ARG002 - intentionally drops all redirects
         return None

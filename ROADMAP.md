@@ -32,10 +32,7 @@ operator-owned) with a `cp`-style trailing-slash dst; src must be absolute (else
 volume); `openssh-client` added to the base image. The **TUI** adds an `e` env-mounts manager screen
 (list / add / remove / resync). A **`workdir`** option (`Project.launch_workdir`) makes `claude`/shell
 open via `docker exec -w` in an explicit `[project] workdir`, else `/workspace` — always, since
-Phase 6a dropped the lone-repo auto-cd. **Per-account
-subscription usage bars** — `usage_api.py` reads `GET /api/oauth/usage` (5-hour + weekly utilization
-%, account-wide) host-side per profile; surfaced as coloured mini-bars in the TUI usage panel (`5h` +
-`Week` columns, `u` refreshes) + `profile limits` CLI (see Phase 2). **In-container git identity + gh**
+Phase 6a dropped the lone-repo auto-cd. **In-container git identity + gh**
 — `gitconfig.py` injects the operator's git author identity via `GIT_CONFIG_*` env (no writable file
 needed under `--read-only`); the base image ships pinned `gh 2.93.0`; git/gh config redirected onto the
 writable `.cache` tmpfs (see Phases 0.5 + 1). **On-start claude-version update** — `updates.py` reads
@@ -61,8 +58,8 @@ tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` gree
 `.cache`/`gh`/git + nvim probes).
 
 **You can today:** mint work/home profiles, create projects on either account, start/stop/shell/run
-claude in hardened containers, switch a project's account, watch per-account token usage **and live
-5-hour/weekly subscription-limit bars**, add / remove / inspect a project's checked-out repos with live
+claude in hardened containers, switch a project's account, watch per-account token usage, add / remove
+/ inspect a project's checked-out repos with live
 git state, mount ssh (agent-forward) + host files into a container (`project env` + `project resync`),
 and **`git commit` / `gh` inside a hardened container** with the operator's inherited git identity, and
 **keep claude up to date** — on start, claude-man checks the tracked channel and offers to rebuild a
@@ -97,9 +94,6 @@ The `openssh-client` base-image addition (for in-container ssh) likewise needs `
 a `project recreate <slug>` to take effect on existing projects. Activating this session's three
 features on existing setups:
 
-- **Usage bars:** existing tokens were minted with `user:inference` only and 403 on the usage
-  endpoint (the bars read `re-mint`). Run `claudemanctl profile renew <name>` to re-mint with the
-  `user:profile` scope and unlock the 5h/weekly bars.
 - **`.cache` writability fix + git identity:** both are container-create options (tmpfs uid/gid +
   `GIT_CONFIG_*` env), so `claudemanctl project recreate <slug>` applies them with **no image
   rebuild**. Recreate is also required after changing the git identity (`config git …` / the TUI
@@ -190,22 +184,14 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
 - [x] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profiles.save` (single-default); `profile.toml` schema + default resolution
 - [x] `claude-config/` seeding from the profile `seed/` through the denylist; `profile seed` captures host `~/.claude` (settings.json field-patched per SYNC-2, cruft excluded); create/`recreate` use the effective profile
 - [x] profile column + **per-profile token-usage panel + token age in the TUI** (`u` to refresh; worker-scanned off the UI thread) + `profile usage` CLI; switch-time email-mismatch guard (`recreate --force`)
-- [x] **Per-account subscription usage bars (5-hour + weekly):** `usage_api.py` reads
-  `GET https://api.anthropic.com/api/oauth/usage` (`config.OAUTH_USAGE_URL`, beta
-  `oauth-2025-04-20`) with a profile's OAuth bearer → `five_hour` + `seven_day` utilization % (0–100)
-  + reset times (per-model `seven_day_opus/sonnet` parsed, not yet surfaced). These are **account-wide
-  subscription limits** (all usage on the account, not just claude-man containers — the panel title
-  says so), distinct from the transcript token-totals. Pure parse/render
-  (`parse_utilization`/`render_bar`/`level`) split from the network fetch. **Security:** a no-redirect
-  urllib opener (`_NoRedirect`) so a 30x never re-sends the `Authorization` bearer cross-host
-  (credential-leak fix, invariant 1); `User-Agent` pinned to `claude-code/<ver>`
-  (`config.CLAUDE_CODE_USER_AGENT`) to avoid hard rate-limiting; read-only, does NOT consume quota.
-  **Token scope:** `setup_token.py` now mints with `CLAUDE_CODE_OAUTH_SCOPES="user:profile
-  user:inference"` (`config.OAUTH_USAGE_SCOPES`) so the SAME token runs inference AND reads usage;
-  existing `user:inference`-only tokens 403 (bars read `re-mint`) until `profile renew <name>`.
-  **TUI:** the usage panel gains `5h` + `Week` coloured mini-bars (green <70% / yellow <90% / red),
-  fed by a 60 s off-thread `refresh_utilization` worker cached in `self._util` (`u` refreshes both).
-  **CLI:** `profile limits [name]` prints per-account 5h/weekly bars + reset.
+- ~~**Per-account subscription usage bars (5-hour + weekly):**~~ **REMOVED (2026-06-30).** Built
+  against `GET /api/oauth/usage`, but the feature never worked: `claude setup-token` has no way to
+  mint the `user:profile` scope the endpoint requires (the `CLAUDE_CODE_OAUTH_SCOPES` override is
+  consumption-side, not mint-side — see the shelved-then-deleted DEBUGGING note), so the bars were
+  permanently stuck on `re-mint`/`http 429`. `usage_api.py`, the `profile limits` CLI, the TUI 5h/Week
+  columns + `refresh_utilization` worker, and the `OAUTH_USAGE_*` config/scope were all stripped out.
+  Token minting reverted to `setup-token`'s default `user:inference` scope. The transcript-based
+  per-profile token-totals panel (above) is unaffected.
 - [~] docker-events-driven refresh — the async off-UI-thread worker (TUI-2) is **DONE** (projects/usage/util/gitstate/net panels all run off-thread); what remains is replacing the 10 s poll with a `docker events` push trigger
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle

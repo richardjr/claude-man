@@ -19,7 +19,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Header, Label, RichLog, Static
 
-from .. import config, lifecycle, usage, usage_api
+from .. import config, lifecycle, usage
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
 from ..docker import stats, status
@@ -56,14 +56,19 @@ _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
 # Per-project network panel. Traffic = whole-container NetIO since start (docker stats). Blocked/Allowed
 # = distinct destinations from the squid access log — locked projects only (open ones have no sidecar).
 _NET_COLUMNS = ("Project", "Egress", "Blocked", "Allowed", "Traffic")
-# "5h"/"Week" are ACCOUNT-wide subscription windows from /api/oauth/usage (not container-scoped).
-_USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total", "5h", "Week")
-# Bar colour by utilization band (usage_api.level): green < 70% < yellow < 90% < red.
-_USAGE_LEVEL_STYLE = {"ok": "green", "warn": "yellow", "crit": "red", "none": "dim"}
+_USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total")
 # Braille spinner frames for the header "work in progress" indicator (start/stop/recreate/… take time).
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Band passes for a repo-panel git-change sweep ("a few times" — start/stop row sweeps run once).
 _GIT_SWEEP_REPEATS = 3
+# Responsive vertical breakpoints (terminal rows). The Projects table is `height: 1fr`, so when the
+# panels below it consume all the vertical space it collapses to nothing — and Projects is the most
+# important area. Below each threshold the named panel (title + table) is hidden so Projects + Repos
+# (the protected top two) keep their rows. Drop order matches operator priority: Network first, then
+# Token usage, then the message Log last. Projects + Repos are never dropped. Re-evaluated on resize.
+_HIDE_NETWORK_BELOW = 40
+_HIDE_TOKENS_BELOW = 33
+_HIDE_LOG_BELOW = 26
 # The two-line key bar replacing the stock Footer: row 1 = verbs acting on the SELECTED project row,
 # row 2 = app-wide verbs — so the scope of every key is explicit at a glance. Display only — key
 # dispatch stays in BINDINGS; keep the two in sync when adding a verb.
@@ -78,7 +83,10 @@ _KEYBAR = (
 class ClaudeManApp(App):
     TITLE = "claude-man"
     CSS = """
-    #projects { height: 1fr; }
+    /* Projects is the priority area: 1fr to claim slack, min-height so a content-heavy Repos panel
+       can never squeeze it to nothing within a breakpoint band (panels still drop on resize — see
+       _reflow_panels). */
+    #projects { height: 1fr; min-height: 6; }
     /* 13 = 10 repo rows + 1 header + 2 border — sized to show a full realistic repo list. */
     #repos { height: auto; max-height: 13; border: round $panel; }
     #profiles { height: auto; max-height: 10; border: round $panel; }
@@ -157,11 +165,11 @@ class ClaudeManApp(App):
             yield DataTable(id="projects", cursor_type="row")
             yield Label("Repos · —", id="repos-title", classes="panel-title")
             yield DataTable(id="repos")
-            yield Label("Token usage per profile (containers) · 5h/Week = account subscription limits",
-                        classes="panel-title")
+            yield Label("Token usage per profile (containers)",
+                        id="profiles-title", classes="panel-title")
             yield DataTable(id="profiles")
             yield Label("Network · Traffic since container start · Blocked/Allowed = locked projects "
-                        "(g for live detail)", classes="panel-title")
+                        "(g for live detail)", id="netactivity-title", classes="panel-title")
             yield DataTable(id="netactivity")
             yield RichLog(id="log", highlight=True, markup=True)
         yield Static(_KEYBAR, id="keybar")
@@ -187,9 +195,6 @@ class ClaudeManApp(App):
         self._gitstate_at: float | None = None  # monotonic of the last completed scan, for the panel title
         self._gitstate_seq = 0       # dispatch counter; the latest-dispatched scan wins the cache merge
         self._gitstate_applied = 0   # seq of the last applied batch (drops a slower batch finishing late)
-        # profile name -> last subscription-usage result (5h/weekly). Fetched off-thread on a gentle
-        # cadence (external endpoint); the usage panel reads this cache for the bar cells.
-        self._util: dict[str, usage_api.UsageResult] = {}
         # slug -> monotonic start for project rows mid state-change sweep, and the plain cell texts
         # the frames are built from (also the settle repaint once the band exits). Both are
         # rebuilt/pruned by _render_projects, so a deleted or reused slug can't replay a stale sweep.
@@ -206,9 +211,22 @@ class ClaudeManApp(App):
         self._repo_cols = self.query_one("#repos", DataTable).add_columns(*_REPO_COLUMNS)
         self.query_one("#profiles", DataTable).add_columns(*_USAGE_COLUMNS)
         self.query_one("#netactivity", DataTable).add_columns(*_NET_COLUMNS)
+        # The side panels are read-only displays. Keep them OUT of the focus chain so the global
+        # single-key verbs only ever fire from the projects table — never from a panel the operator
+        # tabbed into. Otherwise focus could land on (say) the Log panel and `enter` -> open a Shell,
+        # or `c`/`s` act with the panel focused. #projects stays the one interactive table, so it
+        # keeps focus and the global bindings always have the right project context.
+        for pid in ("#repos", "#profiles", "#netactivity", "#log"):
+            self.query_one(pid).can_focus = False
+        # Hide the global keybar whenever a sub-menu / dialog is on top, so the bottom bar never
+        # advertises the global keys over a modal. They are already inert there (Textual's modal
+        # binding chain excludes the App), but showing them reads as "still live" — misleading. Each
+        # modal renders its own keys inside its dialog. Restored on return to the base screen. Driven
+        # by screen_change_signal (fires on every push/pop) — see _sync_keybar.
+        self.screen_change_signal.subscribe(self, self._sync_keybar)
+        self._reflow_panels()  # set the initial panel set for the starting terminal size
         self.refresh_projects()
         self.refresh_usage()
-        self.refresh_utilization()
         self._dispatch_gitstate(fetch=False)
         self._render_repo_detail()
         self._bootstrap_env()  # load configured ssh keys into the agent so containers can use them
@@ -217,7 +235,6 @@ class ClaudeManApp(App):
         # replace the poll with a `docker events` worker.
         self.set_interval(10.0, self.refresh_projects)
         self.set_interval(15.0, self.refresh_usage)                          # usage changes slowly; off thread
-        self.set_interval(60.0, self.refresh_utilization)                     # external endpoint — gentle cadence
         self.set_interval(30.0, lambda: self._dispatch_gitstate(fetch=False))  # fetch-less git scan, off thread
         self.set_interval(0.2, self._tick_spinner)  # animate the header spinner while any op is in flight
         # Row state-change sweeps: 30 fps only while one is live (resumed by _render_projects when a
@@ -233,6 +250,37 @@ class ClaudeManApp(App):
         if show_splash and self.size.width > len(splash_mod.LOGO[0]) + 2 \
                 and self.size.height > len(splash_mod.LOGO) + 5:
             self.push_screen(SplashScreen())
+
+    def _sync_keybar(self, _screen: object = None) -> None:
+        """Show the global keybar only on the base screen; hide it under any pushed modal/sub-menu.
+        Subscribed to ``screen_change_signal`` (on_mount), so it fires on every push/pop. The stack
+        is already settled at publish time, so depth 1 == base screen, deeper == a modal is on top."""
+        try:
+            keybar = self.query_one("#keybar", Static)
+        except Exception:  # noqa: BLE001 - keybar absent (teardown) must never crash a screen change
+            return
+        keybar.display = len(self.screen_stack) <= 1
+
+    def on_resize(self, _event: object = None) -> None:
+        self._reflow_panels()
+
+    def _reflow_panels(self) -> None:
+        """Drop the lower-priority panels as the terminal shrinks so the Projects + Repos tables (the
+        protected top two) always keep their rows. Order: Network -> Token usage -> Log. See the
+        ``_HIDE_*_BELOW`` constants. Hidden tables still receive their refresh writes — they just
+        reclaim their rows for Projects until the terminal is tall enough to show them again."""
+        h = self.size.height
+        for wid, show in (
+            ("#netactivity-title", h >= _HIDE_NETWORK_BELOW),
+            ("#netactivity", h >= _HIDE_NETWORK_BELOW),
+            ("#profiles-title", h >= _HIDE_TOKENS_BELOW),
+            ("#profiles", h >= _HIDE_TOKENS_BELOW),
+            ("#log", h >= _HIDE_LOG_BELOW),
+        ):
+            try:
+                self.query_one(wid).display = show
+            except Exception:  # noqa: BLE001 - a panel absent mid-teardown must not crash a resize
+                pass
 
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
@@ -339,12 +387,8 @@ class ClaudeManApp(App):
 
     @work(thread=True, exclusive=True, group="usage")
     def refresh_usage(self) -> None:
-        """Scan transcripts + aggregate per-profile usage off the UI thread (review TUI-2 pattern).
-
-        The 5h/Week cells come from the ``_util`` cache (populated by ``refresh_utilization`` on a
-        slower cadence — the external usage endpoint shouldn't be polled at the 15 s transcript rate)."""
+        """Scan transcripts + aggregate per-profile usage off the UI thread (review TUI-2 pattern)."""
         data = usage.usage_by_profile()
-        util = self._util  # snapshot the cache reference (replaced wholesale on the UI thread)
         h = usage.human
         rows: list[tuple] = []
         for name in sorted(data):
@@ -355,36 +399,9 @@ class ClaudeManApp(App):
                 acct = "-"
             age = profiles_registry.token_age_days(name)
             tok = "none" if age is None else (f"{int(age)}d" + ("!" if age > 330 else ""))
-            five, week = self._usage_bars(util.get(name))
             rows.append((name, acct, tok, h(u.input), h(u.output),
-                         h(u.cache_creation + u.cache_read), h(u.total), five, week))
+                         h(u.cache_creation + u.cache_read), h(u.total)))
         self.call_from_thread(self._render_usage, rows)
-
-    @staticmethod
-    def _bar(pct: float | None) -> Text:
-        return Text(usage_api.render_bar(pct), style=_USAGE_LEVEL_STYLE.get(usage_api.level(pct), "dim"))
-
-    def _usage_bars(self, res) -> tuple[Text, Text]:
-        """The (5h, Week) cells for one profile: coloured bars, a dim note (``re-mint``/``offline``),
-        or ``…`` before the first utilization fetch has landed."""
-        if res is None:
-            return Text("…", style="dim"), Text("…", style="dim")
-        if res.util is None:
-            return Text(res.note or "—", style="dim"), Text("", style="dim")
-        return self._bar(res.util.five_hour.pct), self._bar(res.util.seven_day.pct)
-
-    @work(thread=True, exclusive=True, group="util")
-    def refresh_utilization(self) -> None:
-        """Fetch each profile's 5h/weekly subscription usage off the UI thread (gentle cadence).
-
-        Folds every failure into a note inside ``UsageResult`` (never raises), then repaints the panel.
-        A 403 (token minted without the ``user:profile`` scope) shows as ``re-mint``."""
-        results = {name: usage_api.fetch_for_profile(name) for name in profiles_registry.list_names()}
-        self.call_from_thread(self._apply_util, results)
-
-    def _apply_util(self, results: dict) -> None:
-        self._util = results
-        self.refresh_usage()  # repaint the panel with the fresh bars
 
     def _render_usage(self, rows: list[tuple]) -> None:
         table = self.query_one("#profiles", DataTable)
@@ -884,8 +901,7 @@ class ClaudeManApp(App):
 
     def action_refresh_usage(self) -> None:
         self.refresh_usage()
-        self.refresh_utilization()
-        self._log("refreshing token usage + subscription limits …")
+        self._log("refreshing token usage …")
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen())

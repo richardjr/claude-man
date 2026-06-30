@@ -145,30 +145,6 @@ def cmd_profile_usage(args) -> int:
     return 0
 
 
-def cmd_profile_limits(args) -> int:
-    from . import usage_api
-
-    names = [args.name] if args.name else profiles.list_names()
-    if not names:
-        print("(no profiles defined)")
-        return 0
-    print(f"{'PROFILE':<12} {'5-HOUR':<16} {'WEEKLY':<16} RESETS (5h)")
-    needs_renew = False
-    for name in names:
-        res = usage_api.fetch_for_profile(name)
-        if res.util is not None:
-            print(f"{name:<12} {usage_api.render_bar(res.util.five_hour.pct):<16} "
-                  f"{usage_api.render_bar(res.util.seven_day.pct):<16} {res.util.five_hour.resets_at}")
-        else:
-            needs_renew = needs_renew or res.note in ("re-mint", "auth")
-            print(f"{name:<12} {res.note}")
-    if needs_renew:
-        print("\n're-mint' = token lacks the user:profile scope · 'auth' = token expired/invalid. "
-              "Either way: `claudemanctl profile renew <name>` re-mints it (with usage access).",
-              file=sys.stderr)
-    return 0
-
-
 def cmd_profile_seed(args) -> int:
     from .profiles import seed
 
@@ -1365,9 +1341,6 @@ def build_parser() -> argparse.ArgumentParser:
     prof.add_parser("usage", help="token usage per profile across claude-man projects").set_defaults(
         func=cmd_profile_usage
     )
-    pl = prof.add_parser("limits", help="per-account 5h/weekly subscription usage (/api/oauth/usage)")
-    pl.add_argument("name", nargs="?", type=_slug_arg, help="a single profile (default: all)")
-    pl.set_defaults(func=cmd_profile_limits)
 
     # project
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)

@@ -140,7 +140,7 @@ class SummarizeTest(unittest.TestCase):
                           upstream="origin/main", config_branch="main", branch_matches_config=True,
                           dirty=True, unstaged=3, ahead=1)
         line = gitstate.summarize([self._clean("backend"), dirty]).line
-        self.assertEqual(line, "1 ✓  client:~↑1")
+        self.assertEqual(line, "1 ✓  1 ~  1 ↑")
 
     def test_uncloned(self) -> None:
         unc = RepoState(dir="packages", kind=gitstate.UNCLONED, present=False, config_branch="main")
@@ -156,7 +156,19 @@ class SummarizeTest(unittest.TestCase):
         drift = RepoState(dir="client", kind=gitstate.OK, present=True, branch="feat/x",
                           upstream="origin/feat/x", config_branch="main", branch_matches_config=False)
         line = gitstate.summarize([drift]).line
-        self.assertEqual(line, "client:⚠")
+        self.assertEqual(line, "1 ⚠")
+
+    def test_aggregate_rolls_up_per_flag_not_per_repo(self) -> None:
+        # 1 clean + 2 off-branch (one of them ALSO dirty) + 1 uncloned. The cell is per-flag counts,
+        # never repo names; the dirty+off-branch repo counts under BOTH ⚠ and ~ (flags overlap).
+        off = RepoState(dir="a", kind=gitstate.OK, present=True, branch="feat/x",
+                        upstream="origin/feat/x", config_branch="main", branch_matches_config=False)
+        off_dirty = RepoState(dir="b", kind=gitstate.OK, present=True, branch="feat/y",
+                              upstream="origin/feat/y", config_branch="main",
+                              branch_matches_config=False, unstaged=2)
+        unc = RepoState(dir="c", kind=gitstate.UNCLONED, present=False, config_branch="main")
+        line = gitstate.summarize([self._clean("z"), off, off_dirty, unc]).line
+        self.assertEqual(line, "1 ✓  2 ⚠  1 ~  1 uncloned")
 
 
 class CellLabelTest(unittest.TestCase):
@@ -173,6 +185,24 @@ class CellLabelTest(unittest.TestCase):
         self.assertEqual(gitstate.branch_label(drift), "feat/x (cfg:main)")
         self.assertEqual(gitstate.branch_label(det), "detached@abc1234")
         self.assertEqual(gitstate.branch_label(unc), "-")
+
+    def test_branch_label_truncates_long_names(self) -> None:
+        long_name = "feature/" + "x" * 80  # 88 chars, well over the 40 cap
+        on_long = RepoState(dir="a", present=True, branch=long_name, config_branch=long_name,
+                            branch_matches_config=True)
+        label = gitstate.branch_label(on_long)
+        self.assertEqual(len(label), 40)
+        self.assertTrue(label.endswith("…"))
+        self.assertEqual(label, long_name[:39] + "…")
+        # A name exactly at the cap is left intact (no ellipsis).
+        exact = RepoState(dir="a", present=True, branch="z" * 40, config_branch="z" * 40,
+                          branch_matches_config=True)
+        self.assertEqual(gitstate.branch_label(exact), "z" * 40)
+        # Drift form truncates BOTH the branch and the cfg branch independently.
+        drift = RepoState(dir="a", present=True, branch=long_name, config_branch=long_name,
+                          branch_matches_config=False)
+        self.assertEqual(gitstate.branch_label(drift),
+                         f"{long_name[:39]}… (cfg:{long_name[:39]}…)")
 
     def test_ab_and_commit_labels(self) -> None:
         synced = RepoState(dir="a", present=True, upstream="origin/main", ahead=2, behind=1,

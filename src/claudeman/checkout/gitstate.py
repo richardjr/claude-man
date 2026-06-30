@@ -175,7 +175,11 @@ def _glyphs(s: RepoState) -> str:
 def summarize(states: list[RepoState]) -> ProjectGitSummary:
     """Pure: list[RepoState] -> compact table-cell line + the detail list.
 
-    Examples: ``"3 ✓"`` · ``"2 ✓  client:~↑1"`` · ``"1 ⚠  1 uncloned"`` · ``"✗ 1 error  2 ok"``.
+    The cell is an AGGREGATE glance across all of a project's repos — clean count plus a per-flag
+    repo count — NOT a per-repo list (that's the Repos detail panel's job, and it truncated badly for
+    projects with many repos). A repo can carry several flags at once (off-branch AND dirty), so the
+    counts can overlap. Examples: ``"3 ✓"`` · ``"1 ✓  1 ~  1 ↑"`` · ``"2 ⚠  1 uncloned"`` ·
+    ``"✗ 1 error  2 ok"``.
     """
     n = len(states)
     if n == 0:
@@ -185,15 +189,18 @@ def summarize(states: list[RepoState]) -> ProjectGitSummary:
         ok = n - bad
         line = f"✗ {bad} error" + (f"  {ok} ok" if ok else "")
         return ProjectGitSummary(line, tuple(states))
-    present = [(s, _glyphs(s)) for s in states if s.present]  # _glyphs once per repo, not up to 3x
-    clean = sum(1 for _, g in present if g == "✓")
-    flagged = [(s, g) for s, g in present if g != "✓"]
-    uncloned = sum(1 for s in states if not s.present)
+    present = [_glyphs(s) for s in states if s.present]  # one classification per repo
     segs: list[str] = []
+    clean = sum(1 for g in present if g == "✓")
     if clean:
         segs.append(f"{clean} ✓")
-    for s, g in flagged:
-        segs.append(f"{s.dir}:{g}")
+    # Count repos carrying each flag (substring test over the canonical _glyphs alphabet): off-branch
+    # /detached ⚠, conflict ‼, dirty ~, ahead ↑, behind ↓, no-upstream ?. Same order as _glyphs.
+    for flag in ("⚠", "‼", "~", "↑", "↓", "?"):
+        count = sum(1 for g in present if flag in g)
+        if count:
+            segs.append(f"{count} {flag}")
+    uncloned = sum(1 for s in states if not s.present)
     if uncloned:
         segs.append(f"{uncloned} uncloned")
     return ProjectGitSummary("  ".join(segs) or "✓", tuple(states))
@@ -231,15 +238,26 @@ def state_style(s: RepoState) -> str:
     return "green"
 
 
+_BRANCH_MAX = 40  # cap a displayed branch name; longer names get an ellipsis (counts toward the cap)
+
+
+def _truncate_branch(name: str, limit: int = _BRANCH_MAX) -> str:
+    """Cap a branch name at ``limit`` chars, marking elision with a trailing ``…``. The ellipsis
+    counts toward the limit, so the result is never longer than ``limit`` (keeps the Branch column
+    bounded against pathologically long branch names)."""
+    return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
 def branch_label(s: RepoState) -> str:
-    """Branch cell for a per-repo row: ``main`` / ``feat/x (cfg:main)`` / ``detached@<sha>`` / ``-``."""
+    """Branch cell for a per-repo row: ``main`` / ``feat/x (cfg:main)`` / ``detached@<sha>`` / ``-``.
+    Branch names are truncated to ``_BRANCH_MAX`` chars (see ``_truncate_branch``)."""
     if s.detached:
         return f"detached@{s.last_sha or '?'}"
     if not s.branch:
         return "-"
     if not s.branch_matches_config:
-        return f"{s.branch} (cfg:{s.config_branch})"
-    return s.branch
+        return f"{_truncate_branch(s.branch)} (cfg:{_truncate_branch(s.config_branch)})"
+    return _truncate_branch(s.branch)
 
 
 def ab_label(s: RepoState) -> str:

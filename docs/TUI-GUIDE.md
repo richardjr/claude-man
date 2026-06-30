@@ -66,12 +66,14 @@ The main screen, top to bottom:
 - **Projects table** — `Project · Status · Profile · Egress · Repos · Version · Detail`.
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);
   it's polled fresh every 10 s, never cached. The Repos cell becomes a live git summary
-  (e.g. `2 ✓ client:~↑1`) once the 30 s fetch-less scan has run.
+  once the 30 s fetch-less scan has run — an aggregate per-flag rollup across the project's
+  repos (e.g. `4 ✓`, or `1 ✓  2 ⚠  1 ~` = 1 clean, 2 off-branch, 1 dirty), with the per-repo
+  breakdown in the Repos detail panel. Glyphs: `✓` clean · `⚠` off-branch/detached · `~` dirty ·
+  `↑`/`↓` ahead/behind · `‼` conflict · `?` no-upstream · `uncloned` / `✗ error`.
 - **Repo detail panel** — follows the table cursor: `Dir · Branch · State · ↑/↓ · Last commit`
   per repo of the selected project.
-- **Usage panel** — one row per profile: token totals from container transcripts plus the
-  account-wide `5h` / `Week` subscription bars (green < 70 % < yellow < 90 % < red). A `re-mint`
-  note means the token predates the usage scope — `profile renew` fixes it.
+- **Usage panel** — one row per profile: token totals (`In · Out · Cache · Total`) aggregated
+  from the project transcripts, plus the token age.
 - **Network panel** — one row per project: `Project · Egress · Blocked · Allowed · Traffic`.
   **Traffic** is the whole-container network I/O since the container started (`docker stats`
   NetIO, RX / TX) and shows for **every** running project, locked or open. **Blocked** /
