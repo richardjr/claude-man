@@ -434,19 +434,42 @@ def gateway_key_path(slug: str) -> Path:
 # on being run from the checkout root).
 # ---------------------------------------------------------------------------
 def repo_root() -> Path:
-    """The claude-man checkout root — holds ``images/`` and ``src/``.
+    """The claude-man checkout root — holds ``images/``, ``library/``, and ``src/``.
 
-    config.py lives at ``src/claudeman/config.py``; ``parents[2]`` is the checkout root.
+    config.py lives at ``src/claudeman/config.py``; ``parents[2]`` is the checkout root. This is the
+    DEVELOPMENT layout; an installed wheel resolves its bundled data via ``_data_root()`` (below)
+    instead, so this is only meaningful (and only called) from a source checkout.
     """
     return Path(__file__).resolve().parents[2]
 
 
-def library_packs_dir() -> Path:
-    """The curated pack library shipped in this repo (``library/packs/<tier>/<pack>/``).
+def _data_root() -> Path:
+    """The dir that holds the runtime data trees (``images/`` + ``library/``).
 
-    Repo-relative like ``images/`` — the operator runs claude-man from the checkout, and curation
-    is "edit the file, commit". See docs/PACKS.md."""
-    return repo_root() / "library" / "packs"
+    Two layouts resolve to the right place transparently:
+      * an installed wheel BUNDLES them under the package at ``claudeman/_data/`` (via the pyproject
+        ``[tool.hatch.build.targets.wheel.force-include]``), and
+      * a source checkout keeps them at the repo root.
+    Prefer the packaged copy, else fall back to the checkout root — so claude-man works both
+    ``uv run`` from a clone AND ``uv tool install``ed / ``pipx``ed from a wheel, no checkout required.
+    """
+    packaged = Path(__file__).resolve().parent / "_data"
+    if (packaged / "images").is_dir():
+        return packaged
+    return repo_root()
+
+
+def image_build_context() -> Path:
+    """The Docker build context for ``image build`` — the dir that CONTAINS ``images/`` (the
+    Dockerfiles ``COPY images/...`` relative to it). The data root: the wheel-bundled
+    ``claudeman/_data/`` or, from a checkout, the repo root."""
+    return _data_root()
+
+
+def library_packs_dir() -> Path:
+    """The curated pack library (``library/packs/<tier>/<pack>/``) — bundled in the wheel under
+    ``claudeman/_data/library`` or read from the checkout. See docs/PACKS.md."""
+    return _data_root() / "library" / "packs"
 
 
 def image_tag(overlay: str) -> str:
@@ -455,11 +478,11 @@ def image_tag(overlay: str) -> str:
 
 
 def image_dockerfile(overlay: str) -> Path:
-    """Absolute path to the Dockerfile that builds ``claude-man:<overlay>``."""
+    """Absolute path to the Dockerfile that builds ``claude-man:<overlay>`` (under the data root)."""
     if overlay == "base":
-        return repo_root() / "images" / "base" / "Dockerfile"
+        return _data_root() / "images" / "base" / "Dockerfile"
     if overlay == PROXY_IMAGE:
         # The strict-egress squid sidecar — standalone (NOT FROM claude-man:base), so it has its own
         # top-level dir rather than living under overlays/.
-        return repo_root() / "images" / "proxy" / "Dockerfile"
-    return repo_root() / "images" / "overlays" / f"{overlay}.Dockerfile"
+        return _data_root() / "images" / "proxy" / "Dockerfile"
+    return _data_root() / "images" / "overlays" / f"{overlay}.Dockerfile"

@@ -45,6 +45,18 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/claudeman"]
 
+# Bundle the runtime data trees the tool reads at run time — the Dockerfiles + image assets and the
+# curated pack library — INTO the wheel under claudeman/_data/, so an installed copy works without
+# the source checkout (config._data_root() finds them there). templates/ is docs-only, not bundled.
+[tool.hatch.build.targets.wheel.force-include]
+"images" = "claudeman/_data/images"
+"library" = "claudeman/_data/library"
+
+# The sdist ships the full source tree (incl. images/ + library/ + templates/ + tests) so it can
+# rebuild the wheel from source.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/images", "/library", "/templates", "/tests", "/*.md", "/LICENSE"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
