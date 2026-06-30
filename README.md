@@ -50,8 +50,8 @@ It exists to solve seven things at once:
 
 > Status: **alpha — phases 0–4 + 6 working, 5 planned** (2026-06-12). Mint work/home profiles; create /
 > start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
-> (mismatch-guarded); watch per-account token usage **and live 5-hour / weekly subscription-limit
-> bars**; commit + push from inside a container (inherited git identity + `gh` baked into every image);
+> (mismatch-guarded); watch per-account token usage; commit + push from inside a container
+> (inherited git identity + `gh` baked into every image);
 > add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
 > files into a container; publish service ports; **lock a project to strict egress** (a squid
 > allowlist proxy on a no-direct-route network); select **curated packs** of CLAUDE.md guidance +
@@ -193,6 +193,12 @@ building the same environment from `uv run claudeman` — minting a profile, cre
 project, adding repos, git identity + GitHub CLI setup, and ssh-agent pass-through, with
 every keybinding and screen.
 
+**Want a ready-made recipe for your use case?** [`docs/SETUP-GUIDES.md`](docs/SETUP-GUIDES.md)
+has quick, copy-pasteable setups — a CLI track and a TUI track each — for a Node/Python/Rust/polyglot
+project and for **Terraform + AWS** (including SSH agent-forwarding and AWS credentials), plus locking
+a project to an allowlist and pinning a local model. The sections below are the full reference behind
+those recipes.
+
 ## Setting up accounts (profiles)
 
 A **profile** is one Claude account identity, minted once on the host with `claude setup-token`
@@ -238,21 +244,7 @@ uv run claudemanctl profile verify work     # which account the token authentica
 uv run claudemanctl profile renew work      # re-mint an expired token (≈1-year life, can't self-refresh)
 uv run claudemanctl profile seed work       # (re)capture the host ~/.claude seed new projects inherit
 uv run claudemanctl profile usage           # per-account token usage across all projects (from transcripts)
-uv run claudemanctl profile limits [work]   # per-account 5-hour + weekly subscription-limit bars + reset
 ```
-
-### Subscription usage bars (5-hour + weekly)
-
-`profile limits` (and the TUI's per-profile panel) show how close each **account** is to its Claude
-subscription limits — the rolling 5-hour and weekly *utilization* windows that `claude`'s `/usage`
-reports. claude-man reads `GET …/api/oauth/usage` host-side with each profile's stored OAuth token; it's
-read-only and **does not consume quota**. These are account-wide figures (all usage on the account, host
-sessions included), not just what claude-man's containers spent.
-
-Reading usage needs the token to carry the `user:profile` scope. `claude setup-token` historically
-minted `user:inference` only, so **existing tokens read `re-mint` until you re-mint them** —
-`claudemanctl profile renew <name>` mints a token with both scopes (it runs inference *and* reads
-usage). Newly added profiles already get both scopes.
 
 ## Managing projects
 
