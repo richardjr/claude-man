@@ -37,6 +37,8 @@ from .screens.logs import LogsScreen
 from .screens.menu import MenuScreen
 from .screens.overlay_select import OverlaySelectScreen
 from .screens.model_pin import ModelPinScreen
+from .screens.profile_select import ProfileSelectScreen
+from .screens.profile_switch_confirm import ProfileSwitchConfirmScreen
 from .screens.packs import PacksScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
@@ -109,7 +111,7 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Packs, Egress, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
+    # Ports, Packs, Egress, Overlay, Model, Profile, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
     # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
@@ -151,6 +153,7 @@ class ClaudeManApp(App):
         ("g", "Egress…", "egress"),
         ("i", "Overlay (image)…", "overlay"),
         ("m", "Model (local)…", "model_pin"),
+        ("f", "Profile…", "profile"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -957,6 +960,7 @@ class ClaudeManApp(App):
             "egress": self.action_egress,
             "overlay": self.action_overlay,
             "model_pin": self.action_model_pin,
+            "profile": self.action_profile,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1322,6 +1326,63 @@ class ClaudeManApp(App):
             res = lifecycle.recreate(slug, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"model pin failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- profile (account) ------------------------------------------------
+    def action_profile(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]profile: select a defined project (orphan rows aren't managed)[/]")
+            return
+        project = projects.load(slug)
+        eff = lifecycle.effective_profile(project)  # mark the EFFECTIVE profile (None = inherits default)
+        current = eff.name if eff else (project.profile or "")
+        self._log(f"changing profile for {slug} (recreates to apply; re-seeds identity)")
+        self.push_screen(ProfileSelectScreen(slug, current), lambda name: self._on_profile(slug, name))
+
+    def _on_profile(self, slug: str, name) -> None:
+        if name is None:  # cancelled, or picked the current profile — nothing to recreate
+            return
+        try:
+            project = projects.load(slug)
+            target = profiles_registry.load(name)
+        except FileNotFoundError:
+            self._log(f"[red]profile: {name!r} is not a defined profile[/]")
+            return
+        # A cross-account switch trips recreate's mismatch guard (re-seed → the old account's session
+        # history stays). Confirm BEFORE forcing so the operator acknowledges the re-seed instead of
+        # hitting an opaque refusal in the log; a same-account switch (or a never-seeded config) needs no
+        # force. recreate refuses cleanly before any teardown/persist, so the running container is
+        # untouched until the operator confirms.
+        conflict = lifecycle.account_mismatch(project, target)
+        if conflict:
+            self.push_screen(
+                ProfileSwitchConfirmScreen(slug, name, conflict, target.account_email),
+                lambda res: self._on_profile_confirm(slug, name, res),
+            )
+            return
+        self._start_profile_switch(slug, name, force=False)
+
+    def _on_profile_confirm(self, slug: str, name: str, res) -> None:
+        if res == "force":
+            self._start_profile_switch(slug, name, force=True)
+        else:
+            self._log(f"profile switch for {slug} cancelled")
+
+    def _start_profile_switch(self, slug: str, name: str, *, force: bool) -> None:
+        if not self._reserve(slug, "profile"):
+            return
+        self._log(f"switching {slug} to profile {name!r} (recreating to apply) …")
+        self._profile_worker(slug, name, force)
+
+    @work(thread=True, group="create")
+    def _profile_worker(self, slug: str, name: str, force: bool) -> None:
+        """Apply a profile switch off the UI thread: recreate persists the new profile and re-seeds the
+        container identity (with ``force`` past a cross-account guard). Mirrors the overlay/model workers."""
+        try:
+            res = lifecycle.recreate(slug, profile_name=name, force=force, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"profile switch failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- sync-back (review-gated three-way merge into the host ~/.claude) --
