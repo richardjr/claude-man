@@ -16,7 +16,7 @@ The shell-open banner above (`images/bash/motd`, re-shown with `hints`) is the c
 each container ships. Regenerate this screenshot with `uv run python docs/images/capture_banner.py`
 (then `rsvg-convert -z 2 …`), exactly like the boot-splash captures.
 
-**Goal:** make the `shell` (`b`-less terminal) and `nvim` (`e`) experiences inside a container feel
+**Goal:** make the `shell` (the ↵ Shell action) and `nvim` (`e`) experiences inside a container feel
 like the operator's host **Arch/Omarchy bash** — a git-aware prompt, the same history search, the
 same `n` shortcut, a few quality-of-life CLIs, and an explanatory banner on shell open. Everything
 is **baked, curated, network-free at runtime, and floor-preserving** — the same model as the baked
@@ -120,8 +120,8 @@ is the **ephemeral `.cache` tmpfs**. So:
   would commit history into git; `/home/agent/.claude` is the syncback-managed config bind and is
   denylisted). The bind is a per-project state-tier dir
   (`~/.local/state/claude-man/projects/<slug>/shell/`) mounted read-write at a container path **not
-  shadowed by the tmpfs/binds** (e.g. `/home/agent/.local/state/shell`), pinned `uid=1000`; the
-  baked rc points `HISTFILE` there when the mount is present, else falls back to the tmpfs.
+  shadowed by the tmpfs/binds** — as built, `/home/agent/.persistent-history` — pinned `uid=1000`;
+  the baked rc points `HISTFILE` there when the mount is present, else falls back to the tmpfs.
 
 This is a **deliberate, documented invariant-2 relaxation** scoped to the opt-in path only: it adds
 exactly one writable surface, owner-pinned, justified, and never on by default. The smoke/floor test
@@ -155,9 +155,10 @@ real terminal (`[[ -t 1 ]]`) so non-tty exec probes (smoke/comm/ssh/gitstate) pr
 
 ### Supporting CLIs (parity)
 
-`apt install` from Trixie (verify at build): **eza, zoxide, fzf, bat, bash-completion**, optionally
-**git-delta**. Binary-name gotchas handled in the rc: Debian ships bat as `batcat` and delta as
-`delta`. Curated container-safe alias subset from Omarchy `bash/aliases`:
+`apt install` from Trixie (verify at build): **eza, zoxide, fzf, bat, bash-completion**
+(**git-delta** was considered but not shipped). Binary-name gotcha: Debian ships bat as `batcat`,
+handled by a baked image symlink (`/usr/local/bin/bat` → `/usr/bin/batcat`), not in the rc.
+Curated container-safe alias subset from Omarchy `bash/aliases`:
 
 - **`n`** — the operator's exact function (`nvim .` on no args, else `nvim "$@"`).
 - `g` / `gcm` / `gcam`, the `eza` `ls` / `lt` family, the zoxide `cd` override, `..` / `...`,
@@ -186,8 +187,10 @@ Writable state for these (zoxide db `_ZO_DATA_DIR`, starship cache, history) all
 ## Smoke / tests / docs
 
 - Extend `docker/smoke.py` (base gate) to assert under `--read-only --user`: interactive bash
-  sources the rc (`type n` resolves), `starship --version` runs, the default `HISTFILE` is writable,
-  the banner prints, and **neo-tree opens headless** without writing to the read-only rootfs.
+  sources the rc (`type n` resolves), the default `HISTFILE` lands on the `.cache` tmpfs
+  (`/home/agent/.cache/bash_history`), starship is present, the dev CLIs are present
+  (eza/zoxide/fzf/bat), and headless nvim loads the curated config + the typescript treesitter
+  parser and writes shada to the `.cache` tmpfs — without writing to the read-only rootfs.
 - Unit/inspection test: the baked `bashrc`'s first effective line is the non-interactive guard
   (protects the exec probes); the opt-in history bind renders additively (floor unchanged when off).
 - Rebuild **base → overlays** explicitly (`image build base`, then node/python/rust) — `up`/`recreate`

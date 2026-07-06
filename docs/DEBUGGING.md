@@ -157,21 +157,27 @@ the project actually tried to reach and got BLOCKED:
 claudemanctl project egress-log <slug>     # blocked destinations, paste-able into egress.allowlist
 ```
 
-Add the missing host in the TUI `g` Egress screen (allowlist extras, or promote a blocked
-destination straight from the log), then **recreate** — `egress.render_conf` only re-renders
+Add the missing host in the TUI Egress screen (Project… `p` → `g`; allowlist extras, or promote a
+blocked destination straight from the log), then **recreate** — `egress.render_conf` only re-renders
 squid.conf on the next recreate, so an allowlist edit doesn't apply to a running sidecar. The base
 allowlist always includes `claude.ai` (the OAuth refresh path, invariant 3); if token refresh fails
 opaquely under lock, confirm that host is present.
 
-### By design under lock: ssh-git over a custom host, and direct DNS
+### By design under lock: ssh-git outside the big forges, and direct DNS
 
-Strict egress today covers **proxy-aware traffic only** (`HTTP(S)_PROXY` → the squid CONNECT
-allowlist). Two things are NOT reachable from a locked project and that is expected, not a bug:
+Strict egress today covers **proxy-aware traffic plus the SSH-over-443 forges** (`HTTP(S)_PROXY` →
+the squid CONNECT allowlist). Two things are NOT reachable from a locked project and that is
+expected, not a bug:
 
 - **Direct (non-proxy) DNS / TCP** — the agent is on an `--internal` net with no gateway, so anything
   that bypasses `HTTP(S)_PROXY` (raw sockets, a tool that ignores the proxy env) has no route out. The
   deferred `dnsmasq` direct-DNS layer + in-container default-DROP are ROADMAP Phase 4 defence-in-depth.
-- **ssh-based git** (`git@github.com:…`) — ssh does not honour `HTTP(S)_PROXY`, so it can't traverse
-  the squid sidecar. Use HTTPS remotes for git under lock (the `egress-smoke` probe itself uses
-  `git ls-remote https://…`), or leave the project unlocked while it needs ssh-git.
+- **ssh-based git to hosts outside github / gitlab / bitbucket** — plain ssh does not honour
+  `HTTP(S)_PROXY`, so it can't traverse the squid sidecar. For those three forges,
+  `git@github.com:…`-style remotes **do work under lock**: `lifecycle._seed_ssh` rewrites them to
+  their SSH-over-443 endpoints and `ProxyCommand`s through the sidecar on the same allowlist
+  (issue #12; the project needs its `ssh` env-mount). Anything else — a self-hosted forge, Azure
+  DevOps (no 443 SSH endpoint) — has no route: use HTTPS remotes there (the `egress-smoke` probe
+  exercises both a `git ls-remote https://…` and an ssh-over-443 leg through the proxy), or leave
+  the project unlocked while it needs ssh-git.
 

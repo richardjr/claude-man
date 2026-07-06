@@ -42,11 +42,11 @@ git clone https://github.com/richardjr/claude-man.git
 cd claude-man
 uv sync
 
-# 2. Build + smoke-test the hardened base image (needs docker + a host `claude` install).
+# 2. Build + smoke-test the hardened base image (needs docker + network).
 uv run claudemanctl image build base
 uv run claudemanctl image smoke base
 
-# 3. Mint an account profile (one Claude account; a browser flow completes `claude setup-token`).
+# 3. Mint an account profile (needs a host `claude` install; a browser flow completes `claude setup-token`).
 uv run claudemanctl profile add home --default          # personal subscription, default for new projects
 # work account behind SSO:  profile add work --sso --email you@company.com
 ```
@@ -76,7 +76,8 @@ uv run claudemanctl project claude myproj                                       
 **TUI** (`uv run claudeman`):
 
 1. `n` → **New project**: type the slug, pick the **profile**, **overlay**, **language** (pack tier),
-   and **egress** mode, then confirm. The container is created + started.
+   and **egress** mode, then confirm. The container is created but **not** started — press `s`
+   (opening it with **Enter**/`c` auto-starts it too).
 2. `g` → `a` → **Add repo**: paste the clone URL (optionally branch / subdir); it clones live into
    `/workspace`.
 3. With the project selected: **Enter** → shell · `c` → claude · `e` → neovim · `b` → open the
@@ -140,8 +141,8 @@ and the (hidden) value; repeat per variable, then `p` → `r` **Recreate**.
 
 > `aws sso login` / STS role-caching write to `~/.aws/{sso,cli}/cache` on the read-only HOME and aren't
 > supported in-container — pass **already-resolved** credentials via these env vars. (`AWS_CONFIG_FILE`
-> /`AWS_SHARED_CREDENTIALS_FILE` are redirected to a writable scratch tmpfs, so `aws configure` works
-> too, but it's ephemeral.)
+> /`AWS_SHARED_CREDENTIALS_FILE` are redirected to the ephemeral `~/.cache` tmpfs, so `aws configure`
+> works too, but it doesn't survive the session.)
 
 ### Other env vars and config files
 
@@ -303,13 +304,16 @@ uv run claudemanctl project egress-smoke infra    # prove enforcement: allowed h
 ```
 
 **TUI:** select the project → `p` (**Project**) → `g` (**Egress…**): `l` lock/unlock, `a`/`x`
-add/remove an allowlist domain (validated, applied on the next recreate), and `b` to **promote** a
-destination the proxy actually blocked straight into the allowlist. The always-on **Network panel**
-shows per-project Blocked/Allowed counts and Traffic.
+add/remove an allowlist domain (validated, applied on the next recreate), `b` to **promote** a
+destination the proxy actually blocked straight into the allowlist, and `r` **apply** (recreate) —
+the key that makes inline allowlist edits take effect on a locked project. The always-on
+**Network panel** shows per-project Blocked/Allowed counts and Traffic.
 
 > The base allowlist always includes `claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the
-> package registries. `ssh`-based git is **not** reachable under lock today — clone over HTTPS for a
-> locked project, or do the clone before locking.
+> package registries. `ssh`-based git **works under lock** for github / gitlab / bitbucket: their
+> SSH-over-443 endpoints are tunnelled through the sidecar on the same allowlist (the project needs
+> the `ssh` env-mount — see Add-ons). Azure DevOps has no 443 SSH endpoint — use HTTPS remotes
+> there, or open mode.
 
 ## Guide: Add a local model (hybrid)
 
@@ -328,7 +332,8 @@ uv run claudemanctl project model clear web                # back to subscriptio
 ```
 
 **TUI:** `m` (global) opens the **Models** screen to install/update/remove models; select a project →
-`p` → `m` (**Model (local)…**) to pin/unpin, then `p` → `r` **Recreate**.
+`p` → `m` (**Model (local)…**) to pin/unpin — the pick applies itself (persisted + an automatic
+recreate; no manual recreate needed).
 
 ---
 

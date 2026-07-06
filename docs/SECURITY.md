@@ -16,6 +16,7 @@ controls, and the residual risks.
   │ ~/.claude (sync-back tgt)  │◀─ gate ──│  /home/agent/.claude (bind, rw)       │
   └───────────────────────────┘  review  └──────────────────────────────────────┘
                                             egress: open  | strict (squid sidecar)
+                                            hybrid local model: + LiteLLM gateway sidecar
 ```
 
 What crosses each way, and what must never cross:
@@ -29,7 +30,11 @@ What crosses each way, and what must never cross:
 
 ### Container hardening (defence against a compromised agent/project)
 - `--read-only` rootfs; only `/workspace`, `/home/agent/.claude` (persistent binds), and
-  `/tmp` + `/home/agent/.cache` (tmpfs) are writable.
+  `/tmp` + `/home/agent/.cache` (tmpfs) are writable. Plus, only when the operator configures them:
+  a `0700` `/home/agent/.ssh` tmpfs (projects with an `ssh` env-mount), the opt-in persistent
+  shell-history bind (`config shell-history on`), and any `file` env-mount added with `--rw` — all
+  rendered **additively**, never as changes to the hardening flags, so the default floor is
+  byte-identical (unit-pinned).
 - `--cap-drop ALL` + `--security-opt no-new-privileges` — no capability is ever held, none can be
   regained.
 - `--user 1000:1000` (non-root, matches host uid so workspace edits keep correct ownership), real
@@ -68,7 +73,7 @@ What crosses each way, and what must never cross:
   `GH_CONFIG_DIR` are baked to point at the writable `.cache` tmpfs so any further `git config
   --global` / `gh` writes land somewhere writable instead of hitting `EROFS`.
 - **`gh` ships as a binary; no token is injected by default.** The base image bakes a pinned GitHub
-  CLI (`config.DEFAULT_GH_VERSION`). With nothing configured, claude-man injects no `gh` credential —
+  CLI (`ARG GH_VERSION=2.93.0` in `images/base/Dockerfile`). With nothing configured, claude-man injects no `gh` credential —
   the operator can authenticate in-container via `gh auth login` (writing the agent-writable
   `GH_CONFIG_DIR`). An operator may instead **opt in** to a managed token via `config gh-token`
   (TUI: Settings → `t`), which stores it `0600` in the **state tier** (`gh_token.py` →
@@ -136,6 +141,26 @@ What crosses each way, and what must never cross:
   -proxy in addition to the HTTPS allow/deny legs.
   (Deferred defence-in-depth: `dnsmasq` direct-DNS forwarding + an in-container `iptables` default-DROP
   layer — today's lock covers proxy-aware traffic plus the SSH-over-443 forges above.)
+
+### Published ports (ingress)
+- `[[project.ports]]` publishes a container service port as an **additive**
+  `-p <bind>:<host>:<container>/<proto>` mapping — never a change to the hardening flags (the floor
+  stays byte-identical). The container port must be **≥1024** (`--cap-drop ALL` drops
+  `NET_BIND_SERVICE`, so a privileged port could never bind anyway). The default bind is
+  `127.0.0.1` (host-only); exposing a port to the LAN requires an explicit per-port `0.0.0.0`
+  opt-in. This is **orthogonal to the egress firewall** — ports are ingress, the squid sidecar
+  governs egress. Mappings are fixed at `docker create`; recreate to apply.
+
+### Hybrid local-model gateway (Phase 9)
+- A project pinned to a local model (`project model set`) gets a **LiteLLM gateway sidecar** on a
+  per-project bridge network; the agent's `ANTHROPIC_BASE_URL` is rewired to the sidecar via
+  **additive** env (the hardened floor is unchanged — invariant 2).
+- The sidecar image is pinned **by digest** (`config.GATEWAY_IMAGE_REF`), and its per-project
+  master key is a `0600` state-tier secret injected **pass-through** via the `x-litellm-api-key`
+  header env — never in argv, never in the rendered `config.yaml`.
+- The sidecar reaches the host's Ollama daemon via the host-gateway route.
+- **Strict egress (locked) + hybrid is refused at set-time** (`registry.set_model` rejects the
+  pin; unpinning stays allowed), so the gateway can never punch a hole in a locked project.
 
 ### Curated packs (host-side materialization — no new container surfaces)
 - Pack delivery **adds no mount, env var, or docker flag**: materialization writes into the
