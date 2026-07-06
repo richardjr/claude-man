@@ -22,9 +22,10 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 > value-shape masking, registry-wins drift marker, concise `fetch_all`); **SYNC-3/5** (skill-symlink
 > containment, denied-key drop before diffing). **Still genuinely open:** **SYNC-1** (sync-back
 > artifacts remain USER scope only — project/repo scope deferred past Phase 5), **IMG-4** (partial —
-> the egress allowlist + Yarn cache are pinned, but `COREPACK_HOME`/uv-cache offline pinning and the
-> per-overlay offline smoke are not), and **BUG-2** (latent — label CSV-split, harmless while label
-> values stay comma-free).
+> the egress allowlist + Yarn cache are pinned, and the uv writable-path redirects have since landed
+> (`UV_CACHE_DIR`/`UV_PYTHON_*`/`UV_TOOL_*` → the `/workspace` bind in `runner._BAKED_ENV`), but
+> `COREPACK_HOME` and the per-overlay offline smoke are not), and **BUG-2** (latent — label
+> CSV-split, harmless while label values stay comma-free).
 
 ## Critical
 
@@ -45,7 +46,7 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 | WIRE-1 | `cli.py:82-91` | `project create`/`up`/`stop` are `_todo` stubs although `runner.create/start/stop`, `checkout.clone_all`, `projects.save`, `profiles.resolve_for_project`, `identity.build_identity_stub` all exist. | Wire the orchestration. | DONE (Phase 1-min) |
 | IMG-3 / WIRE-5 | `cli.py:144-145` | `image smoke` is a stub — the documented gate that would have caught IMG-1 does nothing. | Implement the real smoke gate. | DONE (0.5.2) |
 | WIRE-3 | `config.py:100-102`; `profiles/identity.py`; `tui/screens/create.py` | Nothing seeds the `claude-config` bind dir (no mkdir 0700, identity stub, profile-seed copy). First `claude` would re-onboard. | `profiles.seed_project_config`. | DONE (Phase 1-min) |
-| IMG-4 | `images/overlays/node.Dockerfile:7-10` | corepack caches yarn/pnpm under `/home/agent/.cache` (wiped by the runtime tmpfs) → first `yarn`/`pnpm` re-downloads → fails under strict egress; `registry.yarnpkg.com` not in base allowlist. | `COREPACK_HOME` to a read-only system path; add yarn hosts to allowlist; smoke offline. | PARTIAL (Phase 4 — allowlist + Yarn cache pinned; corepack/uv offline pin + per-overlay offline smoke open) |
+| IMG-4 | `images/overlays/node.Dockerfile:7-10` | corepack caches yarn/pnpm under `/home/agent/.cache` (wiped by the runtime tmpfs) → first `yarn`/`pnpm` re-downloads → fails under strict egress; `registry.yarnpkg.com` not in base allowlist. | `COREPACK_HOME` to a read-only system path; add yarn hosts to allowlist; smoke offline. | PARTIAL (Phase 4 — allowlist + Yarn cache pinned; uv `UV_*` redirects since landed; `COREPACK_HOME` + per-overlay offline smoke open) |
 | TUI-1 / WIRE-4 | `tui/app.py:103-114` | `s` (start) on a DEFINED project runs `docker start` on a non-existent container and logs green "started" anyway (returncode discarded). | Branch on `Row.kind`; surface returncode/stderr. | DONE (Phase 1-min) |
 | TUI-2 | `tui/app.py:50-63` | 2 s refresh shells out to `docker ps` **synchronously on the UI thread**; docs require an async worker. | `@work(thread=True, exclusive)` ps worker posting rows back. | DONE (off-UI-thread `refresh_projects` worker) |
 | TUI-3 | `tui/app.py:33,46` | `enter`=open_shell is shadowed by DataTable's own Enter/RowSelected handler — the headline shell action silently does nothing when the table is focused (the default focus). | Rebind to an unambiguous key or add `on_data_table_row_selected`. | DONE (Phase 1-min) |
@@ -58,7 +59,7 @@ Status key: `TODO` · `DONE` (fixed this pass) · `PLANNED` (folded into a later
 | SEC-5 | `docs/SECURITY.md:26` | Trust-boundary table lists "refreshed token (in-place in the bind)" as an allowed container→host flow — contradicts the env-token/no-credentials-file model and could lure a contributor into re-introducing `.credentials.json`. | Remove/reword the row. | DONE (records) |
 | SEC-6 | `tui/terminals.py:24-30` | keep-open path rebuilds `docker exec` via `bash -lc` f-string; CLI `project shell/claude <slug>` passes the slug **unvalidated** (no `_SLUG_RE` at the CLI boundary), so a crafted slug reaches the shell string. | Validate slug at the CLI boundary (registry-membership); keep docker exec a pure argv list + terminal hold flag. | DONE (2026-06-10: argparse `type=` slug/name validation on every verb + `_inner_exec` re-validates before the keep-open shell string) |
 | BUG-1 | `registry/projects.py:54`; `runner.py:84` | Non-string TOML env values (`DEBUG = true`) render as Python repr (`DEBUG=True`). | Coerce env values to `str` at parse time (bools → `true`/`false`). | DONE (Phase 1-min) |
-| BUG-2 | `docker/status.py:83-90` | `_parse_label_csv` splits the `docker ps` Labels CSV on `,` — truncates any label value containing a comma (latent; current values are comma-free). | Read labels from `docker inspect --format '{{json .Config.Labels}}'`. | PLANNED (Phase 3) |
+| BUG-2 | `docker/status.py:83-90` | `_parse_label_csv` splits the `docker ps` Labels CSV on `,` — truncates any label value containing a comma (latent; current values are comma-free). | Read labels from `docker inspect --format '{{json .Config.Labels}}'`. | OPEN (latent — Phase 3 shipped without it; `_parse_label_csv` still used) |
 | BUG-3 | `syncback/denylist.py:49,96` | `*-cache.json` (via fnmatch, `*` matches `/`) wrongly denies nested files like `agents/build-cache.json`. Over-denial, not a leak. | Anchor the `*-cache.json` class to `os.path.basename`. | DONE (Phase 5) |
 | BUG-4 | `syncback/denylist.py:121-128` | `mask_line` misses `export KEY=secret` and a token under an innocuous key (defense-in-depth; not the primary boundary). | Add a value-shape scan (`sk-ant-…`, JWT runs); tolerate a leading `export`/word. | DONE (Phase 5) |
 | BUG-5 | `docker/status.py:108-109` | `status.join` shows a drifted container **label** value as authoritative over the registry (mild invariant-4 tension; read-only status only). | Prefer registry values for descriptive fields + surface a drift marker. | DONE (Phase 3) |
@@ -121,7 +122,8 @@ dismiss via button/Enter/Escape; worker robustness: forced `OSError` and `KeyErr
 **Not addressed here (unchanged scope):** **SEC-6** remains open — it is the CLI `project
 shell`/`claude` exec boundary in `terminals.py`, *distinct* from the create-form slug check this
 work added. **SEC-3** (one-claude guard) and **TUI-2** (async projects poll) also remain open; TUI-2
-in particular would further reduce the create-worker/poll contention noted in FORM-2.
+in particular would further reduce the create-worker/poll contention noted in FORM-2. (All three
+have since closed — see the resolution updates above.)
 
 # Usage-bars + hardened-surface fixes review — 2026-06-05
 

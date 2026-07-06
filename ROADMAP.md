@@ -8,7 +8,7 @@ subsystem. Each phase lists its goal and concrete deliverables. Checkboxes track
 > the hardened profile) plus the `--env-file` credential-scrub gap are addressed in the new
 > **Phase 0.5**. Lower-severity findings are folded into the phase that owns them (tagged inline).
 
-## Current status — 2026-06-14
+## Current status — 2026-07-02
 
 **Done & verified:** Phase 0, **Phase 0.5** (hardened image runs `claude` under `--read-only
 --user`; `image smoke` gate; native `~/.local` install so `claude doctor` is clean; `env_file`
@@ -20,17 +20,18 @@ token-usage in the CLI + TUI), and **Phase 3 (repos — CLI + TUI)** — `projec
 via the new `checkout/gitstate.py` porcelain-v2 parser; add clones live into the running container
 (no recreate), with dir-containment, credential-masking, a per-slug `flock`, and the BUG-5/BUG-6 fixes.
 The **TUI** surfaces it as a live Repos column + a per-project repo-detail panel (30 s fetch-less gitstate
-worker, `g` for a fetch-ful rescan) plus the Repos submenu (`g`) with `a` Add-repo / `x` Remove-repo modal screens. A
+worker, Repos… → `r` for a fetch-ful rescan) plus the Repos submenu (`g`) with `a` Add-repo / `x` Remove-repo modal screens. A
 **workspace-ownership pre-flight** (`_ensure_workspace_owned`) stops Docker auto-creating `workspace/`
-as root. **Env-mounts (CLI, ssh + files)** — `project env add ssh|file`/`rm`/`list` + `project resync`:
+as root. **Env-mounts (CLI, ssh + files + env secrets)** — `project env add ssh|file|env`/`rm`/`list` + `project resync`:
 read-only file binds at arbitrary container paths + ssh **agent-forwarding** (keys stay on the host) +
-a `0700` `~/.ssh` tmpfs seeded via `exec`-stdin; additive render (floor byte-identical, unit-pinned);
+a `0700` `~/.ssh` tmpfs seeded via `exec`-stdin + named `env` secrets (the value lives `0600` in the
+state tier, injected `-e NAME` pass-through); additive render (floor byte-identical, unit-pinned);
 a hardened **dest-denylist** (blocks the `.credentials.json`-injection attack incl. its leading-`//`
 bypass, plus the ssh tmpfs, the hardened tmpfs mountpoints, and the baked claude launcher) — but
 `/workspace/<path>` IS allowed (a workspace-root `CLAUDE.md`; nested mountpoint pre-created
 operator-owned) with a `cp`-style trailing-slash dst; src must be absolute (else docker makes a named
-volume); `openssh-client` added to the base image. The **TUI** adds an `e` env-mounts manager screen
-(list / add / remove / resync). A **`workdir`** option (`Project.launch_workdir`) makes `claude`/shell
+volume); `openssh-client` added to the base image. The **TUI** adds an env-mounts manager screen
+(Project… → `e`; list / add / remove / resync). A **`workdir`** option (`Project.launch_workdir`) makes `claude`/shell
 open via `docker exec -w` in an explicit `[project] workdir`, else `/workspace` — always, since
 Phase 6a dropped the lone-repo auto-cd. **In-container git identity + gh**
 — `gitconfig.py` injects the operator's git author identity via `GIT_CONFIG_*` env (no writable file
@@ -53,7 +54,13 @@ neovim 0.11 with a curated, no-plugin-manager config (`images/nvim/`) for TypeSc
 git-from-nvim: plugins are native packages, treesitter parsers compiled to `/opt/nvim-parsers`, and
 LSP servers (`ts_ls`/`marksman`/`jsonls`) + prettier baked on PATH — all read-only, no runtime
 network/Mason; nvim writes only shada/state to the `.cache` tmpfs, so the hardened floor is unchanged.
-Commits from fugitive/gitsigns carry the injected git identity. 596 dependency-free
+Commits from fugitive/gitsigns carry the injected git identity. **Also landed:** a per-session
+scratch dir (`/workspace/scratch` — wiped on up/stop, with a managed CLAUDE.md note pointing the
+agent at it), `project pull` (ff-only fast-forward of every repo; TUI Repos… → `p` Pull-all),
+`project ssh-trust`/`--ssh-auto-trust` (issue #4 — opt-in TOFU accept-new; the baked forge
+known_hosts pre-trust the common forges regardless), Browse (`b` — opens the workspace in the system
+file manager), the TUI boot splash (`config splash`; any key skips), and the TUI profile switcher
+(Project… → `f`). 721 dependency-free
 tests + headless-pilot + real-daemon smokes; ruff clean; `image smoke base` green (incl. new
 `.cache`/`gh`/git + nvim probes).
 
@@ -66,7 +73,12 @@ and **`git commit` / `gh` inside a hardened container** with the operator's inhe
 project's image to the newer claude (host-side; `claude update` can't run in the read-only container),
 and **publish container service ports** (`project ports` / Project menu -> Ports) so a dev server or
 test endpoint inside a container is reachable on the host, and **edit/commit in a baked neovim**
-(TypeScript + Markdown LSP, treesitter, git-from-nvim) — all from both the CLI and the TUI.
+(TypeScript + Markdown LSP, treesitter, git-from-nvim), and **lock a project's egress** to a strict
+allowlist (`project lock`/`unlock` + the TUI Egress screen), **review-gate sync-back** of
+in-container `~/.claude` changes to the host (`sync plan`/`sync review` + the TUI gate), select
+**curated packs** (skills + CLAUDE.md fragments via the Packs… checklist), and pin a **hybrid local
+model** (`Project.model` routes the session through the LiteLLM gateway alongside the subscription)
+— all from both the CLI and the TUI.
 
 **Done since:** **Phase 4 (strict egress): LANDED** (squid allowlist sidecar on a no-route
 `--internal` net + lock/unlock + the TUI Egress screen + Network panel). **Phase 5 (sync-back):
@@ -76,7 +88,14 @@ LANDED 2026-06-13, committed 2026-06-14** (review-gated three-way merge into the
 launch default, then the TUI Packs… checklist screen + create-modal Language field). **TUI-5 (live
 container-log streaming): LANDED 2026-06-14** (a `docker logs -f --tail --timestamps` follower pane
 — View… → Logs — reaped on dismiss). The one-claude-per-container guard (SEC-3) and CLI slug
-validation (SEC-6) are DONE (2026-06-10).
+validation (SEC-6) are DONE (2026-06-10). **Phase 8 (dev environment —
+[`docs/DEVENV.md`](docs/DEVENV.md)): LANDED 2026-06-15** (curated baked bash + the baked neovim +
+the shell-open banner + opt-in persistent shell history). **Phase 9 (hybrid gateway + local-model
+management — [`docs/MODELS.md`](docs/MODELS.md)): LANDED** (`models/`, `network/gateway.py`, the
+`model` CLI verbs, the TUI Models screen + the Project… → Model (local)… pin; the 9c locked-hybrid
+air-gap stays open). The **terraform overlay** (terraform + packer + AWS CLI v2). The **TUI profile
+switcher** (Project… → `f` — `profilesview.py` + the `profile_select`/`profile_switch_confirm`
+screens). **Packaging/0.1.0** (self-contained wheel + CHANGELOG).
 
 **Next up:** **Phase 6c** (deeper curation — port the operator's existing skills into
 `library/packs/`); the projects-table `docker events` push-refresh (the async off-UI-thread `docker
@@ -112,7 +131,7 @@ features on existing setups:
 - [x] `config.py` XDG path resolution; constants for label prefix + image/container names + baked container paths
 - [x] `docker/runner.py` renders the full hardened `docker create` argv (pure, unit-tested)
 - [x] `docker/labels.py` label model; `syncback/denylist.py` (unit-tested)
-- [x] `images/base/Dockerfile` (debian-slim + node + pinned native claude + non-root uid1000 `/etc/passwd` entry + baked env) and `images/overlays/{python,rust,node,python-node}.Dockerfile` (`python-node` = polyglot combo for node projects that also need python/pip)
+- [x] `images/base/Dockerfile` (debian-slim + node + pinned native claude + non-root uid1000 `/etc/passwd` entry + baked env) and `images/overlays/{python,rust,node,python-node,terraform}.Dockerfile` (`python-node` = polyglot combo for node projects that also need python/pip; `terraform` = infra toolchain, terraform + packer + AWS CLI v2)
 - [x] `claudemanctl image build` (base + overlays) renders + runs `docker build`
 - [~] `image smoke` — moved to Phase 0.5 (the bake bug below made the original build untrustworthy)
 
@@ -183,7 +202,7 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
 - [x] `profiles/setup_token.py` wrapping `claude setup-token` (+ `--sso`/`--login`/`--console`/`--email`); `0600` token store; mint time = token file mtime (`profiles.token_age_days`). **Bonus:** `profile verify` (token validity + recorded account; OAuth tokens don't expose the email live, so identity is the mint-time record)
 - [x] `profiles/identity.py` scrubbed `.claude.json` onboarding stub; `profiles.save` (single-default); `profile.toml` schema + default resolution
 - [x] `claude-config/` seeding from the profile `seed/` through the denylist; `profile seed` captures host `~/.claude` (settings.json field-patched per SYNC-2, cruft excluded); create/`recreate` use the effective profile
-- [x] profile column + **per-profile token-usage panel + token age in the TUI** (`u` to refresh; worker-scanned off the UI thread) + `profile usage` CLI; switch-time email-mismatch guard (`recreate --force`)
+- [x] profile column + **per-profile token-usage panel + token age in the TUI** (View… → `u` to refresh; worker-scanned off the UI thread) + `profile usage` CLI; switch-time email-mismatch guard (`recreate --force`)
 - ~~**Per-account subscription usage bars (5-hour + weekly):**~~ **REMOVED (2026-06-30).** Built
   against `GET /api/oauth/usage`, but the feature never worked: `claude setup-token` has no way to
   mint the `user:profile` scope the endpoint requires (the `CLAUDE_CODE_OAUTH_SCOPES` override is
@@ -202,7 +221,7 @@ _Review notes: **BUG-2** read labels via `docker inspect --format '{{json .Confi
 on label divergence (invariant 4); **BUG-6** concise `fetch_all` detail instead of raw git fatal;
 **TUI-6** gate actions on orphan rows (container with no registry entry)._
 
-- [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (30 s fetch-less gitstate worker, `g` fetch-ful) + Repos-menu (`g`) `a`/`x` Add/Remove-repo modal screens.
+- [x] `checkout/repos.py`: host-side clone of every `[[repos]]` entry into `workspace/`; `project sync-repos` (clone-missing + fetch); **`checkout/gitstate.py`** porcelain-v2 parser → live per-repo state (branch, dirty, ahead/behind, branch-vs-config drift); `project repo add`/`rm`/`list`; registry mutators with dir-containment + cred-mask + per-slug `flock`; **BUG-5** (registry-wins repo count + drift marker) and **BUG-6** (concise `fetch_all`) landed. **TUI:** live Repos column + repo-detail panel (30 s fetch-less gitstate worker) + Repos-menu (`g`) `a`/`x` Add/Remove-repo modal screens + `r` fetch-ful rescan + `p` Pull-all (ff-only, the `project pull` verb).
 - [x] Idempotent `project delete` (`rm -f` container + `rm -rf` state dir + `rm` toml, registry removed LAST so a partial failure stays retry-able); start/stop/recreate verbs in TUI + ctl. **Sync-gated:** `lifecycle.delete_plan` scans each repo (fetch-less) via `gitstate.delete_risk` and the TUI `DeleteProjectScreen` / CLI surface the per-repo unsynced-work assessment before the irreversible delete — risky repos require an explicit "Delete anyway" (TUI) / `--force` (ctl), and `--keep-workspace` / the "keep workspace" toggle preserves the `/workspace` checkout as a non-destructive exit.
 - [x] Version-bump-by-recreate flow (`check_update` → `up`/`recreate(rebuild_to=…)`, `--update-yes`/`--no-update`) + running-version status column (stamped from the image's baked `claude-man.claude-version` label); `backups/` convention (`config.backups_dir`, used by asset-sync, sync-back merge, and delete teardown)
 - [~] DEFINED/STOPPED/UP JOIN hardened — **DONE** (full outer join: DEFINED-with-no-container rows, registry-wins repo count + drift marker (BUG-5), orphan-container note (TUI-6)); the one remaining bit is **BUG-2** — a second `docker inspect --format '{{json .Config.Labels}}'` per-label read for robust multi-label parsing (still latent — current label values are comma-free)
@@ -220,12 +239,15 @@ base allowlist; verify offline in `image smoke <overlay>`._
 - [x] `network/squid.py` (pure squid.conf renderer) + `network/egress.py` orchestration: per-project `--internal` agent net + a `claude-man:proxy` squid sidecar (also on the bridge for egress); agent gets `HTTP(S)_PROXY` → the sidecar (additive flags in `runner._render_egress`; hardened floor byte-identical)
 - [x] `project lock`/`unlock` verbs (`lifecycle.set_egress`, recreate-to-apply); `project egress-log` surfaces denied requests for allowlist tuning, and the TUI's always-on **Network panel** shows per-project blocked/allowed counts (via the pure `egress.parse_access`/`summarize_access` parsers over the sidecar's access log) + Traffic (whole-container NetIO from `docker/stats.py`'s `container_net_io`, i.e. `docker stats`)
 - [x] TUI **Egress screen** (Project… → `g`): lock/unlock toggle (off-thread `set_egress`) + allowlist extras add/remove (`lifecycle.add_allow`/`remove_allow`, `is_valid_dstdomain`-validated, registry-only) + promote-a-blocked-host picker over `summarize_access` — the allowlist-tuning loop without hand-editing TOML
-- [x] Smoke: `image smoke proxy` builds the sidecar; `project egress-smoke <slug>` checks an allowlisted host reaches + a non-allowlisted host is blocked (daemon-gated, like `image smoke`)
+- [x] Smoke: `image build proxy` builds the sidecar (`image smoke` gates the agent images); `project egress-smoke <slug>` checks an allowlisted host reaches + a non-allowlisted host is blocked (daemon-gated, like `image smoke`)
 
 _Implementation notes (2026-06-10): orchestrated with explicit `docker network`/`docker run` argv
 (NOT compose) so the hardened agent stays on the single unit-tested `build_create_argv` renderer
 (invariant 2). One per-project `--internal` net + the sidecar bridged for egress (rather than two
-nets). **Proxy-only** for now — every proxy-aware tool (claude, git-https, npm/pip/apt) is covered;
+nets). **Proxy-only** for now — every proxy-aware tool (claude, git-https, npm/pip/apt) is covered,
+and git-over-ssh now works under lock for github/gitlab/bitbucket via SSH-over-443 through the
+sidecar (issue #12: a `corkscrew` ProxyCommand riding the same `dstdomain` allowlist; Azure DevOps
+has no 443 SSH endpoint → HTTPS/open fallback);
 the `dnsmasq` direct-DNS forwarder and an in-container `iptables` default-DROP layer remain deferred
 defence-in-depth. IMG-4 yarn/apt hosts are in the base allowlist; offline-first overlay cache pinning
 (`COREPACK_HOME`/uv) is still worth verifying in `image smoke <overlay>`._
@@ -319,7 +341,7 @@ is left untouched._
 **Goal:** let a project's in-container `claude` use BOTH the claude.ai subscription AND a local/
 self-hosted model, both shown in the `/model` picker and switchable **mid-session**, via Claude Code's
 gateway surface. **Opt-in per project** (default stays subscription-direct). Full design: `docs/MODELS.md`
-(planned) + issue #14. **A different axis from Phase 7** (which runs a different *binary* like
++ issue #14. **A different axis from Phase 7** (which runs a different *binary* like
 Codex): here the SAME `claude` binary points at a different *model backend*.
 
 _Key decisions: Claude Code reads `ANTHROPIC_BASE_URL` ONCE at launch and `/model` only flips the model
@@ -334,11 +356,14 @@ OpenAI) to a HOST Ollama/vLLM. Chosen (operator decision) over the terminating-r
 pay-per-token + transparent auto-failover) to preserve the subscription — the cost is that failover to
 local is a **manual `/model` switch, not automatic**. Invariant 1 (no mis-bill): the agent keeps the
 hard `ANTHROPIC_*` scrub (no console key, no `ANTHROPIC_AUTH_TOKEN`), gets only `ANTHROPIC_BASE_URL` +
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, and STILL gets `CLAUDE_CODE_OAUTH_TOKEN` (the subscription
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` (superseded — see the 9b status below: the shipped env is
+`ANTHROPIC_BASE_URL` + the explicit `ANTHROPIC_CUSTOM_MODEL_OPTION` picker row; discovery was dropped),
+and STILL gets `CLAUDE_CODE_OAUTH_TOKEN` (the subscription
 stays the active credential). POSTURE CHANGE to document: the OAuth token now transits claude-man's OWN
 passthrough sidecar (never a third party — sidecar → `api.anthropic.com` directly), a scoped relaxation
 of "the token only touches the `claude` binary," opt-in to hybrid mode only. Mode is a `Project` field
-(`subscription` default | `hybrid`), recreate-to-apply (the base_url boundary IS a container boundary),
+(`subscription` default | `hybrid`; as built the switch is the `Project.model` pin's presence — no
+separate enum, see the 9b status), recreate-to-apply (the base_url boundary IS a container boundary),
 mirroring the overlay/profile switch; the active mode + billing is surfaced in the TUI so it is never
 silent. The background/Haiku tier (`ANTHROPIC_DEFAULT_HAIKU_MODEL` — summaries, `--resume`/`/compact`,
 the Explore subagent, titles) ALSO traverses the gateway and is set to MATCH the project's primary
@@ -370,11 +395,11 @@ Project… → Model (local)… (`m`) sets/clears `Project.model` (set_model + r
 **Model** column surfaces each project's pin so hybrid mode is never silent.
 
 - [x] **9a (spike):** validate ONE per-project gateway sidecar that PASSES THROUGH the claude.ai login for `claude-*`/`anthropic-*` ids (forwarding `Authorization` + `anthropic-beta`, subscription billing intact) AND translates `local-*` ids to a host Ollama/vLLM, exposing both via `/v1/models` for `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. Confirm a mid-session `/model` switch works and the latest Claude ids appear with no config edit (wildcard route). Pinned LiteLLM image, else a thin custom front if one daemon can't cleanly do passthrough-Claude + translate-local + unified discovery
-- [x] **9-models (dynamic model framework):** an Ollama-backed model-management layer — `claudemanctl model list/add/update/rm` (+ TUI) wrapping the host Ollama HTTP API (`/api/tags`, `/api/pull` with streamed progress, `/api/delete`, `/api/show`, `/api/version`) so the operator installs/updates local models (reference: Qwen3-Coder) without leaving claude-man; a `models/` package with a provider-shaped backend seam (Ollama now, vLLM later) feeding the gateway's local route. Update = re-pull tag + digest compare
-- [x] **9b:** `Project.mode = subscription | hybrid` + a provider-shaped model-backend descriptor (state/registry); `lifecycle.recreate(mode=…)` (validated + persisted before teardown); gateway-sidecar orchestration paralleling `network/egress.py` (ensure/teardown, read-only config bind, fail-closed); additive agent env (`ANTHROPIC_BASE_URL` + discovery flag) rendered like `_render_egress` (floor byte-identical, unit-pinned); `ANTHROPIC_*` scrub UNCHANGED; `ANTHROPIC_DEFAULT_HAIKU_MODEL` set to match the primary backend
-- [~] **9c:** ~~CLI/TUI verbs (`project model …`)~~ DONE (CLI `project model set/clear/show` + the TUI Project… → Model (local)… picker `m`); ~~TUI mode/billing badge~~ DONE (the **Model** column on the projects table + the CLI `project status` MODEL column); ~~`docs/MODELS.md`~~ DONE; gateway image pinned BY DIGEST. **Open:** egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server (locked+hybrid is currently refused at `up`)
+- [x] **9-models (dynamic model framework):** an Ollama-backed model-management layer — `claudemanctl model list/add/update/rm/show/presets` (+ TUI) wrapping the host Ollama HTTP API (`/api/tags`, `/api/pull` with streamed progress, `/api/delete`, `/api/show`, `/api/version`) so the operator installs/updates local models (reference: Qwen3-Coder) without leaving claude-man; a `models/` package with a provider-shaped backend seam (Ollama now, vLLM later) feeding the gateway's local route. Update = re-pull tag + digest compare
+- [x] **9b (as built):** the hybrid switch is a `Project.model` string pin (an ollama tag; no separate mode enum), applied via `projects.set_model` + a plain `recreate` (validated + persisted before teardown, no `recreate(mode=…)` param); gateway-sidecar orchestration paralleling `network/egress.py` (ensure/teardown, read-only config bind, fail-closed); additive agent env (`ANTHROPIC_BASE_URL` + the explicit `ANTHROPIC_CUSTOM_MODEL_OPTION{,_NAME,_DESCRIPTION}` picker row + the `x-litellm-api-key` proxy-auth header — no discovery flag) rendered like `_render_egress` (floor byte-identical, unit-pinned); `ANTHROPIC_*` scrub UNCHANGED (`ANTHROPIC_DEFAULT_HAIKU_MODEL` match-to-primary is a 9c follow-on, not shipped)
+- [~] **9c:** ~~CLI/TUI verbs (`project model …`)~~ DONE (CLI `project model set/clear/show` + the TUI Project… → Model (local)… picker `m`); ~~TUI mode/billing badge~~ DONE (the **Model** column on the projects table + the CLI `project status` MODEL column); ~~`docs/MODELS.md`~~ DONE; gateway image pinned BY DIGEST. **Open:** `ANTHROPIC_DEFAULT_HAIKU_MODEL` match-to-primary (background stays Claude passthrough); egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server (locked+hybrid is currently refused at `up`)
 - [ ] **9d (optional, deferred):** the terminating-router flavor (console API key ON THE SIDECAR ONLY + transparent LiteLLM router failover Anthropic→local) as an alternative per-project hybrid auth — only if auto-failover ever outweighs the subscription
 
 ---
 
-Legend: `[x]` done in scaffold · `[~]` partially scaffolded (structure + stubs) · `[ ]` not started.
+Legend: `[x]` done in scaffold · `[~]` landed except a noted sub-item · `[ ]` not started.

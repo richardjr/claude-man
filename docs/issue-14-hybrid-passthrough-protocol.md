@@ -26,17 +26,18 @@
 >   overage-*enabled* accounts a silent demotion would bill as overage invisibly — the strongest remaining
 >   argument for Option C (a thin custom passthrough front that forwards response headers verbatim).
 > - The predicted discriminator `anthropic-ratelimit-unified-overage-in-use` did **not** appear (moot under
->   org-disabled overage); the operative signal is `unified-status: allowed` + window utilization. Still
->   **TODO**: pin the LiteLLM image by digest; (optional) Option C for header fidelity + removing LiteLLM
->   from the OAuth-token path; the local leg needs host Ollama running (it was down during this capture,
->   which does not affect the Claude leg).
+>   org-disabled overage); the operative signal is `unified-status: allowed` + window utilization. The
+>   LiteLLM image pin is **done** — pinned by digest in `config.py` (`GATEWAY_IMAGE_REF`, litellm 1.89.4).
+>   Still **TODO** (optional): Option C for header fidelity + removing LiteLLM from the OAuth-token path;
+>   the local leg needs host Ollama running (it was down during this capture, which does not affect the
+>   Claude leg).
 
 # Subscription-through-a-proxy for claude-man's hybrid gateway: a wire-level decision document
 
 ## TL;DR
 
 - The Claude passthrough leg does **not** 404 for the reason the bug report assumes. Claude Code 2.1.193 does **not** send the short alias `opus-4-8`; it sends the **full canonical id `claude-opus-4-8`** on `POST /v1/messages?beta=true` (first-hand binary, D2-c2…c6).
-- The `opus-4-8` that Anthropic 404s on is **manufactured by claude-man's own LiteLLM config**: the wildcard row `model_name: claude-*` → `model: anthropic/*` (`network/gateway.py:64-66`) captures the suffix after `claude-` from `claude-opus-4-8`, substitutes it into `anthropic/*` to get `anthropic/opus-4-8`, then `get_llm_provider` strips the prefix and forwards the invalid id `opus-4-8` (litellm `pattern_match_deployments.py:100`, D3-c5).
+- The `opus-4-8` that Anthropic 404s on is **manufactured by claude-man's own LiteLLM config**: the wildcard row `model_name: claude-*` → `model: anthropic/*` (`network/gateway.py`) captures the suffix after `claude-` from `claude-opus-4-8`, substitutes it into `anthropic/*` to get `anthropic/opus-4-8`, then `get_llm_provider` strips the prefix and forwards the invalid id `opus-4-8` (litellm `pattern_match_deployments.py:100`, D3-c5).
 - It is a **404, not a 401** — which proves **auth already works**: the subscription OAuth token is already reaching `api.anthropic.com` (D3-c6/c8). The 9a blocker is a **model-mapping bug, not an auth bug**.
 - The premise that `?beta=true` routes LiteLLM to a verbatim "experimental passthrough" that bypasses the model router is a **misdiagnosis** (adversarial verification refuted it): FastAPI ignores the query string; `/v1/messages` always dispatches `route_type="anthropic_messages"` and the router resolves by **model name**. Removing/ignoring `?beta=true` would fix nothing.
 - **Verdict on whether subscription-through-a-proxy is possible: YES, it is on Anthropic's officially documented path** — setting `ANTHROPIC_BASE_URL` *without* a gateway credential variable keeps the claude.ai login as the active billed credential (code.claude.com/docs/en/llm-gateway, D4-c1). The one real residual risk is **post-Jan-2026 client-fingerprinting**: a re-originating proxy changes the TLS fingerprint and (in LiteLLM) drops/replaces some genuine-CC headers, and only a **live capture** can confirm the request still lands in the Max lane.
@@ -103,9 +104,9 @@ Bottom line: subscription-through-a-proxy is *possible and documented*; whether 
 - `litellm.anthropic_messages` (the file `experimental_pass_through/messages/handler.py`) is the **SDK transport the router always invokes** for anthropic-family models — not a separate bypass route. The URL-prefixed `/anthropic/v1/messages` passthrough is a *different* endpoint that CC never hits (D3-c3).
 - For `route_type="anthropic_messages"`, verbatim-forward-on-no-deployment is **disabled** (`passthrough_on_no_deployment` defaults False). So the observed forward means a deployment **did** match — the wildcard (D3-c4).
 
-**Auth precedence (correct in claude-man's design):** `x-litellm-api-key` is checked **before** `Authorization` in `user_api_key_auth` (D3-c11), so the master key authenticates the proxy and the OAuth `Bearer` is left free for the upstream — sidestepping the open inbound-precedence bug #29190. `forward_client_headers_to_llm_api: true` is **largely redundant** for the OAuth (which rides `provider_specific_header`, not that allowlist) but harmlessly forwards `anthropic-beta` and agent `x-*` headers; the gateway.py:73-74 comment claiming it forwards the OAuth is **inaccurate** and should be corrected.
+**Auth precedence (correct in claude-man's design):** `x-litellm-api-key` is checked **before** `Authorization` in `user_api_key_auth` (D3-c11), so the master key authenticates the proxy and the OAuth `Bearer` is left free for the upstream — sidestepping the open inbound-precedence bug #29190. `forward_client_headers_to_llm_api: true` is **largely redundant** for the OAuth (which rides `provider_specific_header`, not that allowlist) but harmlessly forwards `anthropic-beta` and agent `x-*` headers; the `network/gateway.py` comment that claimed it forwards the OAuth was **inaccurate** — the module docstring now carries the correction (the rendered-YAML comment inside `gateway_config_yaml` still overstates it and is being corrected separately).
 
-**Can LiteLLM config fix it?** Yes — the fix is **purely model mapping**, not routing or auth. Replace the `claude-* → anthropic/*` wildcard with **explicit `model_list` rows** (or a `model_group_alias`) mapping each exact id CC sends to a valid Anthropic id with **no suffix capture**:
+**Can LiteLLM config fix it?** *(Superseded — the shipped fix is the prefix-preserving wildcard `anthropic/claude-*`; see the resolution banner.)* Yes — the fix is **purely model mapping**, not routing or auth. Replace the `claude-* → anthropic/*` wildcard with **explicit `model_list` rows** (or a `model_group_alias`) mapping each exact id CC sends to a valid Anthropic id with **no suffix capture**:
 
 ```
 claude-opus-4-8            → anthropic/claude-opus-4-8

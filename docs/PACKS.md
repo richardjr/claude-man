@@ -86,7 +86,7 @@ packs = ["guardrails", "code-quality", "node-conventions"]
 ## Architecture
 
 ```
-packs/library.py      PURE: discover tiers/packs, parse pack.toml + fragment frontmatter,
+packs/library.py      PURE: discover tiers/packs, parse pack.toml,
                       hash content, validate names (uniqueness lint) — dependency-free
 packs/materialize.py  selection (registry) -> asset-source writes + the CLAUDE.md
                       fenced-block patch + a state-tier manifest of managed paths/hashes

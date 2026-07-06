@@ -63,9 +63,10 @@ sweeps across the gradient, then the whole splash scrolls off to reveal the main
 
 The main screen, top to bottom:
 
-- **Projects table** — `Project · Status · Profile · Egress · Repos · Version · Detail`.
+- **Projects table** — `Project · Status · Profile · Egress · Model · Repos · Version · Detail`.
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);
-  it's polled fresh every 10 s, never cached. The Repos cell becomes a live git summary
+  it's polled fresh every 10 s, never cached. **Model** is the per-project local-model pin
+  (`-` = subscription-direct — see *Model (local)…* in section 8). The Repos cell becomes a live git summary
   once the 30 s fetch-less scan has run — an aggregate per-flag rollup across the project's
   repos (e.g. `4 ✓`, or `1 ✓  2 ⚠  1 ~` = 1 clean, 2 off-branch, 1 dirty), with the per-repo
   breakdown in the Repos detail panel. Glyphs: `✓` clean · `⚠` off-branch/detached · `~` dirty ·
@@ -99,8 +100,8 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `r` Recreate · `d` Delete |
-| `y` | Sync-back review gate — **Phase 5 stub**, logs a placeholder line today |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model (local)… · `f` Profile… · `r` Recreate · `d` Delete |
+| `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
 
@@ -110,6 +111,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
 | `v` | View… → `u` Refresh usage · `l` Logs (live `docker logs -f`, escape/q to close) |
 | `,` | Settings (ssh keys · git identity · GH token · terminal) |
+| `m` | Models — install / update / remove / inspect local Ollama models (the Phase 9 management screen, section 8) |
 | `q` | Quit immediately — containers keep running |
 
 Project-row keys act on the row under the cursor, and rows for orphan containers (a
@@ -125,8 +127,8 @@ Press `n`. The **New project** form has six fields:
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
 - **Profile (account)** — pick a profile, or leave the first entry (`(default: <name>)`) to
   inherit the default. Only existing profiles are listed (step 0).
-- **Overlay (image)** — `base`, `python`, `rust`, or `node`: the toolchain baked into the
-  project's image.
+- **Overlay (image)** — `base`, `python`, `rust`, `node`, `python-node`, or `terraform`: the
+  toolchain baked into the project's image.
 - **Language (pack tier)** — picks which language tier's *default* curated packs are applied
   at create, alongside the common ones (see *Curated packs* below). Choosing an overlay
   pre-fills the matching tier as a suggestion; pick a language yourself and the suggestion
@@ -319,9 +321,34 @@ outlived the library).
   container, config and registry entry. The scan is fetch-less and only ever over-warns —
   `g` → `r` first if you want certainty.
 - `p` → `r` recreates the container — the apply step for everything stamped at create time:
-  env mounts, ports, git identity, GH token, and profile switches
-  (`claudemanctl project recreate <slug> --profile <other>` for an account switch; it's
-  mismatch-guarded).
+  env mounts, ports, git identity, GH token. The Project… pickers — `f` Profile…, `i` Overlay
+  (image)…, `m` Model (local)… (below) — each apply themselves via their own recreate, so no
+  separate `r` is needed after a pick; the CLI forms remain valid
+  (`claudemanctl project recreate <slug> --profile <other>` for an account switch —
+  mismatch-guarded — or `--overlay <other>` for an image switch).
+
+**Switch account, image, or local model (`p` → `f` / `i` / `m`)** — three pickers in the
+Project… menu. Each persists the choice and recreates the container itself — no manual
+`p` → `r` afterwards:
+
+- **`f` Profile…** — switch the project to another account profile. The picker lists the
+  registry profiles with the project's current one marked (plus a token-age hint). Picking a
+  profile on a *different* account raises a confirm first: the project's Claude identity is
+  re-seeded from the new profile (the old account's session history stays) before the
+  recreate goes ahead.
+- **`i` Overlay (image)…** — switch the project's image variant (base / python / rust / node /
+  python-node / terraform). A missing image is built first (streamed to the log pane), then
+  the container is recreated on it.
+- **`m` Model (local)…** — the hybrid-mode pin ([`docs/MODELS.md`](MODELS.md) for the
+  background and host-Ollama setup): pick an installed model to pin (the gateway sidecar
+  comes up on the recreate), the *subscription-direct* row to unpin, or type a raw ollama tag
+  (a model not yet pulled, or an offline daemon). Pinning is **refused on a locked
+  (strict-egress) project** — unlock first; unpinning stays allowed.
+
+**Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
+installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams
+progress), `u` re-pulls one to latest, `x` removes, `s` shows metadata (context window,
+`tools` capability), `r` refreshes the list.
 
 **Egress (`p` → `g` Egress…)** — the screen where you *change* the network policy the Network panel
 reflects. It shows the mode (OPEN / STRICT) and the project's allowlist extras on top of the always-on
@@ -343,13 +370,19 @@ base set, with three things to do:
 
 For the raw per-destination blocked list there's still the CLI `project egress-log <slug>`.
 
-Not in the TUI yet, honestly stubbed: the `y` sync-back review gate (Phase 5 — distinct from
-the automatic asset sync above) and live container logs in `v` → `l` (the pane it focuses is
-the TUI's own event log). Beyond the Egress screen, the TUI surfaces the Egress column and the
+Beyond the Egress screen, the TUI surfaces the Egress column and the
 always-on **Network panel** (above): its Traffic figures are whole-container `docker stats` NetIO since
 the container started; the Blocked/Allowed counts come from the squid access log and apply to locked
 projects only. Note the counts reflect **completed** connections — squid logs a CONNECT (HTTPS) tunnel
 only when it closes, so an in-flight transfer isn't counted until it ends.
+
+**Sync-back (`y`)** — the review-gated merge of in-container `~/.claude` changes back to your
+host `~/.claude` (distinct from the automatic asset sync above). `y` scans the project's
+claude-config bind for changes vs the baseline and opens the review screen: per row, `a`
+accept · `r` reject · `s` skip · `space` cycles the decision · `A` accepts everything not
+defaulted to reject; `Enter` applies, `Esc` cancels. The defaults match the CLI's
+`sync review --yes` semantics — plain text changes accept; settings/MCP changes, conflicts
+and deletions reject.
 
 ## Quick reference — what stays CLI-only
 

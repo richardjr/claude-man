@@ -13,7 +13,7 @@ audit, is that **the security floor is already agent-agnostic**: the hardened `d
 (`docker/runner.py::_HARDENING` / `build_create_argv`), the strict-egress squid sidecar
 (`network/egress.py` + `runner._render_egress`), the labels (`docker/labels.py`), published ports,
 and the env-mount / secret-passthrough machinery are generic Linux-container plumbing — none of it
-knows what binary runs inside. The Claude-specific assumptions cluster in eight well-defined places.
+knows what binary runs inside. The Claude-specific assumptions cluster in nine well-defined places.
 
 The fix follows the existing `hostplatform.py` discipline ("all platform branches go through here"):
 introduce an **`agents/` package** with a single `AgentProvider` value object that owns every
@@ -74,12 +74,18 @@ once (`agents.resolve(project)`), mirroring how the profile/overlay are resolved
 | 1 | **auth/token** | HARD | `profiles/setup_token.py`, `config.OAUTH_TOKEN_ENV`, `profiles/identity.py`, `registry/schema.py` (`Profile`) | mint command + scopes, auth env-var name(s), login/SSO command, account-identity probe (`status` cmd + email extractor), and an **auth-kind** (single bearer vs refreshable JSON cred) |
 | 2 | **image-bake** | HARD | `images/base/Dockerfile`, `docker/images.py` (`image_claude_version`, `build_argv`), `docker/labels.py` (`IMAGE_VERSION`), `config.DEFAULT_CLAUDE_VERSION` | the agent-install Dockerfile fragment, the version build-arg name, and the version-label key (the hardened base + non-root passwd + neovim + node/gh stay shared) |
 | 3 | **process-spawn** | HARD | `tui/terminals.py` (`spawn_claude`, the `/proc`-comm probe, `build_claude_probe_argv`) | the in-container exec program **and** the `/proc` comm to probe (they can differ); the one-per-container invariant generalizes to one-*agent*-per-container |
-| 4 | **updates** | HARD | `updates.py` (`RELEASES_BASE_URL`), `lifecycle.check_update`/`resolve_build_version` | the release-pointer URL, channel names, and UA — the semver parse/compare + rebuild-before-start orchestration are already provider-neutral and reused verbatim |
+| 4 | **updates** | HARD | `updates.py` (`config.RELEASES_BASE_URL`), `lifecycle.check_update`/`resolve_build_version` | the release-pointer URL, channel names, and UA — the semver parse/compare + rebuild-before-start orchestration are already provider-neutral and reused verbatim |
 | 5 | **usage** | HARD | `usage.py` (transcript JSONL schema) | the transcript location + schema — or `usage=None` to drop the feature |
-| 6 | **paths/config** | HARD | `config.CONTAINER_CLAUDE_CONFIG`/`CLAUDE_CONFIG_DIR`, `runner._BAKED_ENV`, `profiles/seed.py`, `registry/schema.py` (`_MANAGED_MOUNTS`) | the in-container config-dir path + its env-var name, the host state-dir naming, and the identity-seed file name + shape. **The managed-mount-dst denylist becomes keyed on `provider.config_dir`** so the anti-smuggling guard protects the new agent's cred file too |
+| 6 | **paths/config** | HARD | `config.CONTAINER_CLAUDE_CONFIG`/`CLAUDE_CONFIG_DIR`, `runner._BAKED_ENV`, `profiles/seed.py`, `registry/schema.py` (`_MOUNT_FORBIDDEN_DST_EXACT`/`_MOUNT_FORBIDDEN_DST_PREFIXES`) | the in-container config-dir path + its env-var name, the host state-dir naming, and the identity-seed file name + shape. **The managed-mount-dst denylist becomes keyed on `provider.config_dir`** so the anti-smuggling guard protects the new agent's cred file too |
 | 7 | **sync-back** | HARD | `syncback/{denylist,artifacts,baseline,merge}.py` | the denylist paths/keys, the syncable-artifact set + host targets, the settings-file name + structurally-immune keys, the narrow identity-file reader, and the MCP/config apply strategy. **The 3-way merge engine, masking, backup-first, flock, audit-commit are all reused** — only the policy *data* varies |
 | 8 | **packs/assets** | SOFT | `packs/materialize.py` (marker block, `@`-import), `assets.py` (`_CLAUDE_SAFE_ENTRIES`), `library/packs/` | the context-file name (`CLAUDE.md` vs `AGENTS.md`), its import syntax (`@path` vs include vs inline concat), and the safe-config-entries allowlist. Marker-block patching, manifest, operator-wins-collision logic are reused; library *content* is agent-flavoured |
 | 9 | **naming/egress-base** | SOFT | `config.py` brand prefixes, `docker/labels.py`, `network/allowlist.py` (`BASE_ALLOWLIST`) | only the version-label key + the **required egress hosts**. The `claude-man` brand prefix stays product-wide. `BASE_ALLOWLIST` splits into a neutral toolchain set (npm/pypi/apt/github) + `provider.required_hosts`, so a locked container for *any* agent always includes its own auth-refresh path (invariant 3) |
+
+> **Post-Phase-9 addendum:** the hybrid local-model gateway added a further Claude-coupled seam
+> after this map was drawn — the `claude-* → anthropic/claude-*` route and the
+> `claude-local-<model>` prefix in `network/gateway.py` (+ `config.GATEWAY_LOCAL_PREFIX`), plus the
+> agent-env wiring (`ANTHROPIC_BASE_URL` + `ANTHROPIC_CUSTOM_MODEL_OPTION`) in `docker/runner.py`.
+> A future non-Claude provider needs a gateway/model seam too.
 
 ## Phasing
 
@@ -94,7 +100,8 @@ refactor before any second-agent code exists.
   the high-value, low-risk precondition — do it first.
 - **7b — Thread the provider through.** Add `Project.agent` (default `"claude"`); pass the resolved
   provider through `lifecycle`/`runner`/`terminals`/`images`. Split `BASE_ALLOWLIST` per the table.
-  Key `_MANAGED_MOUNTS` on `provider.config_dir`. Generalize the one-per-container guard's comm.
+  Key the mount-dst denylist (`_MOUNT_FORBIDDEN_DST_*`) on `provider.config_dir`. Generalize the
+  one-per-container guard's comm.
 - **7c — A `codex` provider + image overlay**, validated against the hardened floor
   (`image smoke`). Resolve the auth-kind difference (below). `project create --agent codex`.
 - **7d — Codex sync-back policy + pack content** (`AGENTS.md` vs `CLAUDE.md`; its own config

@@ -1,10 +1,11 @@
 # Local models (Phase 9)
 
 claude-man can run a project's in-container `claude` against a **local model** instead of (or alongside)
-the claude.ai subscription. This doc covers the **dynamic model-management framework** that's landed
-first — installing/updating/listing local models from inside claude-man. The hybrid gateway that routes
-the agent's calls to a local model (the `/model`-picker + mid-session switching) is the follow-on; see
-[`ROADMAP.md`](../ROADMAP.md) Phase 9 and issue #14.
+the claude.ai subscription. This doc covers both halves: the **dynamic model-management framework** —
+installing/updating/listing local models from inside claude-man — and the **hybrid gateway** that routes
+the agent's calls to a local model (the `/model`-picker + mid-session switching), now landed and verified
+live (`network/gateway.py`; see "Hybrid mode" and "Status" below, plus [`ROADMAP.md`](../ROADMAP.md)
+Phase 9 and issue #14).
 
 ## Prerequisite: Ollama on the host
 
@@ -191,8 +192,9 @@ header munging (it replaces `User-Agent` with `litellm/<ver>`) did **not** demot
 own `anthropic-ratelimit-unified-*` lane through the gateway. That's harmless on overage-disabled accounts
 (200 ⇒ subscription) but on accounts where pay-as-you-go overage IS enabled a silent demotion would bill as
 overage with no visible signal — an argument for a thin custom passthrough front that forwards response
-headers verbatim (issue #14 "Option C"). Pin the LiteLLM image by **digest** before relying on it (the
-official Docker image, never the PyPI package — `litellm` 1.82.7/1.82.8 on PyPI were briefly malware).
+headers verbatim (issue #14 "Option C"). The shipped gateway image **is pinned by digest**
+(`config.GATEWAY_IMAGE_REF`, litellm 1.89.4, verified live) — the official Docker image, never the PyPI
+package (`litellm` 1.82.7/1.82.8 on PyPI were briefly malware).
 
 **Other limits:** hybrid requires **open** egress — locked + hybrid (the air-gapped two-sidecar wiring) is
 deferred (ROADMAP 9c) and refused with a clear message. `/model` selections save "for new sessions", so
