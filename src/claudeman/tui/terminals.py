@@ -11,6 +11,12 @@ default — with Terminal.app the always-available fallback on macOS and Windows
 On Linux/Wayland the ``--class``/``--app-id`` carries ``window_class(slug)`` so a compositor rule
 can place these windows (e.g. Hyprland ``windowrulev2 = float, class:^(claude-man-.*)$``).
 
+Project identity (telling parallel project terminals apart): every window carries ``window_title``,
+and the baked shell shows a per-project prompt segment + re-asserts the title (both from the injected
+``CLAUDE_MAN_PROJECT`` env). A ``claude``/``nvim`` window's ``docker exec`` never sources that shell,
+so its keep-open wrapper stamps the title itself here — and, when ``config terminal-tint on``, a
+per-project OSC-11 background tint (``config.project_tint``) that the bashrc applies for shells.
+
 ``build_*`` are pure (no process spawn, no filesystem beyond ``shutil.which`` in the pickers) so
 they can be unit-tested. ``claude``/shell open in the project's ``launch_workdir`` (``/workspace``
 unless overridden) via ``docker exec -w``. ``spawn_path`` opens a HOST directory (the workspace bind
@@ -37,6 +43,12 @@ def window_class(slug: str) -> str:
     return f"{config.CONTAINER_PREFIX}{slug}"
 
 
+#: Window/tab title applied to every spawned window for a project (and re-asserted in-shell by the
+#: baked bashrc). One definition so the launcher `--title` and the OSC title agree.
+def window_title(slug: str) -> str:
+    return f"claude:{slug}"
+
+
 def launch_workdir(slug: str) -> str:
     """The container dir to ``docker exec -w`` into for ``slug`` (configured / lone-repo dir / default).
 
@@ -47,16 +59,32 @@ def launch_workdir(slug: str) -> str:
         return config.CONTAINER_WORKSPACE
 
 
-def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str) -> list[str]:
+def _window_osc(slug: str, tint_hex: str | None) -> str:
+    """A ``printf`` escape prefix (trailing ``'; '``) that stamps the window title — and, when a tint
+    hex is given, the OSC-11 background — for a ``claude``/``nvim`` window whose ``docker exec`` never
+    sources the container bashrc (so the in-shell identity block can't run for it). Single-quoted so
+    bash passes the backslashes to ``printf``; the slug is ``validate_slug``'d and the hex is
+    ``#``+hexdigits (``config.project_tint``), so neither can break out of the quotes."""
+    seq = f"\\033]0;{window_title(slug)}\\007"
+    if tint_hex:
+        seq += f"\\033]11;{tint_hex}\\007"
+    return f"printf '{seq}'; "
+
+
+def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str,
+                tint_hex: str | None = None) -> list[str]:
     # Defence-in-depth for the f-string below (SEC-6's terminal half): the CLI boundary already
     # rejects malformed slugs, but no slug may reach a shell string unvalidated from ANY caller.
     validate_slug(slug)
     container = config.container_name(slug)
     wd = ["-w", workdir] if workdir else []
     if keep_open and program != "bash":
-        # keep the window open after `claude` exits by dropping into a shell
+        # keep the window open after `claude` exits by dropping into a shell. Stamp the window title
+        # (+ optional tint) FIRST — this exec bypasses the bashrc that names/tints shells, so without
+        # this the claude/nvim window would be the one unlabelled window.
         wdq = f"-w {shlex.quote(workdir)} " if workdir else ""
-        return ["bash", "-lc", f"docker exec -it {wdq}{container} {program}; exec bash"]
+        return ["bash", "-lc",
+                f"{_window_osc(slug, tint_hex)}docker exec -it {wdq}{container} {program}; exec bash"]
     return ["docker", "exec", "-it", *wd, container, program]
 
 
@@ -222,29 +250,40 @@ def resolve_spec(platform: str | None = None) -> TerminalSpec:
     )
 
 
-def build_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "") -> list[str]:
+def build_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
+               tint_hex: str | None = None) -> list[str]:
     spec = resolve_spec()
-    inner = _inner_exec(slug, program, keep_open=keep_open, workdir=workdir)
-    return render_spec(spec, cls=window_class(slug), title=f"claude:{slug}", inner=inner)
+    inner = _inner_exec(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=tint_hex)
+    return render_spec(spec, cls=window_class(slug), title=window_title(slug), inner=inner)
 
 
 # Named builders kept for direct use/tests; same templates as the table.
-def build_ghostty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "") -> list[str]:
-    return render_spec(_LINUX_TERMINALS[0], cls=window_class(slug), title=f"claude:{slug}",
-                       inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir))
+def build_ghostty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
+                       tint_hex: str | None = None) -> list[str]:
+    return render_spec(_LINUX_TERMINALS[0], cls=window_class(slug), title=window_title(slug),
+                       inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir,
+                                         tint_hex=tint_hex))
 
 
-def build_alacritty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "") -> list[str]:
-    argv = render_spec(_LINUX_TERMINALS[1], cls=window_class(slug), title=f"claude:{slug}",
-                       inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir))
+def build_alacritty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
+                         tint_hex: str | None = None) -> list[str]:
+    argv = render_spec(_LINUX_TERMINALS[1], cls=window_class(slug), title=window_title(slug),
+                       inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir,
+                                         tint_hex=tint_hex))
     if keep_open:  # alacritty also holds the window if the inner command somehow fails to exec
         argv.insert(argv.index("-e"), "--hold")
     return argv
 
 
+def _tint_hex(slug: str) -> str | None:
+    """The per-project OSC-11 background hex for ``slug`` when ``config terminal-tint on``, else None.
+    Reads the (impure) settings so ``build_argv``/``_inner_exec`` stay pure + unit-testable."""
+    return config.project_tint(slug) if _safe_settings().terminal_tint else None
+
+
 def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "") -> subprocess.Popen:
     """Launch a detached terminal window. ``program`` is typically 'bash' or 'claude'."""
-    argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir)
+    argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=_tint_hex(slug))
     return subprocess.Popen(
         argv,
         start_new_session=True,

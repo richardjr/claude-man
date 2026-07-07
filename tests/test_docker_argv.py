@@ -78,6 +78,20 @@ class HardenedArgvTest(unittest.TestCase):
         self.assertTrue(_contains_sublist(argv, ["-e", "GIT_CONFIG_KEY_0=user.name"]))
         self.assertTrue(_contains_sublist(argv, ["-e", "GIT_CONFIG_VALUE_0=Ada Lovelace"]))
 
+    def test_project_slug_env_always_injected(self) -> None:
+        # The in-terminal "which project?" cue: the slug is always injected (names the prompt + title).
+        self.assertTrue(_contains_sublist(self.argv, ["-e", "CLAUDE_MAN_PROJECT=landarna"]))
+
+    def test_tint_env_absent_by_default(self) -> None:
+        # Opt-in: without tint=True (the default), no OSC-11 background hex is injected.
+        self.assertFalse(any(a.startswith("CLAUDE_MAN_PROJECT_TINT=") for a in self.argv))
+
+    def test_tint_env_injected_when_enabled(self) -> None:
+        argv = runner.build_create_argv(_project(), profile_name="work", created_iso="t", tint=True)
+        hexval = config.project_tint("landarna")
+        self.assertIn(hexval, config._PROJECT_TINTS)                       # a curated palette entry
+        self.assertTrue(_contains_sublist(argv, ["-e", f"CLAUDE_MAN_PROJECT_TINT={hexval}"]))
+
     def test_tmpfs_mounts(self) -> None:
         tmpfs = [a for a in self.argv if a.startswith("/tmp:") or a.startswith("/home/agent/.cache:")]
         self.assertTrue(any(t.startswith("/tmp:") and "exec" in t for t in tmpfs))
@@ -449,6 +463,25 @@ class ShellHistoryRenderTest(unittest.TestCase):
         })
         # Read-WRITE bind (no :ro) so the agent can persist its history.
         self.assertNotIn(f"/state/landarna/shell:{config.CONTAINER_SHELL_HISTORY_DIR}:ro", a1)
+
+
+class ProjectTintTest(unittest.TestCase):
+    """The per-project colour must be STABLE (same colour every run/window) and a curated palette pick
+    — it keys on a process-stable SHA-256, not the salted builtin hash()."""
+
+    def test_deterministic_across_calls(self) -> None:
+        self.assertEqual(config.project_tint("taskbot"), config.project_tint("taskbot"))
+
+    def test_all_slugs_map_into_palette(self) -> None:
+        for slug in ("taskbot", "landarna", "a", "some-long-project-slug", "z9"):
+            self.assertIn(config.project_tint(slug), config._PROJECT_TINTS)
+
+    def test_distinct_slugs_can_differ(self) -> None:
+        # Not a guarantee for every pair (pigeonhole), but the palette must actually spread — a hash
+        # that collapsed everything to one bucket would defeat the feature.
+        colours = {config.project_tint(s) for s in
+                   ("taskbot", "landarna", "infra", "client", "queue", "db", "packages", "tcv")}
+        self.assertGreater(len(colours), 1)
 
 
 if __name__ == "__main__":

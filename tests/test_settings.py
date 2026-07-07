@@ -163,6 +163,22 @@ class SettingsStoreTest(unittest.TestCase):
         settings_registry.set_opener([])
         self.assertEqual(settings_registry.load().opener_command, ())
 
+    def test_terminal_tint_defaults_off(self) -> None:
+        self.assertFalse(settings_registry.load().terminal_tint)
+
+    def test_terminal_tint_roundtrip(self) -> None:
+        settings_registry.set_terminal_tint(True)
+        self.assertTrue(settings_registry.load().terminal_tint)
+        settings_registry.set_terminal_tint(False)
+        self.assertFalse(settings_registry.load().terminal_tint)
+
+    def test_terminal_tint_coexists_with_terminal_program(self) -> None:
+        settings_registry.set_terminal(program="kitty")
+        settings_registry.set_terminal_tint(True)
+        s = settings_registry.load()
+        self.assertEqual(s.terminal_program, "kitty")   # the tint write preserves the program
+        self.assertTrue(s.terminal_tint)
+
     def test_terminal_coexists_with_other_sections(self) -> None:
         settings_registry.add_ssh_key("~/.ssh/a")
         settings_registry.set_git_identity("X", "x@y.z")

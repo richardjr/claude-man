@@ -232,6 +232,7 @@ def build_create_argv(
     ssh_auth_sock: str | None = None,
     git_env: dict[str, str] | None = None,
     shell_history_host_dir: str | None = None,
+    tint: bool = False,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
 
@@ -283,6 +284,13 @@ def build_create_argv(
     # direct value. Lets `git commit` work under the read-only rootfs without a writable ~/.gitconfig.
     for key, value in (git_env or {}).items():
         argv += ["-e", f"{key}={value}"]
+    # Per-project identity for the in-terminal "which project is this?" cue: the slug (always) names
+    # the baked starship prompt segment + the bashrc window title; the OSC-11 background tint hex is
+    # added ONLY when `config terminal-tint on` (its presence also flags the bashrc to apply it). Both
+    # non-secret + cosmetic, additive `-e` — the hardened floor above is untouched.
+    argv += ["-e", f"{config.CONTAINER_PROJECT_ENV}={project.slug}"]
+    if tint:
+        argv += ["-e", f"{config.CONTAINER_PROJECT_TINT_ENV}={config.project_tint(project.slug)}"]
 
     # Writable persistent binds + read-only rootfs everywhere else.
     argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
@@ -369,6 +377,7 @@ def create(
     git_env: dict[str, str] | None = None,
     shell_history_host_dir: str | None = None,
     hybrid_header: str | None = None,
+    tint: bool = False,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -391,6 +400,7 @@ def create(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
         file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
         ssh_auth_sock=ssh_sock, git_env=git_env, shell_history_host_dir=shell_history_host_dir,
+        tint=tint,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:

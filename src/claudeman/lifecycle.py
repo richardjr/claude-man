@@ -314,12 +314,13 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
     # Stamp the container's version label with the image's ACTUAL baked claude (the source of truth),
     # not the build-time DEFAULT — so the Version column stays truthful after an on-start image rebuild.
     version = images.image_claude_version(project.overlay) or config.DEFAULT_CLAUDE_VERSION
+    settings = settings_registry.load()
     # Persistent shell history (opt-in; default off keeps the hardened floor byte-identical). When on,
     # ensure the per-project state dir exists 0700 (current uid == container uid 1000) so the agent can
     # write $HISTFILE there, and pass it as the read-write bind. Best-effort — a mkdir fault falls back
     # to ephemeral history rather than failing the create.
     shell_hist_dir: str | None = None
-    if settings_registry.load().shell_persist_history:
+    if settings.shell_persist_history:
         try:
             d = config.project_shell_dir(project.slug)
             d.mkdir(parents=True, exist_ok=True)
@@ -335,10 +336,13 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         hybrid_header = f"x-litellm-api-key: {gateway.ensure_master_key(project.slug)}"
     # Git author identity (config.toml [git] override, else inherited from the host git config),
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
+    # terminal_tint (opt-in) injects the per-project OSC-11 background hex so parallel project windows
+    # are distinguishable — cosmetic, additive `-e` (floor unchanged; recreate to apply).
     cp = runner.create(project, profile_name=profile_name, token=token,
                        gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
                        git_env=gitconfig.container_env(), version=version,
-                       shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header)
+                       shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header,
+                       tint=settings.terminal_tint)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 

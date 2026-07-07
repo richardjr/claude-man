@@ -10,6 +10,7 @@ Liveness is never stored here; it is read fresh from `docker ps`/`inspect`.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -183,6 +184,41 @@ OLLAMA_URL_ENV = "CLAUDE_MAN_OLLAMA_URL"
 def ollama_url() -> str:
     """The host Ollama daemon base URL (env override, else the 127.0.0.1 default). No trailing slash."""
     return (os.environ.get(OLLAMA_URL_ENV) or OLLAMA_DEFAULT_URL).rstrip("/")
+
+
+# ---------------------------------------------------------------------------
+# Per-project identity + colour — the in-terminal "which project is this?" cue
+# ---------------------------------------------------------------------------
+# Injected at ``docker create`` (runner.build_create_argv) and consumed by the baked shell (the
+# starship prompt segment + the bashrc window-title / OSC-11 tint) and the launcher wrapper
+# (tui/terminals, for the claude window whose exec never sources bashrc). Non-secret, cosmetic.
+CONTAINER_PROJECT_ENV = "CLAUDE_MAN_PROJECT"            # = the project slug (prompt segment + window title)
+CONTAINER_PROJECT_TINT_ENV = "CLAUDE_MAN_PROJECT_TINT"  # = an OSC-11 background hex; injected only when tint on
+
+# A curated set of DARK, desaturated terminal-background tints. Deliberately low-lightness so the
+# OSC-11 background shift never washes out light-on-dark foreground text — it only nudges the hue so
+# two projects' windows are distinguishable at a glance. Curated (not computed) so each is eyeballed.
+_PROJECT_TINTS = (
+    "#241d12",  # amber
+    "#0f2020",  # teal
+    "#1c1526",  # violet
+    "#0f1b26",  # blue
+    "#241318",  # rose
+    "#132018",  # green
+    "#25200f",  # olive
+    "#201022",  # magenta
+)
+
+
+def project_tint(slug: str) -> str:
+    """A stable dark background-tint hex (OSC-11) for ``slug``, picked from ``_PROJECT_TINTS``.
+
+    Deterministic and process-stable — keyed on a SHA-256 of the slug, NOT the builtin ``hash()``
+    (salted per-process via PYTHONHASHSEED, so it would pick a different colour each run). A project
+    therefore always tints the same colour, in every window and across restarts. Cosmetic / non-secret
+    (the hash is for stable bucketing, not security)."""
+    digest = hashlib.sha256(slug.encode("utf-8")).digest()
+    return _PROJECT_TINTS[digest[0] % len(_PROJECT_TINTS)]
 
 
 # ---------------------------------------------------------------------------
