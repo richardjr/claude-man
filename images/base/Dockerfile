@@ -221,6 +221,7 @@ ENV HOME=/home/agent \
     GH_CONFIG_DIR=/home/agent/.cache/gh \
     YARN_GLOBAL_FOLDER=/home/agent/.cache/yarn \
     YARN_ENABLE_GLOBAL_CACHE=false \
+    YARN_ENABLE_MIRROR=false \
     YARN_CACHE_FOLDER=/workspace/.yarn-cache \
     PATH=/home/agent/.local/bin:$PATH \
     USE_BUILTIN_RIPGREP=0 \
