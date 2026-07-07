@@ -57,7 +57,10 @@ These are security- and correctness-critical. Every change must preserve them.
    git/gh config redirects (below), and the yarn home-config redirect (`~/.yarnrc` is symlinked onto
    the `.cache` tmpfs in the image, for Yarn Classic v1's `saveHomeConfig` write) all fail `EACCES`.
    (Yarn's package CACHE rides the disk-backed `/workspace` bind via `YARN_CACHE_FOLDER`, NOT the
-   size-capped tmpfs — a 256m cache OOM'd a large v1 install with ENOSPC.) Pinning the owner is *not* a floor relaxation —
+   size-capped tmpfs — a 256m cache OOM'd a large v1 install with ENOSPC. Berry ALSO needs
+   `YARN_ENABLE_MIRROR=false`: its mirror defaults ON and duplicates the full package cache into
+   `globalFolder/cache` on the tmpfs even with a local cacheFolder, re-ENOSPC'ing a large install.)
+   Pinning the owner is *not* a floor relaxation —
    it makes a declared-writable surface actually writable, as this invariant intends (`/tmp` needs no
    pin: Docker special-cases it to sticky 1777). The image bakes a
    real `/etc/passwd` entry + `HOME` for uid 1000 (without it, `getpwuid` fails under `--read-only
