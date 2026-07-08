@@ -100,9 +100,12 @@ CONTAINER_SSH_AGENT_SOCK = "/ssh-agent"           # forwarded host ssh-agent soc
 CONTAINER_GITCONFIG = CONTAINER_CACHE + "/gitconfig"   # GIT_CONFIG_GLOBAL
 CONTAINER_GH_CONFIG = CONTAINER_CACHE + "/gh"          # GH_CONFIG_DIR
 # Yarn (Berry/corepack) defaults its global folder to ~/.yarn — EROFS under the read-only rootfs
-# (the `mkdir /home/agent/.yarn` failure). Redirect the small global folder (metadata/telemetry) to
-# the writable .cache tmpfs; the bulk package cache goes to the disk-backed workspace bind via
+# (the `mkdir /home/agent/.yarn` failure). Redirect the global folder (metadata/telemetry) to the
+# writable .cache tmpfs; the bulk package cache goes to the disk-backed workspace bind via
 # CONTAINER_YARN_CACHE below (was project-local; now a shared disk cache Yarn Classic v1 honours too).
+# NOTE: this global folder only stays small because runner._BAKED_ENV sets YARN_ENABLE_MIRROR=false —
+# Berry's mirror defaults ON and would duplicate the FULL package cache into globalFolder/cache here,
+# re-filling the 256m tmpfs and ENOSPC'ing a large install despite the YARN_CACHE_FOLDER redirect.
 CONTAINER_YARN_GLOBAL = CONTAINER_CACHE + "/yarn"      # YARN_GLOBAL_FOLDER (Berry)
 # Yarn Classic (v1) IGNORES the Berry vars above and uses its own defaults: it caches to ~/.cache/yarn
 # (the 256m .cache tmpfs -> ENOSPC on a large install) and writes ~/.yarnrc (read-only rootfs -> EROFS).

@@ -57,15 +57,22 @@ _BAKED_ENV = {
     "GIT_CONFIG_GLOBAL": config.CONTAINER_GITCONFIG,
     "GH_CONFIG_DIR": config.CONTAINER_GH_CONFIG,
     # Yarn caches/configs must land on a WRITABLE surface (the rootfs is read-only; the .cache tmpfs is
-    # size-capped). Berry: its small global folder -> the .cache tmpfs (YARN_GLOBAL_FOLDER), no shared
-    # global cache (YARN_ENABLE_GLOBAL_CACHE=false). The package CACHE (Berry AND Yarn Classic v1) ->
-    # the disk-backed, persistent /workspace bind via YARN_CACHE_FOLDER — a 256m tmpfs cache OOM'd a
-    # large install with ENOSPC. Yarn v1 ignores the two Berry vars but DOES honour YARN_CACHE_FOLDER;
-    # its ~/.yarnrc write (EROFS on the read-only rootfs) is handled by an image symlink onto the .cache
-    # tmpfs. Same redirect philosophy as GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface (the
-    # cache rides the existing /workspace bind), so the hardened floor is unchanged.
+    # size-capped). Berry: its global folder -> the .cache tmpfs (YARN_GLOBAL_FOLDER), no shared global
+    # cache (YARN_ENABLE_GLOBAL_CACHE=false). The package CACHE (Berry AND Yarn Classic v1) -> the
+    # disk-backed, persistent /workspace bind via YARN_CACHE_FOLDER — a 256m tmpfs cache OOM'd a large
+    # install with ENOSPC. CRUCIALLY, Berry's enableMirror DEFAULTS TO TRUE: even with a local cacheFolder
+    # it ALSO duplicates every fetched package into globalFolder/cache (== the .cache tmpfs here), which
+    # re-fills the 256m tmpfs and ENOSPCs a large install DESPITE the YARN_CACHE_FOLDER redirect (the
+    # "yarn install only works on the 2nd/3rd run" bug: disk-cache entries persist across runs, so each
+    # rerun writes fewer mirror copies until the tmpfs stops overflowing). YARN_ENABLE_MIRROR=false keeps
+    # the global folder to just telemetry/index and sends packages straight to the disk cache. Yarn v1
+    # ignores all three Berry vars but DOES honour YARN_CACHE_FOLDER; its ~/.yarnrc write (EROFS on the
+    # read-only rootfs) is handled by an image symlink onto the .cache tmpfs. Same redirect philosophy as
+    # GIT_CONFIG_GLOBAL/GH_CONFIG_DIR — no new writable surface (the cache rides the existing /workspace
+    # bind), so the hardened floor is unchanged.
     "YARN_GLOBAL_FOLDER": config.CONTAINER_YARN_GLOBAL,
     "YARN_ENABLE_GLOBAL_CACHE": "false",
+    "YARN_ENABLE_MIRROR": "false",
     "YARN_CACHE_FOLDER": config.CONTAINER_YARN_CACHE,
     # pip/uv write to HOME dotdirs on the read-only rootfs: caches under ~/.cache (the size-capped tmpfs
     # that ENOSPC'd a large yarn install) AND uv's downloaded interpreters + tool venvs under

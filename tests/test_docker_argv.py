@@ -63,8 +63,12 @@ class HardenedArgvTest(unittest.TestCase):
         # folder to the writable .cache tmpfs.
         self.assertIn("YARN_GLOBAL_FOLDER=/home/agent/.cache/yarn", joined)
         self.assertIn("YARN_ENABLE_GLOBAL_CACHE=false", joined)
+        # Berry's mirror defaults ON and duplicates the full package cache into globalFolder/cache (the
+        # .cache tmpfs) even with a local cacheFolder -> re-fills the 256m tmpfs, ENOSPC on a large
+        # install ("only works on the 2nd/3rd run"). Off = packages go straight to the disk cache.
+        self.assertIn("YARN_ENABLE_MIRROR=false", joined)
         # The package cache (Berry + Yarn Classic v1) -> the disk-backed /workspace bind, not the
-        # size-capped .cache tmpfs (a v1 install OOM'd the 256m tmpfs with ENOSPC). v1 ignores the two
+        # size-capped .cache tmpfs (a v1 install OOM'd the 256m tmpfs with ENOSPC). v1 ignores the three
         # Berry vars above but honours YARN_CACHE_FOLDER.
         self.assertIn("YARN_CACHE_FOLDER=/workspace/.yarn-cache", joined)
 
