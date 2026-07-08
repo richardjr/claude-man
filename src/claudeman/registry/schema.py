@@ -487,6 +487,11 @@ class Settings:
     # All default to "" / () = auto-detect for the host platform — the pre-preference behaviour.
     terminal_program: str = ""           # "" -> auto; a launcher name (`config terminal` lists); "custom"
     terminal_command: tuple[str, ...] = ()  # program="custom": argv template ({title}/{class}/"{argv}")
+    # Per-project OSC-11 background tint on the spawned shell/claude windows so parallel project
+    # terminals are distinguishable at a glance (the project NAME always shows in the prompt + title;
+    # this adds a per-project background hue). Off by default — a background change is opt-in, and some
+    # terminals (macOS Terminal.app) ignore OSC 11. Injected at container create -> recreate to apply.
+    terminal_tint: bool = False
     opener_command: tuple[str, ...] = ()    # custom 'open this path' argv (path appended); () -> auto
     ui_splash: bool = True               # show the TUI boot splash (any key skips; `config splash off`)
     # In-container shell history: OFF -> ephemeral on the .cache tmpfs (resets on recreate); ON ->

@@ -61,6 +61,7 @@ def _parse(data: dict) -> Settings:
         claude_version_pin=str(image.get("claude_version_pin", "") or ""),
         terminal_program=program,
         terminal_command=command,
+        terminal_tint=bool(terminal.get("tint", False)),
         opener_command=_argv_list(opener, "command", "opener.command"),
         ui_splash=bool(ui.get("splash", True)),
         shell_persist_history=bool(shell.get("persist_history", False)),
@@ -100,6 +101,7 @@ def save(settings: Settings) -> Path:
     terminal = tomlkit.table()
     terminal["program"] = settings.terminal_program
     terminal["command"] = list(settings.terminal_command)
+    terminal["tint"] = bool(settings.terminal_tint)
     doc["terminal"] = terminal
     opener = tomlkit.table()
     opener["command"] = list(settings.opener_command)
@@ -170,6 +172,14 @@ def set_terminal(*, program: str | None = None,
 def set_opener(command: list[str] | tuple[str, ...]) -> Settings:
     """Set (or clear, with ``[]``) the custom file-manager opener argv used by Browse."""
     updated = dataclasses.replace(load(), opener_command=tuple(command))
+    save(updated)
+    return updated
+
+
+def set_terminal_tint(enabled: bool) -> Settings:
+    """Enable/disable the per-project OSC-11 background tint on spawned shell/claude windows. Injected
+    at container create, so a change takes effect on the next ``recreate``."""
+    updated = dataclasses.replace(load(), terminal_tint=bool(enabled))
     save(updated)
     return updated
 

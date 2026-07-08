@@ -1,6 +1,18 @@
 add_newline = true
 command_timeout = 200
-format = "[$directory$git_branch$git_status]($style)$character"
+# claude-man prepends a per-project tag (${env_var.CLAUDE_MAN_PROJECT}) so the shell always shows WHICH
+# project's container it's in — CLAUDE_MAN_PROJECT is injected at container create (runner). Hidden on
+# the operator's host (the var is unset there), so this stays a superset of the host prompt.
+format = "${env_var.CLAUDE_MAN_PROJECT}[$directory$git_branch$git_status]($style)$character"
+
+# The project tag: the slug on a bold chip at the very front of the prompt. Fixed colour (starship
+# styles are static, so the per-project HUE is carried by the optional OSC-11 window tint — `config
+# terminal-tint on` — not here); the NAME is what identifies the project. Shown only when
+# CLAUDE_MAN_PROJECT is set, so the operator's host prompt is unaffected.
+[env_var.CLAUDE_MAN_PROJECT]
+variable = "CLAUDE_MAN_PROJECT"
+format = "[ $env_value ]($style) "
+style = "bold fg:#1a1b26 bg:#7aa2f7"
 
 [character]
 error_symbol = "[✗](bold cyan)"

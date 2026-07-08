@@ -77,6 +77,39 @@ class TerminalWorkdirTest(unittest.TestCase):
         self.assertLess(argv.index("--hold"), argv.index("-e"))
 
 
+class WindowIdentityTest(unittest.TestCase):
+    """The project-identity cue on spawned windows (telling parallel project terminals apart): the
+    claude/nvim window bypasses the container bashrc, so its keep-open wrapper stamps the OSC title
+    (always) and the OSC-11 background tint (when a hex is passed). A bash shell is a bare exec — the
+    bashrc names/tints it, so the wrapper must NOT double-stamp."""
+
+    def _cmd(self, argv: list[str]) -> str:
+        self.assertEqual(argv[:2], ["bash", "-lc"])  # keep-open wrapper shape
+        return argv[-1]
+
+    def test_window_title_matches_launcher(self) -> None:
+        self.assertEqual(terminals.window_title("demo"), "claude:demo")
+
+    def test_claude_wrapper_stamps_title_before_exec(self) -> None:
+        cmd = self._cmd(terminals._inner_exec("demo", "claude", keep_open=True, workdir=""))
+        self.assertIn(r"printf '\033]0;claude:demo\007", cmd)
+        self.assertLess(cmd.index("printf"), cmd.index("docker exec"))  # title set BEFORE claude runs
+
+    def test_tint_hex_adds_osc11_background(self) -> None:
+        cmd = self._cmd(terminals._inner_exec("demo", "claude", keep_open=True, workdir="",
+                                              tint_hex="#241d12"))
+        self.assertIn(r"\033]11;#241d12\007", cmd)
+
+    def test_no_tint_hex_omits_osc11(self) -> None:
+        cmd = self._cmd(terminals._inner_exec("demo", "claude", keep_open=True, workdir=""))
+        self.assertNotIn(r"\033]11;", cmd)
+
+    def test_bash_shell_is_bare_exec_no_wrapper_stamp(self) -> None:
+        # bash = direct `docker exec` (bashrc owns its title/tint) — no wrapper, so no printf to inject.
+        argv = terminals._inner_exec("demo", "bash", keep_open=True, workdir="")
+        self.assertEqual(argv, ["docker", "exec", "-it", "claude-man-demo", "bash"])
+
+
 class SlugBoundaryTest(unittest.TestCase):
     """SEC-6 defence-in-depth: no slug reaches the keep-open shell string unvalidated."""
 

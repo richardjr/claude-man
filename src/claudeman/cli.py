@@ -1058,6 +1058,7 @@ def cmd_config_show(args) -> int:
     print(f"claude image: channel {s.claude_channel}{pin}, "
           f"on-start update check {'on' if s.image_update_check else 'off'}")
     print(f"terminal: {_terminal_summary(s)}")
+    print(f"terminal tint: {'on' if s.terminal_tint else 'off'} (recreate to apply)")
     print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
     print(f"tui splash: {'on' if s.ui_splash else 'off'}")
     print(f"shell history: {'persistent' if s.shell_persist_history else 'ephemeral'} "
@@ -1219,6 +1220,18 @@ def cmd_config_shell_history(args) -> int:
     mode = "persistent" if s.shell_persist_history else "ephemeral"
     print(f"shell history: {mode} — `recreate` a project to apply (the history bind is fixed at "
           "container create)")
+    return 0
+
+
+def cmd_config_terminal_tint(args) -> int:
+    from .registry import settings as settings_registry
+
+    if args.state is None:
+        print(f"terminal tint: {'on' if settings_registry.load().terminal_tint else 'off'}")
+        return 0
+    s = settings_registry.set_terminal_tint(args.state == "on")
+    print(f"terminal tint: {'on' if s.terminal_tint else 'off'} — `recreate` a project to apply "
+          "(the tint env is injected at container create)")
     return 0
 
 
@@ -1599,6 +1612,11 @@ def build_parser() -> argparse.ArgumentParser:
                               "adds an opt-in writable bind — recreate to apply)")
     csh.add_argument("state", nargs="?", choices=("on", "off"))
     csh.set_defaults(func=cmd_config_shell_history)
+    ctt = cfg.add_parser("terminal-tint",
+                         help="per-project background tint on spawned shell/claude windows so parallel "
+                              "projects are distinguishable (default off; recreate to apply)")
+    ctt.add_argument("state", nargs="?", choices=("on", "off"))
+    ctt.set_defaults(func=cmd_config_terminal_tint)
     cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
     cg.add_argument("--name", help="set git user.name (overrides host inherit)")
     cg.add_argument("--email", help="set git user.email")
