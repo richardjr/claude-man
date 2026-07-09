@@ -203,6 +203,11 @@ class ClaudeManApp(App):
         # rebuilt/pruned by _render_projects, so a deleted or reused slug can't replay a stale sweep.
         self._rowfx: dict[str, float] = {}
         self._row_cells: dict[str, list[str]] = {}
+        # slug -> the Project name's stable identity colour (config.project_name_color — a SHA-256 pick
+        # from the curated palette, the SAME per-project colour the spawned-terminal identity uses, so a
+        # project reads as one colour everywhere). Rebuilt by _render_projects; read by _settle_row +
+        # _fx_styles so the resting paint, the post-sweep settle, and the sweep base all agree.
+        self._name_colors: dict[str, str] = {}
         # (slug, repo dir) -> monotonic start for repo-panel rows whose git state just changed (went
         # dirty / ahead-behind moved / new commit). Repeated passes (_GIT_SWEEP_REPEATS) — the scan is
         # a 30 s background tick, so one quick band is easy to miss. Armed by _apply_gitstate's diff;
@@ -320,13 +325,19 @@ class ClaudeManApp(App):
         # Cache for _running_slugs (quit) AND the action handlers — so neither blocks on a fresh docker ps.
         self._last_rows = rows
         cells_map: dict[str, list[str]] = {}
+        # Per-project name colour: the stable, unique identity colour keyed on the slug
+        # (config.project_name_color — the same generation the spawned-terminal tint uses). Stored per
+        # slug so the sweep + settle repaints reuse the exact same colour.
+        self._name_colors = {r.slug: config.project_name_color(r.slug) for r in rows}
         for row in rows:
             cells = [row.slug, row.kind, row.profile, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
-            # Colour the Status cell: green = UP, red = STOPPED, yellow = DEFINED (obvious at a glance).
+            # Colour the Project name with its gradient tint, and the Status cell green = UP /
+            # red = STOPPED / yellow = DEFINED (both obvious at a glance).
+            name = Text(cells[0], style=self._name_colors[row.slug])
             kind = Text(row.kind, style=status.status_style(row.kind))
-            table.add_row(cells[0], kind, *cells[2:], key=row.slug)
+            table.add_row(name, kind, *cells[2:], key=row.slug)
             prev = prev_kinds.get(row.slug)
             if prev is not None and prev != row.kind and status.UP in (prev, row.kind):
                 self._rowfx[row.slug] = time.monotonic()
@@ -584,9 +595,10 @@ class ClaudeManApp(App):
         self.sub_title = f"{_SPINNER[self._spin]} {ops}"
 
     @staticmethod
-    def _fx_styles(cells: list[str]) -> list[str | None]:
-        """Base styles for sweep frames: only the Status cell (index 1) is coloured at rest."""
-        return [None, status.status_style(cells[1])] + [None] * (len(cells) - 2)
+    def _fx_styles(cells: list[str], name_style: str | None) -> list[str | None]:
+        """Base styles for sweep frames: the Project name (index 0) in its gradient tint and the
+        Status cell (index 1) in green/red/yellow; the rest render unstyled outside the band."""
+        return [name_style, status.status_style(cells[1])] + [None] * (len(cells) - 2)
 
     def _tick_rowfx(self) -> None:
         """Advance every live sweep one frame (30 fps; paused when none are live).
@@ -613,7 +625,8 @@ class ClaudeManApp(App):
             if cells is None or slug not in table.rows:
                 del self._rowfx[slug]
                 continue
-            frame = rowfx.frame_cells(cells, now - t0, styles=self._fx_styles(cells))
+            frame = rowfx.frame_cells(cells, now - t0,
+                                      styles=self._fx_styles(cells, self._name_colors.get(slug)))
             if frame is None:  # band has exited — settle to the resting paint
                 del self._rowfx[slug]
                 self._settle_row(table, slug, cells)
@@ -648,7 +661,8 @@ class ClaudeManApp(App):
 
     def _settle_row(self, table: DataTable, slug: str, cells: list[str]) -> None:
         """Repaint one row's cells to their resting values (post-sweep; mirrors _render_projects)."""
-        values = [cells[0], Text(cells[1], style=status.status_style(cells[1])), *cells[2:]]
+        name = Text(cells[0], style=self._name_colors.get(slug) or "")
+        values = [name, Text(cells[1], style=status.status_style(cells[1])), *cells[2:]]
         for col, value in zip(self._proj_cols, values):
             table.update_cell(slug, col, value)
 

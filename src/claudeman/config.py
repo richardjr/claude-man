@@ -10,6 +10,7 @@ Liveness is never stored here; it is read fresh from `docker ps`/`inspect`.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -186,6 +187,42 @@ OLLAMA_URL_ENV = "CLAUDE_MAN_OLLAMA_URL"
 def ollama_url() -> str:
     """The host Ollama daemon base URL (env override, else the 127.0.0.1 default). No trailing slash."""
     return (os.environ.get(OLLAMA_URL_ENV) or OLLAMA_DEFAULT_URL).rstrip("/")
+
+
+# ---------------------------------------------------------------------------
+# Per-project identity colour — a stable, unique colour keyed on the project name
+# ---------------------------------------------------------------------------
+# One deterministic colour per project, so a project reads as the SAME colour everywhere its identity
+# is surfaced. Keyed on a SHA-256 of the slug — NOT the builtin ``hash()`` (salted per-process via
+# PYTHONHASHSEED, so it would pick a different colour each run) — bucketed into a small curated
+# palette. Same slug -> same bucket, in every process and across restarts. Cosmetic / non-secret (the
+# hash is for stable bucketing, not security).
+#
+# These are readable FOREGROUND hues (the TUI project-name column). Their hue ORDER is aligned
+# index-for-index with the DARK OSC-11 terminal-background tints of the spawned-terminal identity
+# feature (amber, teal, violet, blue, rose, green, olive, magenta), so bucket ``i`` is the same hue
+# family in both — a project's TUI name colour and its terminal-window tint agree. Curated (not
+# computed) so each is eyeballed for contrast on both light and dark backgrounds.
+_PROJECT_NAME_COLORS = (
+    "#d9a441",  # amber
+    "#3fb8ad",  # teal
+    "#a98cff",  # violet
+    "#5fa8e0",  # blue
+    "#e58aa2",  # rose
+    "#5fc27e",  # green
+    "#c2b44a",  # olive
+    "#cf83d0",  # magenta
+)
+
+
+def project_name_color(slug: str) -> str:
+    """A stable, unique display colour (hex) for ``slug``, picked from ``_PROJECT_NAME_COLORS``.
+
+    Deterministic and process-stable (SHA-256 of the slug, not the salted builtin ``hash()``), so a
+    project is always the same colour — in the TUI project list and wherever else its identity colour
+    is shown. Cosmetic / non-secret."""
+    digest = hashlib.sha256(slug.encode("utf-8")).digest()
+    return _PROJECT_NAME_COLORS[digest[0] % len(_PROJECT_NAME_COLORS)]
 
 
 # ---------------------------------------------------------------------------
