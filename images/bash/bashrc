@@ -67,6 +67,20 @@ command -v fzf &>/dev/null && eval "$(fzf --bash)"
 # --- Prompt: starship (git branch + status; config baked at ~/.config/starship.toml) --------------
 command -v starship &>/dev/null && eval "$(starship init bash)"
 
+# --- Project identity in the window (name + optional tint) so parallel project terminals are
+# distinguishable at a glance. CLAUDE_MAN_PROJECT[/_TINT] are injected at container create (runner);
+# both are absent for a bare `docker run` of the image, so this block is a no-op there. The prompt
+# segment is starship's (above); here we own the WINDOW: (a) re-assert the window/tab title every
+# prompt via PROMPT_COMMAND (appended AFTER starship's, so both run) — it surfaces the project in tab
+# bars / taskbars / tmux / window switchers where a tiling WM shows no title bar, and survives any
+# program that clobbered the title; (b) apply the per-project OSC-11 background tint once at shell
+# start when `config terminal-tint on` injected a hex.
+if [[ -n "${CLAUDE_MAN_PROJECT:-}" ]]; then
+  __cm_set_title() { printf '\033]0;%s — %s\007' "$CLAUDE_MAN_PROJECT" "$PWD"; }
+  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__cm_set_title"
+  [[ -n "${CLAUDE_MAN_PROJECT_TINT:-}" ]] && printf '\033]11;%s\007' "$CLAUDE_MAN_PROJECT_TINT"
+fi
+
 # --- Dev-shell banner (Phase 8c) — the funky boot-splash wordmark + a cheat-sheet (n, history, git
 # legend). Shown on EVERY interactive shell on a real terminal. The `-t 1` guard keeps non-tty execs
 # (the smoke/comm/ssh/gitstate probes) silent; `CLAUDEMAN_NO_MOTD` opts out; `hints` re-shows it.

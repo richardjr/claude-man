@@ -190,19 +190,42 @@ def ollama_url() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-project identity colour — a stable, unique colour keyed on the project name
+# Per-project identity + colour — the "which project is this?" cue
 # ---------------------------------------------------------------------------
-# One deterministic colour per project, so a project reads as the SAME colour everywhere its identity
-# is surfaced. Keyed on a SHA-256 of the slug — NOT the builtin ``hash()`` (salted per-process via
-# PYTHONHASHSEED, so it would pick a different colour each run) — bucketed into a small curated
-# palette. Same slug -> same bucket, in every process and across restarts. Cosmetic / non-secret (the
-# hash is for stable bucketing, not security).
+# One deterministic identity colour per project, so a project reads as the SAME hue everywhere its
+# identity is surfaced. Keyed on a SHA-256 of the slug — NOT the builtin ``hash()`` (salted
+# per-process via PYTHONHASHSEED, so it would pick a different colour each run) — bucketed into
+# small curated palettes via the shared ``_identity_bucket``. Same slug -> same bucket, in every
+# process and across restarts. Cosmetic / non-secret (the hash is for stable bucketing, not
+# security).
 #
-# These are readable FOREGROUND hues (the TUI project-name column). Their hue ORDER is aligned
-# index-for-index with the DARK OSC-11 terminal-background tints of the spawned-terminal identity
-# feature (amber, teal, violet, blue, rose, green, olive, magenta), so bucket ``i`` is the same hue
-# family in both — a project's TUI name colour and its terminal-window tint agree. Curated (not
-# computed) so each is eyeballed for contrast on both light and dark backgrounds.
+# Two palettes share the bucket index (amber, teal, violet, blue, rose, green, olive, magenta), so
+# bucket ``i`` is the same hue family in both — a project's TUI name colour and its terminal-window
+# tint always agree. Curated (not computed) so each entry is eyeballed:
+#   _PROJECT_TINTS       — DARK, desaturated OSC-11 terminal-background tints. Deliberately
+#                          low-lightness so the background shift never washes out light-on-dark
+#                          foreground text — it only nudges the hue so two projects' windows are
+#                          distinguishable at a glance.
+#   _PROJECT_NAME_COLORS — readable FOREGROUND hues (the TUI project-name column), eyeballed for
+#                          contrast on both light and dark backgrounds.
+#
+# The tint is injected at ``docker create`` (runner.build_create_argv) and consumed by the baked
+# shell (the starship prompt segment + the bashrc window-title / OSC-11 tint) and the launcher
+# wrapper (tui/terminals, for the claude window whose exec never sources bashrc).
+CONTAINER_PROJECT_ENV = "CLAUDE_MAN_PROJECT"            # = the project slug (prompt segment + window title)
+CONTAINER_PROJECT_TINT_ENV = "CLAUDE_MAN_PROJECT_TINT"  # = an OSC-11 background hex; injected only when tint on
+
+_PROJECT_TINTS = (
+    "#241d12",  # amber
+    "#0f2020",  # teal
+    "#1c1526",  # violet
+    "#0f1b26",  # blue
+    "#241318",  # rose
+    "#132018",  # green
+    "#25200f",  # olive
+    "#201022",  # magenta
+)
+
 _PROJECT_NAME_COLORS = (
     "#d9a441",  # amber
     "#3fb8ad",  # teal
@@ -215,14 +238,29 @@ _PROJECT_NAME_COLORS = (
 )
 
 
+def _identity_bucket(slug: str) -> int:
+    """The stable palette index for ``slug`` — SHA-256, not the salted builtin ``hash()``.
+
+    Shared by ``project_tint`` and ``project_name_color`` so the two palettes stay aligned
+    index-for-index by construction."""
+    digest = hashlib.sha256(slug.encode("utf-8")).digest()
+    return digest[0] % len(_PROJECT_TINTS)
+
+
+def project_tint(slug: str) -> str:
+    """A stable dark background-tint hex (OSC-11) for ``slug``, picked from ``_PROJECT_TINTS``.
+
+    Deterministic and process-stable, so a project always tints the same colour — in every window
+    and across restarts. Cosmetic / non-secret."""
+    return _PROJECT_TINTS[_identity_bucket(slug)]
+
+
 def project_name_color(slug: str) -> str:
     """A stable, unique display colour (hex) for ``slug``, picked from ``_PROJECT_NAME_COLORS``.
 
-    Deterministic and process-stable (SHA-256 of the slug, not the salted builtin ``hash()``), so a
-    project is always the same colour — in the TUI project list and wherever else its identity colour
-    is shown. Cosmetic / non-secret."""
-    digest = hashlib.sha256(slug.encode("utf-8")).digest()
-    return _PROJECT_NAME_COLORS[digest[0] % len(_PROJECT_NAME_COLORS)]
+    Deterministic and process-stable, so a project is always the same colour — in the TUI project
+    list and wherever else its identity colour is shown. Cosmetic / non-secret."""
+    return _PROJECT_NAME_COLORS[_identity_bucket(slug)]
 
 
 # ---------------------------------------------------------------------------

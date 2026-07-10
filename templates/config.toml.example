@@ -34,3 +34,12 @@ auto_load = true
 # Changing either value requires `claudemanctl project recreate <slug>` to take effect.
 user_name  = ""
 user_email = ""
+
+[terminal]
+# Per-project background tint (OSC-11) on the spawned shell/claude windows so parallel project
+# terminals are distinguishable at a glance. OFF by default — a background change is opt-in, and some
+# terminals (macOS Terminal.app) ignore OSC 11. The project NAME always shows in the prompt segment +
+# window title regardless of this. `claudemanctl config terminal-tint on` (recreate a project to
+# apply — the tint env is stamped at container create). The terminal EMULATOR itself is chosen via
+# `claudemanctl config terminal` (the program/command keys, omitted here — auto-detected by default).
+tint = false
