@@ -26,6 +26,13 @@ extra_apt = ["jq"]          # optional: thin per-project apt layer baked at crea
 language = "node"               # pack tier: common-only when omitted ("" = none)
 packs    = ["guardrails", "code-quality", "node-conventions"]
 
+# Model pin (docs/MODELS.md) — ONE choice per project, of two kinds (setting both is a load error):
+# claude_model = "claude-fable-5"   # launch claude as `claude --model <ref>` (an id or alias like
+#                                   # "opus"). Applies at the next launch — no recreate, no gateway,
+#                                   # allowed when locked. Manage: `project model set <slug> --claude …`
+# model = "qwen3-coder:30b"         # LOCAL (Ollama) pin -> HYBRID mode (gateway sidecar; recreate to
+#                                   # apply; refused on a locked project). `project model set <slug> <tag>`
+
 [project.egress]
 mode      = "open"          # "open" (default) or "strict"
 allowlist = ["registry.yarnpkg.com", "objects.githubusercontent.com"]  # strict mode only

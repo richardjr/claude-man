@@ -19,8 +19,11 @@ per-project OSC-11 background tint (``config.project_tint``) that the bashrc app
 
 ``build_*`` are pure (no process spawn, no filesystem beyond ``shutil.which`` in the pickers) so
 they can be unit-tested. ``claude``/shell open in the project's ``launch_workdir`` (``/workspace``
-unless overridden) via ``docker exec -w``. ``spawn_path`` opens a HOST directory (the workspace bind
-source) in the system file manager (``xdg-open`` / ``open`` / ``wslview`` per platform).
+unless overridden) via ``docker exec -w``; a ``claude`` window additionally carries the project's
+claude-model pin as ``--model <ref>`` (registry ``claude_model`` via ``claude_model_args`` —
+launch-time only, so the pin needs no recreate). ``spawn_path`` opens a HOST directory (the
+workspace bind source) in the system file manager (``xdg-open`` / ``open`` / ``wslview`` per
+platform).
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 
 from .. import config, hostplatform
@@ -52,10 +56,11 @@ def window_title(slug: str) -> str:
 def launch_workdir(slug: str) -> str:
     """The container dir to ``docker exec -w`` into for ``slug`` (configured / lone-repo dir / default).
 
-    Read from the registry; falls back to ``/workspace`` for an unknown/malformed project."""
+    Read from the registry; falls back to ``/workspace`` for an unknown/malformed project (a
+    syntactically corrupt TOML raises ``TOMLDecodeError``, not ``ValidationError`` — both count)."""
     try:
         return projects.load(slug).launch_workdir
-    except (FileNotFoundError, ValidationError, OSError):
+    except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError, OSError):
         return config.CONTAINER_WORKSPACE
 
 
@@ -72,7 +77,7 @@ def _window_osc(slug: str, tint_hex: str | None) -> str:
 
 
 def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str,
-                tint_hex: str | None = None) -> list[str]:
+                tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
     # Defence-in-depth for the f-string below (SEC-6's terminal half): the CLI boundary already
     # rejects malformed slugs, but no slug may reach a shell string unvalidated from ANY caller.
     validate_slug(slug)
@@ -83,9 +88,12 @@ def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str,
         # (+ optional tint) FIRST — this exec bypasses the bashrc that names/tints shells, so without
         # this the claude/nvim window would be the one unlabelled window.
         wdq = f"-w {shlex.quote(workdir)} " if workdir else ""
+        # shlex.join so every extra arg is shell-safe inside the -lc string (a `--model` ref like
+        # `claude-sonnet-5[1m]` contains glob characters that must not hit pathname expansion).
+        prog = shlex.join([program, *args])
         return ["bash", "-lc",
-                f"{_window_osc(slug, tint_hex)}docker exec -it {wdq}{container} {program}; exec bash"]
-    return ["docker", "exec", "-it", *wd, container, program]
+                f"{_window_osc(slug, tint_hex)}docker exec -it {wdq}{container} {prog}; exec bash"]
+    return ["docker", "exec", "-it", *wd, container, program, *args]
 
 
 # ---------------------------------------------------------------------------
@@ -251,25 +259,26 @@ def resolve_spec(platform: str | None = None) -> TerminalSpec:
 
 
 def build_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
-               tint_hex: str | None = None) -> list[str]:
+               tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
     spec = resolve_spec()
-    inner = _inner_exec(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=tint_hex)
+    inner = _inner_exec(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=tint_hex,
+                        args=args)
     return render_spec(spec, cls=window_class(slug), title=window_title(slug), inner=inner)
 
 
 # Named builders kept for direct use/tests; same templates as the table.
 def build_ghostty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
-                       tint_hex: str | None = None) -> list[str]:
+                       tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
     return render_spec(_LINUX_TERMINALS[0], cls=window_class(slug), title=window_title(slug),
                        inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir,
-                                         tint_hex=tint_hex))
+                                         tint_hex=tint_hex, args=args))
 
 
 def build_alacritty_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
-                         tint_hex: str | None = None) -> list[str]:
+                         tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
     argv = render_spec(_LINUX_TERMINALS[1], cls=window_class(slug), title=window_title(slug),
                        inner=_inner_exec(slug, program, keep_open=keep_open, workdir=workdir,
-                                         tint_hex=tint_hex))
+                                         tint_hex=tint_hex, args=args))
     if keep_open:  # alacritty also holds the window if the inner command somehow fails to exec
         argv.insert(argv.index("-e"), "--hold")
     return argv
@@ -281,9 +290,11 @@ def _tint_hex(slug: str) -> str | None:
     return config.project_tint(slug) if _safe_settings().terminal_tint else None
 
 
-def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "") -> subprocess.Popen:
+def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
+          args: tuple[str, ...] = ()) -> subprocess.Popen:
     """Launch a detached terminal window. ``program`` is typically 'bash' or 'claude'."""
-    argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=_tint_hex(slug))
+    argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=_tint_hex(slug),
+                      args=args)
     return subprocess.Popen(
         argv,
         start_new_session=True,
@@ -330,13 +341,26 @@ def claude_already_running(slug: str) -> bool:
     return cp.returncode == 0
 
 
+def claude_model_args(slug: str) -> tuple[str, ...]:
+    """The ``--model`` argv for the project's claude-model pin (registry ``claude_model``), or ``()``.
+
+    Read fresh from the registry like ``launch_workdir``; fails OPEN (no flag — claude's own
+    default) for an unknown/malformed project so a registry hiccup can't block opening claude
+    (corrupt TOML raises ``TOMLDecodeError``, not ``ValidationError`` — both count)."""
+    try:
+        model = projects.load(slug).claude_model
+    except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError, OSError):
+        return ()
+    return ("--model", model) if model else ()
+
+
 def spawn_claude(slug: str) -> subprocess.Popen:
     if claude_already_running(slug):
         raise RuntimeError(
             f"claude is already running in {slug!r} — one claude per container (a second races "
             f"on .claude.json/session writes). Use the existing window, or open a shell instead."
         )
-    return spawn(slug, "claude", workdir=launch_workdir(slug))
+    return spawn(slug, "claude", workdir=launch_workdir(slug), args=claude_model_args(slug))
 
 
 # ---------------------------------------------------------------------------

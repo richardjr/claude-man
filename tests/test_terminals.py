@@ -77,6 +77,36 @@ class TerminalWorkdirTest(unittest.TestCase):
         self.assertLess(argv.index("--hold"), argv.index("-e"))
 
 
+class ClaudeModelArgvTest(unittest.TestCase):
+    """The claude-model pin reaches the claude launch as ``--model <ref>`` argv (launch-time only)."""
+
+    def test_keep_open_carries_model_args(self) -> None:
+        argv = terminals.build_ghostty_argv("demo", "claude", workdir="/workspace",
+                                            args=("--model", "claude-fable-5"))
+        self.assertIn("claude-man-demo claude --model claude-fable-5; exec bash", " ".join(argv))
+
+    def test_bracket_ref_is_shell_quoted(self) -> None:
+        # `[1m]` is a glob character class — unquoted inside `bash -lc` it could pathname-expand
+        # against a matching filename instead of reaching claude literally.
+        cmd = terminals._inner_exec("demo", "claude", keep_open=True, workdir="",
+                                    args=("--model", "claude-sonnet-5[1m]"))[-1]
+        self.assertIn("--model 'claude-sonnet-5[1m]'", cmd)
+
+    def test_direct_exec_splices_args(self) -> None:
+        argv = terminals._inner_exec("demo", "claude", keep_open=False, workdir="",
+                                     args=("--model", "opus"))
+        self.assertEqual(argv[-3:], ["claude", "--model", "opus"])
+
+    def test_no_args_is_the_unchanged_default(self) -> None:
+        # No pin → byte-identical argv to the pre-feature shape (projects default to no --model).
+        self.assertEqual(
+            terminals._inner_exec("demo", "claude", keep_open=True, workdir=""),
+            terminals._inner_exec("demo", "claude", keep_open=True, workdir="", args=()),
+        )
+        cmd = terminals._inner_exec("demo", "claude", keep_open=True, workdir="")[-1]
+        self.assertIn("claude-man-demo claude; exec bash", cmd)
+
+
 class WindowIdentityTest(unittest.TestCase):
     """The project-identity cue on spawned windows (telling parallel project terminals apart): the
     claude/nvim window bypasses the container bashrc, so its keep-open wrapper stamps the OSC title

@@ -847,6 +847,13 @@ def recreate(
             return _lock_error(slug, exc)
 
     runner.remove(slug)  # rm -f; idempotent if the container is absent
+    if not project.model:
+        # Recreating into a NON-hybrid state: drop any gateway sidecar + network left from a previous
+        # hybrid life (the local-pin unpin/displacement paths recreate through here; `up` only ever
+        # brings the gateway UP). Best-effort + idempotent — a plain no-op for the common never-hybrid
+        # recreate. Placed after the agent rm so the network rm succeeds (teardown's contract); the
+        # same explicit-teardown-with-recreate shape as set_egress's unlock path below.
+        gateway.teardown(slug)
     seed_mod.seed_project_config(
         project, profile, overwrite_identity=bool(switching or conflict or force)
     )

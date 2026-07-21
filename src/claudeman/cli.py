@@ -174,7 +174,10 @@ def cmd_profile_seed(args) -> int:
 # --------------------------------------------------------------------------
 def cmd_project_status(args) -> int:
     defined = [
-        (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model)
+        # MODEL shows the project's one model choice: the local hybrid pin or the claude --model
+        # pin (mutually exclusive in the schema). Display hint only — a bare local name is legal,
+        # so the cell doesn't encode the kind; `project model show <slug>` does.
+        (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model)
         for p in projects.list_projects()
     ]
     rows = status.join(defined, status.query_containers())
@@ -857,9 +860,31 @@ def cmd_project_model_set(args) -> int:
     if not projects.exists(args.slug):
         print(f"no project {args.slug!r}", file=sys.stderr)
         return 1
+    if args.claude and args.ref:
+        print("give either a local <ref> (an ollama tag) or --claude <model>, not both",
+              file=sys.stderr)
+        return 1
+    if args.claude:
+        # A claude --model pin is LAUNCH-time argv only (terminals.spawn_claude) — no recreate, no
+        # container change, and no egress restriction (no gateway sidecar involved).
+        had_local = projects.load(args.slug).model
+        try:
+            updated = projects.set_claude_model(args.slug, args.claude)
+        except Exception as exc:  # noqa: BLE001 - a malformed ref is operator error, surface it
+            print(f"invalid model: {exc}", file=sys.stderr)
+            return 1
+        note = (" (local pin cleared — recreate to drop the gateway: "
+                f"claudemanctl project recreate {args.slug})") if had_local else ""
+        print(f"{args.slug}: claude model pinned to {updated.claude_model} — applies at the next "
+              f"claude launch (claudemanctl project claude {args.slug}){note}")
+        return 0
+    if not args.ref:
+        print("give a local <ref> (an ollama tag) or --claude <model>", file=sys.stderr)
+        return 1
+    before = projects.load(args.slug)
     # Locked + hybrid is refused at `up` (ROADMAP 9c); reject it here so the registry can't be put into
     # a state every start refuses (set_model enforces the same — this is the clean operator message).
-    if args.ref and projects.load(args.slug).egress == "strict":
+    if before.egress == "strict":
         print(f"{args.slug} is locked (strict egress) — locked + hybrid local-model isn't supported "
               f"yet (ROADMAP 9c); `claudemanctl project unlock {args.slug}` first", file=sys.stderr)
         return 1
@@ -868,7 +893,8 @@ def cmd_project_model_set(args) -> int:
     except Exception as exc:  # noqa: BLE001 - a malformed ref is operator error, surface it
         print(f"invalid model: {exc}", file=sys.stderr)
         return 1
-    print(f"{args.slug}: hybrid model pinned to {updated.model} (+ claude.ai passthrough) — "
+    note = f" (claude model pin {before.claude_model!r} cleared)" if before.claude_model else ""
+    print(f"{args.slug}: hybrid model pinned to {updated.model} (+ claude.ai passthrough){note} — "
           f"recreate to apply: claudemanctl project recreate {args.slug}")
     return 0
 
@@ -877,8 +903,15 @@ def cmd_project_model_clear(args) -> int:
     if not projects.exists(args.slug):
         print(f"no project {args.slug!r}", file=sys.stderr)
         return 1
-    projects.set_model(args.slug, "")
-    print(f"{args.slug}: hybrid mode off (subscription-direct) — recreate to apply")
+    p = projects.load(args.slug)
+    if p.model:
+        projects.set_model(args.slug, "")
+        print(f"{args.slug}: hybrid mode off (subscription-direct) — recreate to apply")
+    elif p.claude_model:
+        projects.set_claude_model(args.slug, "")
+        print(f"{args.slug}: claude model pin cleared — claude launches with its default model again")
+    else:
+        print(f"{args.slug}: no model pin set")
     return 0
 
 
@@ -889,8 +922,12 @@ def cmd_project_model_show(args) -> int:
     p = projects.load(args.slug)
     if p.model:
         print(f"{args.slug}: hybrid — local model {p.model} (+ claude.ai passthrough via gateway)")
+    elif p.claude_model:
+        print(f"{args.slug}: claude model {p.claude_model} (launched as `claude --model "
+              f"{p.claude_model}`; subscription-direct)")
     else:
-        print(f"{args.slug}: subscription-direct (no local model; `project model set {args.slug} <ref>`)")
+        print(f"{args.slug}: subscription-direct, claude's default model "
+              f"(`project model set {args.slug} <ollama-tag>` or `--claude <model>`)")
     return 0
 
 
@@ -1501,15 +1538,21 @@ def build_parser() -> argparse.ArgumentParser:
     pkd = pkp.add_parser("defaults", help="re-apply the library defaults for the project's language")
     pkd.add_argument("slug", type=_slug_arg)
     pkd.set_defaults(func=cmd_project_packs_defaults)
-    # project model (Phase 9 — the per-project hybrid local-model pin; recreate to apply)
+    # project model (the per-project model pin: a local ollama tag → hybrid mode (Phase 9;
+    # recreate to apply), or --claude <ref> → `claude --model` at launch (no recreate))
     pmd = proj.add_parser(
-        "model", help="per-project hybrid local-model pin (recreate to apply; docs/MODELS.md)"
+        "model", help="per-project model pin: local ollama tag (hybrid; recreate to apply) or "
+                      "--claude <model> (claude --model at launch; docs/MODELS.md)"
     ).add_subparsers(dest="modelcmd", required=True)
-    pms = pmd.add_parser("set", help="pin a local model (an ollama tag) → hybrid mode on")
+    pms = pmd.add_parser(
+        "set", help="pin a local model (an ollama tag → hybrid mode on) or, with --claude, a "
+                    "claude model to launch claude with (--model; applies at the next launch)")
     pms.add_argument("slug", type=_slug_arg)
-    pms.add_argument("ref")
+    pms.add_argument("ref", nargs="?", default="", help="a local model (an ollama tag)")
+    pms.add_argument("--claude", metavar="MODEL", default="",
+                     help="a claude model id/alias (e.g. claude-fable-5, opus) instead of a local tag")
     pms.set_defaults(func=cmd_project_model_set)
-    pmc = pmd.add_parser("clear", help="clear the pin → subscription-direct")
+    pmc = pmd.add_parser("clear", help="clear the pin → claude's own default, subscription-direct")
     pmc.add_argument("slug", type=_slug_arg)
     pmc.set_defaults(func=cmd_project_model_clear)
     pmsh = pmd.add_parser("show", help="show the project's model backend")

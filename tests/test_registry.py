@@ -166,6 +166,44 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(p.model, "qwen3-coder:30b")
         self.assertEqual(projects.load("openp").model, "qwen3-coder:30b")
 
+    def test_save_roundtrips_claude_model(self) -> None:
+        # save() enumerates fields explicitly — a field it doesn't know about would be silently
+        # DROPPED on the next full save, losing the pin.
+        projects.save(Project(slug="cmsave", claude_model="opus"))
+        self.assertEqual(projects.load("cmsave").claude_model, "opus")
+
+    def test_set_claude_model_roundtrip_and_locked_ok(self) -> None:
+        # A claude --model pin is LAUNCH-time argv only (spawn_claude) — no gateway sidecar, so a
+        # LOCKED project may pin it, unlike the local hybrid pin above.
+        projects.save(Project(slug="cm", egress="strict"))
+        p = projects.set_claude_model("cm", "claude-fable-5")
+        self.assertEqual(p.claude_model, "claude-fable-5")
+        self.assertEqual(projects.load("cm").claude_model, "claude-fable-5")
+        projects.set_claude_model("cm", "")  # clearing drops the key entirely
+        self.assertEqual(projects.load("cm").claude_model, "")
+        self.assertNotIn("claude_model",
+                         (Path(self.tmp.name) / "projects" / "cm.toml").read_text())
+        with self.assertRaises(ValidationError):
+            projects.set_claude_model("cm", "bad model!")
+        with self.assertRaises(ValidationError):
+            projects.set_claude_model("cm", "name:tag")  # a colon is the ollama-tag shape
+
+    def test_model_pins_are_mutually_exclusive(self) -> None:
+        # One model choice per project: setting either pin displaces the other; clearing one
+        # leaves the other alone. Both-set is rejected at the schema.
+        projects.save(Project(slug="mx", egress="open"))
+        projects.set_model("mx", "qwen3-coder:30b")
+        p = projects.set_claude_model("mx", "opus")        # claude pin displaces the local pin
+        self.assertEqual((p.model, p.claude_model), ("", "opus"))
+        self.assertEqual(projects.load("mx").model, "")
+        p = projects.set_model("mx", "qwen3-coder:30b")    # ...and the local pin displaces back
+        self.assertEqual((p.model, p.claude_model), ("qwen3-coder:30b", ""))
+        projects.set_claude_model("mx", "opus")
+        p = projects.set_model("mx", "")                   # clearing an unset local pin: no-op
+        self.assertEqual((p.model, p.claude_model), ("", "opus"))
+        with self.assertRaises(ValidationError):
+            Project(slug="both", model="qwen3-coder:30b", claude_model="opus")
+
     def test_set_allowlist_patches_clears_and_keeps_comments(self) -> None:
         commented = (
             '[project]\n'

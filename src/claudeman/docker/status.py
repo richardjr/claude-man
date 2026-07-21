@@ -52,7 +52,8 @@ class Row:
     repos: str
     version: str
     status_text: str
-    model: str = ""      # the registry local-model pin ("" = subscription-direct); hybrid badge
+    model: str = ""      # the registry model pin: a local ollama tag (hybrid badge) OR a claude
+    #                      --model ref — mutually exclusive in the schema ("" = default)
 
 
 def query_containers() -> dict[str, ContainerStatus]:
@@ -106,7 +107,8 @@ def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
 
     ``defined_slugs`` is an iterable of (slug, profile, egress, repos_count, model) tuples
     from the registry, so DEFINED projects with no container still appear. ``model`` is the
-    registry-only local-model pin (no docker label carries it) — registry-sourced like profile/egress.
+    registry-only model pin — the local hybrid tag or the claude --model ref, whichever is set
+    (no docker label carries it) — registry-sourced like profile/egress.
     """
     rows: list[Row] = []
     seen: set[str] = set()
