@@ -916,9 +916,13 @@ class ClaudeManApp(App):
         self.push_screen(LogsScreen(slug))
 
     def on_data_table_row_selected(self, event) -> None:
-        # Enter on a row opens a shell. The app-level `enter` binding is shadowed by DataTable's
-        # own Enter -> RowSelected handling, so we act on the message instead (review TUI-3).
-        self.action_open_shell()
+        # Enter on a projects row opens a shell. The app-level `enter` binding is shadowed by
+        # DataTable's own Enter -> RowSelected handling, so we act on the message instead (TUI-3).
+        # Filter to #projects: RowSelected bubbles here from EVERY screen's DataTable — modal
+        # screens block bindings, not message bubbling — so without the guard, selecting a row in
+        # any modal picker (Model…, Packs…, Sync review, …) also spawned a shell underneath.
+        if getattr(event, "data_table", None) is not None and event.data_table.id == "projects":
+            self.action_open_shell()
 
     def action_refresh_usage(self) -> None:
         self.refresh_usage()
