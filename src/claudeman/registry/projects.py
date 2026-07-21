@@ -120,6 +120,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         language=str(proj.get("language", "") or ""),
         packs=tuple(proj.get("packs", []) or ()),
         model=str(proj.get("model", "") or ""),
+        claude_model=str(proj.get("claude_model", "") or ""),
     )
 
 
@@ -174,6 +175,8 @@ def save(project: Project) -> Path:
         proj["packs"] = list(project.packs)
     if project.model:
         proj["model"] = project.model
+    if project.claude_model:
+        proj["claude_model"] = project.claude_model
     if project.claude_version:
         proj["claude_version"] = project.claude_version
     if project.workdir:
@@ -509,7 +512,9 @@ def set_model(slug: str, model: str) -> Project:
 
     Comment-preserving scalar patch, atomic write. SHAPE is validated via the dataclass; the model's
     existence in Ollama is the caller's concern (the CLI can warn). Recreate-to-apply (the gateway
-    sidecar + the agent's hybrid env are fixed at create), like the overlay/egress switch."""
+    sidecar + the agent's hybrid env are fixed at create), like the overlay/egress switch. Setting a
+    local model displaces any claude ``--model`` pin (one model choice per project); clearing leaves
+    a claude pin alone."""
     try:
         import tomlkit
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
@@ -525,13 +530,47 @@ def set_model(slug: str, model: str) -> Project:
             f"{slug} is locked (strict egress) — locked + hybrid local-model isn't supported yet "
             f"(ROADMAP 9c); unlock the project first"
         )
-    updated = dataclasses.replace(project, model=model)  # ValidationError on a malformed ref
+    updated = dataclasses.replace(  # ValidationError on a malformed ref
+        project, model=model, claude_model="" if model else project.claude_model)
     path = config.project_toml_path(slug)
     doc = tomlkit.parse(path.read_text())
     proj = doc["project"]
     if updated.model:
         proj["model"] = updated.model
     elif "model" in proj:
+        del proj["model"]
+    if model and "claude_model" in proj:
+        del proj["claude_model"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
+def set_claude_model(slug: str, model: str) -> Project:
+    """Set (or clear, with ``""``) the project's claude ``--model`` PIN — which model the
+    in-container claude is LAUNCHED with (``terminals.spawn_claude`` appends ``--model <ref>``).
+
+    Comment-preserving scalar patch, atomic write. SHAPE is validated via the dataclass; whether the
+    account is entitled to the model is claude's own concern at launch. Applies at the NEXT claude
+    launch — no recreate, no container change (the hardened floor and env are untouched), and no
+    egress restriction (unlike the local pin there is no gateway sidecar, so a LOCKED project may
+    pin a claude model). Setting one displaces any local pin (one model choice per project) — the
+    caller should recreate afterwards when that happens, to tear the now-unused gateway down."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(  # ValidationError on a malformed ref
+        project, claude_model=model, model="" if model else project.model)
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if updated.claude_model:
+        proj["claude_model"] = updated.claude_model
+    elif "claude_model" in proj:
+        del proj["claude_model"]
+    if model and "model" in proj:
         del proj["model"]
     _atomic_write(path, tomlkit.dumps(doc))
     return updated

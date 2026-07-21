@@ -19,6 +19,11 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # An ollama model ref: ``name[:tag]`` (namespaced ``ns/name`` allowed). SHAPE-only — a since-removed
 # model still loads (the gateway reports it, like a since-removed pack).
 _MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*(:[a-z0-9][a-z0-9._-]*)?$", re.IGNORECASE)
+# A claude ``--model`` ref: a bare alias (``opus``) or a full id (``claude-fable-5``), optionally
+# with a bracket variant suffix (``claude-sonnet-5[1m]``). SHAPE-only — whether the account is
+# entitled to the model is claude's own concern at launch. No colon (that's the ollama-tag shape)
+# and no whitespace/shell metacharacters (the ref reaches a shell string, shlex-quoted).
+_CLAUDE_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*(\[[a-z0-9]+\])?$", re.IGNORECASE)
 
 
 class ValidationError(ValueError):
@@ -399,6 +404,11 @@ class Project:
     model: str = ""                      # Phase 9 local-model PIN (an ollama tag). "" = subscription-direct;
     #                                      set = HYBRID mode (gateway sidecar fronts claude.ai passthrough
     #                                      + this local model in the /model picker). docs/MODELS.md, issue #14
+    claude_model: str = ""               # claude --model PIN (an id/alias like "claude-fable-5" / "opus").
+    #                                      "" = claude's own default. Applied at LAUNCH (spawn_claude argv)
+    #                                      only — no container change, no recreate, floor untouched; works
+    #                                      on locked projects (no gateway). Mutually exclusive with `model`
+    #                                      (one model choice per project).
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
@@ -426,6 +436,16 @@ class Project:
         if self.model and not _MODEL_RE.match(self.model):
             raise ValidationError(
                 f"invalid model {self.model!r}: must be an ollama tag like 'qwen3-coder:30b'"
+            )
+        if self.claude_model and not _CLAUDE_MODEL_RE.match(self.claude_model):
+            raise ValidationError(
+                f"invalid claude_model {self.claude_model!r}: must be a claude model id/alias "
+                f"like 'claude-fable-5' or 'opus'"
+            )
+        if self.model and self.claude_model:
+            raise ValidationError(
+                "model and claude_model are mutually exclusive — a project has one model choice "
+                "(a local ollama pin OR a claude --model pin)"
             )
         for k in config.SCRUBBED_ENV_KEYS:
             if k in self.env:

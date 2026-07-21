@@ -92,8 +92,9 @@ validation (SEC-6) are DONE (2026-06-10). **Phase 8 (dev environment —
 [`docs/DEVENV.md`](docs/DEVENV.md)): LANDED 2026-06-15** (curated baked bash + the baked neovim +
 the shell-open banner + opt-in persistent shell history). **Phase 9 (hybrid gateway + local-model
 management — [`docs/MODELS.md`](docs/MODELS.md)): LANDED** (`models/`, `network/gateway.py`, the
-`model` CLI verbs, the TUI Models screen + the Project… → Model (local)… pin; the 9c locked-hybrid
-air-gap stays open). The **terraform overlay** (terraform + packer + AWS CLI v2). The **TUI profile
+`model` CLI verbs, the TUI Models screen + the Project… → Model… pin — since extended with the
+CLAUDE-model launch pin (`Project.claude_model` → `claude --model` argv, no recreate); the 9c
+locked-hybrid air-gap stays open). The **terraform overlay** (terraform + packer + AWS CLI v2). The **TUI profile
 switcher** (Project… → `f` — `profilesview.py` + the `profile_select`/`profile_switch_confirm`
 screens). **Packaging/0.1.0** (self-contained wheel + CHANGELOG).
 
@@ -391,8 +392,9 @@ hard-error in Ollama). The hybrid switch is `Project.model` (an ollama tag) pres
 pinned BY DIGEST. **Still open:** `ANTHROPIC_DEFAULT_HAIKU_MODEL` match-to-primary (background stays Claude
 passthrough), LOCKED+hybrid air-gap (9c), and the optional custom passthrough front (header fidelity +
 smaller OAuth blast radius — see `docs/issue-14-hybrid-passthrough-protocol.md`). The **TUI pin landed**:
-Project… → Model (local)… (`m`) sets/clears `Project.model` (set_model + recreate, off-thread), and a
-**Model** column surfaces each project's pin so hybrid mode is never silent.
+Project… → Model… (`m`) sets/clears `Project.model` (set_model + recreate, off-thread) — the same
+picker now also carries the claude `--model` launch pin (`Project.claude_model`, registry-only) — and
+a **Model** column surfaces each project's pin so neither mode is ever silent.
 
 - [x] **9a (spike):** validate ONE per-project gateway sidecar that PASSES THROUGH the claude.ai login for `claude-*`/`anthropic-*` ids (forwarding `Authorization` + `anthropic-beta`, subscription billing intact) AND translates `local-*` ids to a host Ollama/vLLM, exposing both via `/v1/models` for `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. Confirm a mid-session `/model` switch works and the latest Claude ids appear with no config edit (wildcard route). Pinned LiteLLM image, else a thin custom front if one daemon can't cleanly do passthrough-Claude + translate-local + unified discovery
 - [x] **9-models (dynamic model framework):** an Ollama-backed model-management layer — `claudemanctl model list/add/update/rm/show/presets` (+ TUI) wrapping the host Ollama HTTP API (`/api/tags`, `/api/pull` with streamed progress, `/api/delete`, `/api/show`, `/api/version`) so the operator installs/updates local models (reference: Qwen3-Coder) without leaving claude-man; a `models/` package with a provider-shaped backend seam (Ollama now, vLLM later) feeding the gateway's local route. Update = re-pull tag + digest compare

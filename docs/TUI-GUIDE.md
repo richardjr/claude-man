@@ -65,8 +65,9 @@ The main screen, top to bottom:
 
 - **Projects table** — `Project · Status · Profile · Egress · Model · Repos · Version · Detail`.
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);
-  it's polled fresh every 10 s, never cached. **Model** is the per-project local-model pin
-  (`-` = subscription-direct — see *Model (local)…* in section 8). The Repos cell becomes a live git summary
+  it's polled fresh every 10 s, never cached. **Model** is the per-project model pin — a local
+  (hybrid) tag or a claude `--model` ref, whichever is set (`-` = default — see *Model…* in
+  section 8). The Repos cell becomes a live git summary
   once the 30 s fetch-less scan has run — an aggregate per-flag rollup across the project's
   repos (e.g. `4 ✓`, or `1 ✓  2 ⚠  1 ~` = 1 clean, 2 off-branch, 1 dirty), with the per-repo
   breakdown in the Repos detail panel. Glyphs: `✓` clean · `⚠` off-branch/detached · `~` dirty ·
@@ -100,7 +101,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model (local)… · `f` Profile… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -322,13 +323,14 @@ outlived the library).
   `g` → `r` first if you want certainty.
 - `p` → `r` recreates the container — the apply step for everything stamped at create time:
   env mounts, ports, git identity, GH token. The Project… pickers — `f` Profile…, `i` Overlay
-  (image)…, `m` Model (local)… (below) — each apply themselves via their own recreate, so no
-  separate `r` is needed after a pick; the CLI forms remain valid
+  (image)…, `m` Model… (below) — apply themselves, so no separate `r` is needed after a pick
+  (profile/overlay/local-model picks via their own recreate; a claude-model pick is
+  registry-only and needs none); the CLI forms remain valid
   (`claudemanctl project recreate <slug> --profile <other>` for an account switch —
   mismatch-guarded — or `--overlay <other>` for an image switch).
 
-**Switch account, image, or local model (`p` → `f` / `i` / `m`)** — three pickers in the
-Project… menu. Each persists the choice and recreates the container itself — no manual
+**Switch account, image, or model (`p` → `f` / `i` / `m`)** — three pickers in the
+Project… menu. Each persists the choice and applies it itself — no manual
 `p` → `r` afterwards:
 
 - **`f` Profile…** — switch the project to another account profile. The picker lists the
@@ -339,11 +341,15 @@ Project… menu. Each persists the choice and recreates the container itself —
 - **`i` Overlay (image)…** — switch the project's image variant (base / python / rust / node /
   python-node / terraform). A missing image is built first (streamed to the log pane), then
   the container is recreated on it.
-- **`m` Model (local)…** — the hybrid-mode pin ([`docs/MODELS.md`](MODELS.md) for the
-  background and host-Ollama setup): pick an installed model to pin (the gateway sidecar
-  comes up on the recreate), the *subscription-direct* row to unpin, or type a raw ollama tag
-  (a model not yet pulled, or an offline daemon). Pinning is **refused on a locked
-  (strict-egress) project** — unlock first; unpinning stays allowed.
+- **`m` Model…** — the project's one model choice ([`docs/MODELS.md`](MODELS.md) for the
+  background), in one list: the curated **claude** models (picked → the next `c` launches
+  `claude --model <ref>`; registry-only, **no recreate**, allowed on locked projects), the
+  installed **local** (Ollama) models (picked → hybrid mode; the gateway sidecar comes up on
+  the recreate), a *default* row to unpin, and a raw input (a claude id/alias or an ollama
+  tag — a model not yet pulled, or an offline daemon). Setting either kind displaces the
+  other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
+  **local** model is **refused on a locked (strict-egress) project** — unlock first;
+  claude picks and unpinning stay allowed when locked.
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams

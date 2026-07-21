@@ -332,8 +332,9 @@ uv run claudemanctl project model clear web                # back to subscriptio
 ```
 
 **TUI:** `m` (global) opens the **Models** screen to install/update/remove models; select a project →
-`p` → `m` (**Model (local)…**) to pin/unpin — the pick applies itself (persisted + an automatic
-recreate; no manual recreate needed).
+`p` → `m` (**Model…**) to pin/unpin — the pick applies itself (persisted + an automatic recreate for
+a local pick; a **claude**-model pick from the same list is registry-only and just changes what the
+next `c` launches, `claude --model <ref>`).
 
 ---
 

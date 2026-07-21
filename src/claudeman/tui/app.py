@@ -152,7 +152,7 @@ class ClaudeManApp(App):
         ("p", "Packs…", "packs"),
         ("g", "Egress…", "egress"),
         ("i", "Overlay (image)…", "overlay"),
-        ("m", "Model (local)…", "model_pin"),
+        ("m", "Model…", "model_pin"),
         ("f", "Profile…", "profile"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
@@ -293,7 +293,11 @@ class ClaudeManApp(App):
     # -- data -------------------------------------------------------------
     def _rows(self) -> list[status.Row]:
         defined = [
-            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model)
+            # The Model cell shows the project's one model choice: the local hybrid pin or the
+            # claude --model pin (mutually exclusive in the schema). The cell is a display hint,
+            # not a parser — claude refs never carry a colon, ollama tags usually do, but a bare
+            # local name ("devstral") is legal; `project model show` names the kind exactly.
+            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -1300,18 +1304,28 @@ class ClaudeManApp(App):
             res = lifecycle.Result(False, f"overlay change failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
-    # -- model (local hybrid pin) -----------------------------------------
+    # -- model (claude --model pin / local hybrid pin) ---------------------
     def action_model_pin(self) -> None:
         slug = self._current_slug()
         if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
             self._log("[red]model: select a defined project (orphan rows aren't managed)[/]")
             return
-        current = projects.load(slug).model
-        self._log(f"pinning a local model for {slug} (recreates to apply; needs host Ollama)")
-        self.push_screen(ModelPinScreen(slug, current), lambda ref: self._on_model_pin(slug, ref))
+        p = projects.load(slug)
+        self._log(f"picking a model for {slug} (claude --model applies at the next launch; "
+                  f"a local pin recreates + needs host Ollama)")
+        self.push_screen(ModelPinScreen(slug, p.model, p.claude_model),
+                         lambda ref: self._on_model_pin(slug, ref))
 
     def _on_model_pin(self, slug: str, ref) -> None:
-        if ref is None:  # cancelled, or picked the current pin — nothing to recreate
+        if ref is None:  # cancelled, or picked the current choice — nothing to apply
+            return
+        if isinstance(ref, str) and ref.startswith(ModelPinScreen.CLAUDE):
+            self._apply_claude_model(slug, ref[len(ModelPinScreen.CLAUDE):])
+            return
+        current = projects.load(slug)
+        if ref == ModelPinScreen.CLEAR and not current.model:
+            # No local pin to tear down — clearing (at most) a claude pin is a registry-only edit.
+            self._apply_claude_model(slug, "")
             return
         model = "" if ref == ModelPinScreen.CLEAR else ref
         # Locked + hybrid is refused at `up` (ROADMAP 9c). Guard BEFORE persist/recreate: otherwise
@@ -1319,24 +1333,69 @@ class ClaudeManApp(App):
         # only for up() to refuse the restart — a healthy container destroyed by one keystroke. Unpin
         # (model == "") stays allowed. (registry.set_model enforces the same, this is the clean-message
         # front so the operator never sees a half-applied failure.)
-        if model and projects.load(slug).egress == "strict":
+        if model and current.egress == "strict":
             self._log(f"[red]model: {slug} is locked (strict egress) — locked + hybrid isn't supported "
                       f"yet (ROADMAP 9c); unlock it first (Project… → Egress…)[/]")
             return
         if not self._reserve(slug, "model"):
             return
         desc = "subscription-direct" if model == "" else f"local model {model!r}"
-        self._log(f"switching {slug} to {desc} (recreating to apply) …")
+        displaced = " (displacing the claude model pin)" if model and current.claude_model else ""
+        self._log(f"switching {slug} to {desc}{displaced} (recreating to apply) …")
         self._model_pin_worker(slug, model)
 
-    @work(thread=True, group="create")
-    def _model_pin_worker(self, slug: str, model: str) -> None:
-        """Apply a local-model pin off the UI thread: persist the registry pin, then recreate (the
-        gateway sidecar comes up/down at the container boundary). set_model validates the tag SHAPE
-        before writing, so a malformed raw tag surfaces here as a failure and never recreates. Mirrors
-        the overlay/egress workers."""
+    def _apply_claude_model(self, slug: str, model: str) -> None:
+        """Apply a claude ``--model`` pin (or clear it, ``""``) — a registry-only edit applied at
+        the NEXT claude launch (no recreate, container untouched; works on locked projects). EXCEPT
+        when the pin displaces a local pin: the gateway sidecar must come down, so that path runs
+        the same reserve-then-worker flow as a local pick (persist happens IN the worker, after the
+        reservation — a busy slug refuses cleanly with nothing half-applied). The registry-only path
+        also refuses while a worker is in flight: a recreate/egress worker does a wholesale
+        ``projects.save`` of a Project it loaded earlier, which would silently clobber a pin written
+        under it (lost update)."""
+        if slug in self._busy:  # never write under an in-flight lifecycle worker (UI-thread state)
+            self._log(f"[yellow]{slug}: model change skipped — an operation is already running; "
+                      f"pick again when it finishes[/]")
+            return
         try:
-            projects.set_model(slug, model)
+            had_local = bool(projects.load(slug).model)
+        except Exception as exc:  # noqa: BLE001 - registry hiccup: surface, don't crash the handler
+            self._log(f"[red]model: {exc}[/]")
+            return
+        if had_local and model:
+            # Displacement: reserve BEFORE any persist (mirrors the local flow) — the worker
+            # persists the pin, recreates, and lifecycle.recreate tears the gateway down.
+            if not self._reserve(slug, "model"):
+                return
+            self._log(f"{slug}: pinning claude model {model} (displaces the local pin — "
+                      f"recreating to drop the gateway) …")
+            self._model_pin_worker(slug, model, claude=True)
+            return
+        try:
+            projects.set_claude_model(slug, model)
+        except Exception as exc:  # noqa: BLE001 - a malformed raw ref is operator error, surface it
+            self._log(f"[red]model: {exc}[/]")
+            return
+        if model:
+            self._log(f"{slug}: claude model pinned to {model} — applies at the next claude "
+                      f"launch ([b]c[/b])")
+        else:
+            self._log(f"{slug}: model pin cleared — claude launches with its default model")
+        self.refresh_projects()
+
+    @work(thread=True, group="create")
+    def _model_pin_worker(self, slug: str, model: str, *, claude: bool = False) -> None:
+        """Apply a model pin off the UI thread: persist the registry pin, then recreate (the gateway
+        sidecar comes up — or, recreating into a non-hybrid state, is torn down — at the container
+        boundary). ``claude=True`` persists a claude ``--model`` pin instead (the displacement path:
+        setting it clears the local pin, and the recreate drops the now-unused gateway). The setters
+        validate the ref SHAPE before writing, so a malformed raw ref surfaces here as a failure and
+        never recreates. Mirrors the overlay/egress workers."""
+        try:
+            if claude:
+                projects.set_claude_model(slug, model)
+            else:
+                projects.set_model(slug, model)
             res = lifecycle.recreate(slug, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"model pin failed for {slug!r}: {exc!r}")

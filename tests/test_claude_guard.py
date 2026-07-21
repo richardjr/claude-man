@@ -49,7 +49,8 @@ class SpawnGuardTest(unittest.TestCase):
 
     def test_spawns_when_no_claude_live(self) -> None:
         with mock.patch.object(terminals, "claude_already_running", lambda slug: False), \
-                mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace/x"):
+                mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace/x"), \
+                mock.patch.object(terminals, "claude_model_args", lambda slug: ()):
             terminals.spawn_claude("demo")
         self.assertEqual(self._spawned, [("demo", "claude")])
 
@@ -60,6 +61,40 @@ class SpawnGuardTest(unittest.TestCase):
                 mock.patch.object(terminals, "launch_workdir", lambda slug: ""):
             terminals.spawn_shell("demo")
         self.assertEqual(self._spawned, [("demo", "bash")])
+
+
+class ClaudeModelPinTest(unittest.TestCase):
+    """spawn_claude carries the project's claude-model pin as ``--model`` argv (fail-open)."""
+
+    def test_pin_becomes_model_flag(self) -> None:
+        with mock.patch.object(terminals.projects, "load",
+                               lambda slug: mock.Mock(claude_model="claude-fable-5")):
+            self.assertEqual(terminals.claude_model_args("demo"),
+                             ("--model", "claude-fable-5"))
+
+    def test_no_pin_no_flag(self) -> None:
+        with mock.patch.object(terminals.projects, "load",
+                               lambda slug: mock.Mock(claude_model="")):
+            self.assertEqual(terminals.claude_model_args("demo"), ())
+
+    def test_unknown_project_fails_open(self) -> None:
+        # A registry hiccup must never block opening claude — no pin, claude's own default.
+        def _raise(slug):
+            raise FileNotFoundError(slug)
+        with mock.patch.object(terminals.projects, "load", _raise):
+            self.assertEqual(terminals.claude_model_args("demo"), ())
+
+    def test_spawn_claude_passes_pin_args(self) -> None:
+        calls: list[tuple] = []
+        with mock.patch.object(terminals, "spawn",
+                               lambda slug, program, **kw: calls.append((slug, program, kw))), \
+                mock.patch.object(terminals, "claude_already_running", lambda slug: False), \
+                mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace"), \
+                mock.patch.object(terminals, "claude_model_args",
+                                  lambda slug: ("--model", "opus")):
+            terminals.spawn_claude("demo")
+        self.assertEqual(calls, [("demo", "claude",
+                                  {"workdir": "/workspace", "args": ("--model", "opus")})])
 
 
 class ProbeFailOpenTest(unittest.TestCase):

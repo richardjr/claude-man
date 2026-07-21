@@ -451,6 +451,10 @@ uv run claudemanctl project model set demo qwen3-coder:30b   # -> hybrid mode
 uv run claudemanctl project model show demo
 uv run claudemanctl project model clear demo                 # back to subscription-direct
 uv run claudemanctl project recreate demo
+
+# Or pin a CLAUDE model instead (launched as `claude --model <ref>`; applies at the next
+# launch — no recreate, no gateway, allowed on locked projects; one model choice per project):
+uv run claudemanctl project model set demo --claude claude-fable-5   # or: opus / sonnet / haiku
 ```
 
 **Prerequisite:** Ollama runs on the **host** (claude-man manages models, not the server). It needs a

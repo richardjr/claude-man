@@ -232,6 +232,64 @@ class AddEnvVarTest(unittest.TestCase):
         self.assertEqual(lifecycle.projects_registry.load("demo").env_mount, ())
 
 
+class RecreateGatewayTeardownTest(unittest.TestCase):
+    """recreate() into a NON-hybrid state must drop any leftover gateway sidecar+network — the
+    local-pin unpin/displacement paths recreate through here and `up` only ever brings the gateway
+    UP, so without this the sidecar outlives its pin until the next stop/delete. A hybrid recreate
+    must leave the gateway alone (up's ensure_network/ensure_gateway own it)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        (Path(self.cfg.name) / "projects").mkdir(parents=True)
+        (Path(self.cfg.name) / "profiles").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        for k in ("CLAUDE_MAN_CONFIG_HOME", "CLAUDE_MAN_STATE_HOME"):
+            os.environ.pop(k, None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    def _recreate(self, slug: str) -> tuple[lifecycle.Result, list[str], list[str]]:
+        torn: list[str] = []
+        order: list[str] = []
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(lifecycle.runner, "remove",
+                lambda s: order.append("remove")))
+            st.enter_context(mock.patch.object(lifecycle.gateway, "teardown",
+                lambda s: (torn.append(s), order.append("teardown"))))
+            st.enter_context(mock.patch.object(lifecycle.seed_mod, "seed_project_config",
+                lambda *a, **kw: None))
+            st.enter_context(mock.patch.object(lifecycle, "up",
+                lambda p, on_progress=None, rebuild_to="": (order.append("up"),
+                                                            lifecycle.Result(True, "up"))[1]))
+            res = lifecycle.recreate(slug)
+        return res, torn, order
+
+    def test_non_hybrid_recreate_tears_gateway_down(self) -> None:
+        lifecycle.projects_registry.save(Project(slug="plain"))
+        res, torn, order = self._recreate("plain")
+        self.assertTrue(res.ok)
+        self.assertEqual(torn, ["plain"])
+        self.assertEqual(order, ["remove", "teardown", "up"])  # agent gone first, net rm succeeds
+
+    def test_claude_pinned_recreate_tears_gateway_down(self) -> None:
+        # The displacement path: claude pin set, local pin cleared → the recreate drops the sidecar.
+        lifecycle.projects_registry.save(Project(slug="cp", claude_model="claude-fable-5"))
+        res, torn, _ = self._recreate("cp")
+        self.assertTrue(res.ok)
+        self.assertEqual(torn, ["cp"])
+
+    def test_hybrid_recreate_leaves_gateway_to_up(self) -> None:
+        lifecycle.projects_registry.save(Project(slug="hy", model="qwen3-coder:30b"))
+        res, torn, order = self._recreate("hy")
+        self.assertTrue(res.ok)
+        self.assertEqual(torn, [])
+        self.assertEqual(order, ["remove", "up"])
+
+
 class SyncHooksTest(unittest.TestCase):
     """up() syncs assets IN before start; stop() syncs OUT only after a successful stop. Both fold the
     note into the Result and never let a sync fault break start/stop. Seams (runner, ensure_created,

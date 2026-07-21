@@ -7,6 +7,37 @@ the agent's calls to a local model (the `/model`-picker + mid-session switching)
 live (`network/gateway.py`; see "Hybrid mode" and "Status" below, plus [`ROADMAP.md`](../ROADMAP.md)
 Phase 9 and issue #14).
 
+A project has **one model choice**, picked in one place (the TUI **Model…** screen / `project model
+set`), of two kinds — setting either displaces the other:
+
+- a **claude model** (`--claude claude-fable-5`, `--claude opus`, …) — the in-container `claude` is
+  simply *launched* with `--model <ref>`. Registry-only, applies at the next `project claude` /
+  `c`, **no recreate**, no gateway, works on locked projects. See "Claude-model pin" below.
+- a **local (Ollama) model** (`qwen3-coder:30b`, …) — **hybrid mode**: the LiteLLM gateway sidecar
+  fronts claude.ai + the local model on one endpoint. Recreate-to-apply. The rest of this doc.
+
+## Claude-model pin — launching claude with `--model`
+
+By default a project adds no `--model` and claude picks its own default. Pinning a claude model:
+
+```
+project model set <slug> --claude claude-fable-5   # or an alias: opus / sonnet / haiku
+project model show <slug>
+project model clear <slug>                         # back to claude's default
+```
+
+TUI: Project… menu → **Model…** (`m`) — the curated claude rows sit above the local-model list; a raw
+input takes any id/alias (including bracket variants like `claude-sonnet-5[1m]`), disambiguated from
+an ollama tag by shape (`models/claude_models.py::is_claude_ref` — a colon always means ollama).
+
+The pin is **launch-time argv only** (`terminals.spawn_claude` appends `--model <ref>`): the container
+is untouched (hardened floor byte-identical, invariant 2), nothing changes for a running claude, and
+the next launched one picks it up. Entitlement stays claude's concern — pinning a model the account
+lacks errors inside claude, not in claude-man. This is also the practical bypass for the model-picker
+"usage credits" gate that Claude Code shows under setup-token auth (the token "can only make model
+requests", so the picker can't see the seat's plan; actual requests work — verified live with the
+premium-seat Fable 5 tier).
+
 ## Prerequisite: Ollama on the host
 
 claude-man manages **models**, not the model server. Install and run **[Ollama](https://ollama.com)** on
@@ -140,16 +171,19 @@ project model clear <slug>                 # back to subscription-direct
 After `project model set …`, **recreate** the project (`project recreate <slug>`). On `up`, claude-man
 brings up the gateway sidecar (fail-closed) and points the agent's `ANTHROPIC_BASE_URL` at it.
 
-**TUI.** The same pin is available from the projects table: Project… menu (`p`) → **Model (local)…** (`m`).
-The picker lists the host-Ollama installed models, a *subscription-direct* row to unpin, and a raw-tag
-input (to pin a tag that isn't pulled yet, or when the daemon is briefly unreachable). Choosing a model
-persists the pin and recreates the project off-thread (no separate recreate step). A **Model** column in
-the projects table shows each project's current pin (`-` = subscription-direct), so hybrid mode is never
-silent — billing is on the subscription for the Claude tiers and on-host (free) for the local model.
+**TUI.** The same pin is available from the projects table: Project… menu (`p`) → **Model…** (`m`).
+The picker lists the curated claude models (see "Claude-model pin" above), the host-Ollama installed
+models, a *default* row to unpin, and a raw input (to pin a tag that isn't pulled yet, or when the
+daemon is briefly unreachable). Choosing a local model persists the pin and recreates the project
+off-thread (no separate recreate step); choosing a claude model is registry-only (it recreates only
+when it displaces a local pin, to tear the gateway down). A **Model** column in the projects table
+shows each project's current pin (`-` = default), so a pin is never silent — billing is on the
+subscription for the Claude tiers and on-host (free) for the local model.
 
-You **cannot pin a model on a *locked* (strict-egress) project** — locked + hybrid is deferred (ROADMAP
-9c) and refused at `up`, so both the TUI and `project model set` reject it up front (the registry mutator
-enforces it too); `project unlock <slug>` first. Unpinning a locked project is always allowed.
+You **cannot pin a *local* model on a *locked* (strict-egress) project** — locked + hybrid is deferred
+(ROADMAP 9c) and refused at `up`, so both the TUI and `project model set` reject it up front (the
+registry mutator enforces it too); `project unlock <slug>` first. Unpinning a locked project is always
+allowed — and a **claude**-model pin is fine when locked (launch-time argv, no gateway involved).
 
 How the two legs are meant to work:
 - **Local leg.** The local model appears in `/model` as `Local: <model>` (added via
