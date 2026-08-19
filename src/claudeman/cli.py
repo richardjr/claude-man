@@ -1100,6 +1100,7 @@ def cmd_config_show(args) -> int:
     print(f"tui splash: {'on' if s.ui_splash else 'off'}")
     print(f"shell history: {'persistent' if s.shell_persist_history else 'ephemeral'} "
           "(recreate to apply)")
+    print(f"container memory: {s.container_memory} hard cap, no swap (recreate to apply)")
     print(f"ssh auto-load: {'on' if s.ssh_auto_load else 'off'}")
     if not s.ssh_keys:
         print("ssh keys: (none — add with `claudemanctl config ssh add <path>`)")
@@ -1269,6 +1270,27 @@ def cmd_config_terminal_tint(args) -> int:
     s = settings_registry.set_terminal_tint(args.state == "on")
     print(f"terminal tint: {'on' if s.terminal_tint else 'off'} — `recreate` a project to apply "
           "(the tint env is injected at container create)")
+    return 0
+
+
+def cmd_config_memory(args) -> int:
+    from .registry import schema
+    from .registry import settings as settings_registry
+
+    if args.limit is None and not args.default:
+        s = settings_registry.load()
+        print(f"container memory: {s.container_memory} (hard cap — no swap; default "
+              f"{config.DEFAULT_CONTAINER_MEMORY}, minimum 1g)")
+        print("set with `config memory <LIMIT>` (e.g. 16g, 8192m, 1.5g) or `--default`; "
+              "`recreate` a project to apply")
+        return 0
+    try:
+        s = settings_registry.set_container_memory(None if args.default else args.limit)
+    except schema.ValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"container memory: {s.container_memory} hard cap — `recreate` a project to apply "
+          "(the cap is fixed at container create; running containers keep theirs until then)")
     return 0
 
 
@@ -1660,6 +1682,14 @@ def build_parser() -> argparse.ArgumentParser:
                               "projects are distinguishable (default off; recreate to apply)")
     ctt.add_argument("state", nargs="?", choices=("on", "off"))
     ctt.set_defaults(func=cmd_config_terminal_tint)
+    cmem = cfg.add_parser("memory",
+                          help="hard per-container memory cap (--memory/--memory-swap, always applied; "
+                               f"default {config.DEFAULT_CONTAINER_MEMORY}, min 1g; recreate to apply)")
+    cmem.add_argument("limit", nargs="?", metavar="LIMIT",
+                      help="a docker size string, e.g. 16g, 8192m or 1.5g (no arg = show)")
+    cmem.add_argument("--default", action="store_true",
+                      help=f"reset to the {config.DEFAULT_CONTAINER_MEMORY} default")
+    cmem.set_defaults(func=cmd_config_memory)
     cg = cfg.add_parser("git", help="git author identity injected into containers (recreate to apply)")
     cg.add_argument("--name", help="set git user.name (overrides host inherit)")
     cg.add_argument("--email", help="set git user.email")

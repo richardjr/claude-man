@@ -5,7 +5,21 @@ may land in minor versions until 1.0).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Hard per-container memory cap** (issue #29): every `docker create` now renders `--memory X
+  --memory-swap X` beside the fixed hardening flags — part of the floor, never absent. Equal values
+  mean the container gets no swap, so a runaway inside is OOM-killed in its own cgroup instead of
+  starving the host. Default **`16g`**, minimum `1g`; operator-settable via the new global
+  `[container] memory` setting — `claudemanctl config memory [LIMIT|--default]`, the Settings
+  screen (`,` → `m`, inline-validated modal), and shown in `config show`. A hand-edited bad value
+  coerces back to the default at load. Fixed at create → recreate to apply; running containers keep
+  their current (uncapped) profile until recreated. Unit-pinned in `test_docker_argv` (always
+  present, canonicalised, floor byte-identical beside it) and `test_settings`.
+
+### Fixed
+- An in-container runaway (a 30 GB `node` rasterising an SVG) could exhaust host RAM and take out
+  host applications under the kernel's global OOM killer — the sandbox bounded PIDs but not memory
+  (issue #29). Closed by the cap above.
 
 ## [0.1.0] — 2026-06-30
 
