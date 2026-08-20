@@ -338,11 +338,13 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
     # injected as GIT_CONFIG_* env so in-container `git commit` works under the read-only rootfs.
     # terminal_tint (opt-in) injects the per-project OSC-11 background hex so parallel project windows
     # are distinguishable — cosmetic, additive `-e` (floor unchanged; recreate to apply).
+    # container_memory is the HARD per-container memory cap (issue #29) — always rendered as part of the
+    # floor; the operator chooses only the value (default 16g). Fixed at create -> recreate to apply.
     cp = runner.create(project, profile_name=profile_name, token=token,
                        gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
                        git_env=gitconfig.container_env(), version=version,
                        shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header,
-                       tint=settings.terminal_tint)
+                       tint=settings.terminal_tint, memory=settings.container_memory)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 

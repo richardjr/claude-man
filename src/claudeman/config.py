@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,59 @@ CLAUDE_CODE_USER_AGENT = f"claude-code/{DEFAULT_CLAUDE_VERSION}"
 RELEASES_BASE_URL = "https://downloads.claude.ai/claude-code-releases"
 CLAUDE_CHANNELS = ("latest", "stable")
 DEFAULT_CLAUDE_CHANNEL = "latest"
+
+
+# ---------------------------------------------------------------------------
+# Container resource limits — the hardened floor's memory cap (issue #29)
+# ---------------------------------------------------------------------------
+# Every project container is created with a HARD memory cap: ``--memory <limit> --memory-swap <limit>``
+# (equal values = no swap spill, so a runaway can't thrash the host's swap/zram either). The cap is
+# part of the floor — ALWAYS rendered, never absent; only its VALUE is operator-chosen (the global
+# ``[container] memory`` setting, ``config memory`` / Settings ``m``). Without it a runaway inside the
+# sandbox competes with the operator's desktop for RAM and the kernel's GLOBAL OOM killer is free to
+# starve or kill a host process first — which is exactly what happened (a 30 GB in-container ``node``
+# took out the host's Chrome). Under the cap the kernel OOM-kills INSIDE the cgroup — the runaway dies,
+# the host never feels pressure. Fixed at ``docker create`` -> recreate to apply.
+DEFAULT_CONTAINER_MEMORY = "16g"
+MIN_CONTAINER_MEMORY_BYTES = 1 << 30   # 1g — below this claude itself (node) won't run reliably
+_MEMORY_UNIT_BYTES = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+# Docker's size grammar (go-units RAMInBytes): a number, optional unit letter, optional i/b/ib suffix
+# (``16g`` / ``16G`` / ``16GiB`` / ``16gb`` / ``1.5g`` / bare bytes). Binary multiples, like docker.
+_MEMORY_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt])?(?:i?b)?$")
+
+
+def memory_limit_bytes(value: str) -> int:
+    """Parse a docker memory size string (``16g``, ``512m``, ``1.5G``, ``2048`` bytes) to bytes.
+
+    Pure. Raises ``ValueError`` on anything docker's ``--memory`` wouldn't accept, so a bad value is
+    caught host-side at set/load time rather than as an opaque ``docker create`` failure later."""
+    raw = (value or "").strip().lower()
+    m = _MEMORY_RE.match(raw)
+    if not m:
+        raise ValueError(
+            f"invalid memory limit {value!r}: use a size like 16g, 8192m or 1.5g (units k/m/g/t)"
+        )
+    number, unit = m.group(1), m.group(2) or ""
+    return int(float(number) * _MEMORY_UNIT_BYTES[unit])
+
+
+def normalise_memory_limit(value: str) -> str:
+    """Validate a memory limit and return its canonical docker form (``16G``/``16GiB`` -> ``16g``).
+
+    Pure. Enforces the ``MIN_CONTAINER_MEMORY_BYTES`` floor (a cap too small to run claude would brick
+    every container) and raises ``ValueError`` with an operator-readable reason. The canonical form is
+    lowercase ``<number><unit>`` with a bare unit letter (docker accepts it, tests pin it stable)."""
+    size = memory_limit_bytes(value)
+    if size < MIN_CONTAINER_MEMORY_BYTES:
+        raise ValueError(
+            f"memory limit {value.strip()!r} is below the 1g minimum needed to run claude"
+        )
+    m = _MEMORY_RE.match(value.strip().lower())
+    assert m is not None  # memory_limit_bytes already matched it
+    number, unit = m.group(1), m.group(2) or ""
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")  # 2.0g -> 2g, 1.50g -> 1.5g
+    return f"{number}{unit}"
 
 
 # ---------------------------------------------------------------------------

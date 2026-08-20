@@ -190,6 +190,47 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(s.terminal_program, "kitty")
         self.assertEqual(s.opener_command, ("open",))
 
+    # -- container memory cap (issue #29) -------------------------------------
+    def test_container_memory_defaults_16g(self) -> None:
+        self.assertEqual(settings_registry.load().container_memory, "16g")
+
+    def test_container_memory_roundtrip_canonicalises_and_coexists(self) -> None:
+        settings_registry.add_ssh_key("~/.ssh/a")
+        s = settings_registry.set_container_memory(" 8 GiB ")
+        self.assertEqual(s.container_memory, "8g")
+        s = settings_registry.load()
+        self.assertEqual(s.container_memory, "8g")           # persisted under [container] memory
+        self.assertEqual(s.ssh_keys, ("~/.ssh/a",))           # other sections preserved
+
+    def test_container_memory_reset_to_default(self) -> None:
+        settings_registry.set_container_memory("32g")
+        self.assertEqual(settings_registry.set_container_memory(None).container_memory, "16g")
+        settings_registry.set_container_memory("32g")
+        self.assertEqual(settings_registry.set_container_memory("").container_memory, "16g")
+
+    def test_container_memory_setter_rejects_bad_or_tiny(self) -> None:
+        for bad in ("lots", "16x", "512m", "0.5g", "-1g"):
+            with self.assertRaises(ValidationError, msg=bad):
+                settings_registry.set_container_memory(bad)
+        self.assertEqual(settings_registry.load().container_memory, "16g")  # nothing persisted
+
+    def test_schema_rejects_bad_container_memory(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(container_memory="16x")
+        with self.assertRaises(ValidationError):
+            Settings(container_memory="512m")
+        Settings(container_memory="1g")  # the minimum is allowed
+
+    def test_parse_coerces_bad_container_memory_to_default(self) -> None:
+        # A hand-edited junk / too-small / missing value must not brick load() — and the cap is
+        # mandatory, so there must always be a valid value to render.
+        self.assertEqual(settings_registry._parse({"container": {"memory": "lots"}}).container_memory, "16g")
+        self.assertEqual(settings_registry._parse({"container": {"memory": "100m"}}).container_memory, "16g")
+        self.assertEqual(settings_registry._parse({"container": {"memory": ""}}).container_memory, "16g")
+        self.assertEqual(settings_registry._parse({"container": {}}).container_memory, "16g")
+        self.assertEqual(settings_registry._parse({}).container_memory, "16g")
+        self.assertEqual(settings_registry._parse({"container": {"memory": "24G"}}).container_memory, "24g")
+
     def test_shell_history_defaults_off(self) -> None:
         self.assertFalse(settings_registry.load().shell_persist_history)
 

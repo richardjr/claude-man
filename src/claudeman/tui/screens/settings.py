@@ -3,6 +3,8 @@
 The "general features" surface. First section: the ssh keys claude-man auto-loads into the host agent.
 Lists each configured key with its live agent status (loaded / not loaded / missing), and manages them:
 add (via ``AddKeyScreen`` — adding also ``ssh-add``s it now), remove (config only), and load-all.
+Below it, one line per global preference (git identity, GH token, terminal, container memory cap)
+each with its edit hotkey.
 
 Mirrors ``EnvMountsScreen``: a ModalScreen with its own hotkeys + a status Label, and the slow,
 shell-touching work (``ssh-add`` / ``ssh-keygen``) on a thread worker so the UI never blocks (and a
@@ -24,6 +26,7 @@ from .. import terminals
 from .add_key import AddKeyScreen
 from .gh_token import GhTokenScreen
 from .git_identity import GitIdentityScreen
+from .memory_limit import MemoryLimitScreen
 from .terminal_select import TerminalSelectScreen
 
 _KEY_COLUMNS = ("Ssh key", "Status")
@@ -39,6 +42,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("g", "git_identity", "Git identity"),
         Binding("t", "gh_token", "GH token"),
         Binding("e", "terminal", "Terminal"),
+        Binding("m", "memory", "Memory"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -63,8 +67,9 @@ class SettingsScreen(ModalScreen[None]):
             yield Label("", id="git-identity", classes="panel-title")
             yield Label("", id="gh-token", classes="panel-title")
             yield Label("", id="terminal", classes="panel-title")
-            yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · esc Close",
-                        id="settings-status")
+            yield Label("", id="memory", classes="panel-title")
+            yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · m Memory "
+                        "· esc Close", id="settings-status")
             with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
@@ -72,6 +77,7 @@ class SettingsScreen(ModalScreen[None]):
                 yield Button("Git", id="git")
                 yield Button("GH", id="ghtoken")
                 yield Button("Terminal", id="term")
+                yield Button("Memory", id="memory-btn")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
@@ -79,7 +85,14 @@ class SettingsScreen(ModalScreen[None]):
         self._render_git_identity()
         self._render_gh_token()
         self._render_terminal()
+        self._render_memory()
         self._refresh_status()
+
+    def _render_memory(self) -> None:
+        s = settings_registry.load()
+        self.query_one("#memory", Label).update(
+            f"Container memory: {s.container_memory} hard cap, no swap · m to change (recreate to apply)"
+        )
 
     def _render_terminal(self) -> None:
         s = settings_registry.load()
@@ -235,6 +248,24 @@ class SettingsScreen(ModalScreen[None]):
         self._render_terminal()
         label = choice or "auto-detect"
         self._status(lifecycle.Result(True, f"terminal preference saved: {label}"))
+
+    @on(Button.Pressed, "#memory-btn")
+    def action_memory(self) -> None:
+        s = settings_registry.load()
+        self.app.push_screen(MemoryLimitScreen(s.container_memory), self._on_memory)
+
+    def _on_memory(self, limit) -> None:
+        if limit is None:  # cancelled
+            return
+        try:
+            s = settings_registry.set_container_memory(limit or None)  # "" -> default
+        except Exception as exc:  # noqa: BLE001 - the modal pre-validates; surface anything else
+            self._status(lifecycle.Result(False, f"memory limit not saved: {exc}"))
+            return
+        self._render_memory()
+        self._status(lifecycle.Result(
+            True, f"container memory cap saved: {s.container_memory} — recreate a project to apply"
+        ))
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

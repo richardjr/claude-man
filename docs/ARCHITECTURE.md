@@ -166,6 +166,7 @@ docker create --name claude-man-<slug> \
   --security-opt no-new-privileges \
   --user 1000:1000 \
   --pids-limit 1024 \
+  --memory 16g --memory-swap 16g   (Settings.container_memory — always present; `config memory`) \
   --tmpfs /tmp:rw,exec,nosuid,size=512m \
   --tmpfs /home/agent/.cache:rw,exec,nosuid,size=256m,uid=1000,gid=1000,mode=0700 \
   -e HOME=/home/agent -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
@@ -188,6 +189,15 @@ the sync-back surface), `/workspace` (persistent bind), `/tmp` and `/home/agent/
 tmpfs. `--pids-limit` is **1024** (not small): claude forks Bash, ripgrep, MCP servers, hooks — a
 low limit silently breaks parallel tool calls. `no-new-privileges` + `--cap-drop ALL` is exactly
 why the firewall is a network-layer sidecar.
+
+**Memory cap (issue #29).** `--memory X --memory-swap X` is **always rendered** beside the fixed
+hardening flags — the only part of the floor whose *value* is operator-chosen (`[container] memory`,
+default `16g`, minimum `1g`; `runner._render_memory`, validated by the pure
+`config.normalise_memory_limit`). Equal `--memory-swap` means **no swap** for the container — a true
+ceiling, so a runaway can neither starve the host of RAM nor thrash its swap/zram. The kernel then
+OOM-kills *inside the container's cgroup* (the biggest process there — the runaway) and the host never
+sees pressure. Before this, a 30 GB in-container `node` put the host under `global_oom` and Chrome
+died first. Fixed at create → recreate to apply.
 
 **The scratch / data-transfer dir (`/workspace/scratch`).** A known drop-zone for copying files in
 and out of a container. It is a **subdir of the existing `/workspace` bind — not a new mount**, so

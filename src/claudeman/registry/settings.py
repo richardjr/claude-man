@@ -10,6 +10,9 @@ Canonical shape::
     [ssh]
     keys = ["~/.ssh/id_ed25519"]
     auto_load = true
+
+    [container]
+    memory = "16g"      # the hard per-container memory cap (docker size string; recreate to apply)
 """
 
 from __future__ import annotations
@@ -51,6 +54,15 @@ def _parse(data: dict) -> Settings:
     # element falls back to auto-detect instead of bricking load() (Settings would raise on it).
     if program == "custom" and "{argv}" not in command:
         program = ""
+    container = data.get("container", {}) or {}
+    # Same coercion philosophy again: a hand-edited bad/too-small memory limit falls back to the default
+    # rather than bricking load() — the cap is ALWAYS rendered (the floor), so there must always be a
+    # valid value to render.
+    memory = str(container.get("memory", config.DEFAULT_CONTAINER_MEMORY) or config.DEFAULT_CONTAINER_MEMORY)
+    try:
+        memory = config.normalise_memory_limit(memory)
+    except ValueError:
+        memory = config.DEFAULT_CONTAINER_MEMORY
     return Settings(
         ssh_keys=tuple(str(k) for k in keys),
         ssh_auto_load=bool(ssh.get("auto_load", True)),
@@ -65,6 +77,7 @@ def _parse(data: dict) -> Settings:
         opener_command=_argv_list(opener, "command", "opener.command"),
         ui_splash=bool(ui.get("splash", True)),
         shell_persist_history=bool(shell.get("persist_history", False)),
+        container_memory=memory,
     )
 
 
@@ -112,6 +125,9 @@ def save(settings: Settings) -> Path:
     shell = tomlkit.table()
     shell["persist_history"] = bool(settings.shell_persist_history)
     doc["shell"] = shell
+    container = tomlkit.table()
+    container["memory"] = settings.container_memory
+    doc["container"] = container
 
     path = config.settings_toml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +212,27 @@ def set_shell_history(enabled: bool) -> Settings:
     ``$HISTFILE`` — the opt-in writable surface; default off keeps the hardened floor byte-identical).
     Takes effect on the next ``recreate`` (the bind is fixed at container create)."""
     updated = dataclasses.replace(load(), shell_persist_history=bool(enabled))
+    save(updated)
+    return updated
+
+
+def set_container_memory(limit: str | None) -> Settings:
+    """Set the hard per-container memory cap (``None``/``""`` -> back to the ``16g`` default).
+
+    The value is validated + canonicalised host-side (``config.normalise_memory_limit``: docker size
+    grammar, ``1g`` minimum) so a typo fails loudly here — as ``ValidationError`` — rather than as an
+    opaque ``docker create`` error on the next start. The cap is ALWAYS rendered (it's part of the
+    hardened floor, issue #29); this only chooses its value. Fixed at container create, so a change
+    needs ``recreate`` to apply — running containers keep their current cap until then."""
+    raw = (limit or "").strip()
+    if not raw:
+        value = config.DEFAULT_CONTAINER_MEMORY
+    else:
+        try:
+            value = config.normalise_memory_limit(raw)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from None
+    updated = dataclasses.replace(load(), container_memory=value)
     save(updated)
     return updated
 

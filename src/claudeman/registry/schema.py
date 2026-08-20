@@ -519,6 +519,12 @@ class Settings:
     # recreate. The ONLY opt-in writable surface beyond the hardened floor (default off keeps the floor
     # byte-identical, invariant 2); fixed at container create, so a change needs `recreate` to apply.
     shell_persist_history: bool = False
+    # Container memory cap (issue #29): a HARD limit rendered on EVERY create as
+    # `--memory X --memory-swap X` (equal -> no swap spill). Part of the hardened floor — always
+    # present; only the VALUE is operator-chosen (a docker size string, min 1g). Default 16g. Without
+    # it an in-container runaway competes with the host desktop for RAM and the kernel's GLOBAL OOM
+    # killer can take out a host app first (it did — Chrome). Fixed at create -> recreate to apply.
+    container_memory: str = config.DEFAULT_CONTAINER_MEMORY
 
     def __post_init__(self) -> None:
         for k in self.ssh_keys:
@@ -528,6 +534,10 @@ class Settings:
             raise ValidationError(
                 f"claude_channel {self.claude_channel!r} must be one of {config.CLAUDE_CHANNELS}"
             )
+        try:
+            config.normalise_memory_limit(self.container_memory)
+        except ValueError as exc:
+            raise ValidationError(f"container_memory: {exc}") from None
         if self.terminal_program == "custom" and "{argv}" not in self.terminal_command:
             raise ValidationError(
                 "a custom terminal needs a command template with an '{argv}' element "

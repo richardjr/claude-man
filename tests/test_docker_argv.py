@@ -469,6 +469,56 @@ class ShellHistoryRenderTest(unittest.TestCase):
         self.assertNotIn(f"/state/landarna/shell:{config.CONTAINER_SHELL_HISTORY_DIR}:ro", a1)
 
 
+class MemoryLimitRenderTest(unittest.TestCase):
+    """The hard memory cap (issue #29) is PART OF THE FLOOR: ALWAYS rendered as `--memory X
+    --memory-swap X` (equal -> no swap), default 16g, value from Settings.container_memory. Unlike the
+    additive renderers it is never absent — and `_HARDENING` itself stays byte-identical beside it."""
+
+    def _argv(self, **kw):
+        return runner.build_create_argv(
+            _project(), profile_name="work", created_iso="t",
+            claude_config_path="/cfg", workspace_path="/ws", **kw,
+        )
+
+    def test_default_cap_always_present_and_swap_disabled(self) -> None:
+        a = self._argv()
+        self.assertEqual(a[a.index("--memory") + 1], config.DEFAULT_CONTAINER_MEMORY)
+        self.assertEqual(a[a.index("--memory-swap") + 1], config.DEFAULT_CONTAINER_MEMORY)
+        self.assertEqual(config.DEFAULT_CONTAINER_MEMORY, "16g")
+        # Contiguous block, right after the fixed hardening flags (floor + cap are one unit).
+        self.assertTrue(_contains_sublist(a, runner._HARDENING + ["--memory", "16g", "--memory-swap", "16g"]))
+
+    def test_custom_value_flows_through_and_is_canonicalised(self) -> None:
+        a = self._argv(memory="8G")
+        self.assertEqual(a[a.index("--memory") + 1], "8g")
+        self.assertEqual(a[a.index("--memory-swap") + 1], "8g")  # swap cap tracks the memory cap
+        self.assertTrue(_contains_sublist(a, runner._HARDENING))  # floor unchanged
+
+    def test_cap_never_absent_regardless_of_other_features(self) -> None:
+        # Ports / env-mounts / strict egress / shell history are additive; the cap rides along always.
+        p = Project(slug="x", profile="work", overlay="node", egress="strict",
+                    ports=(PortMapping(container=3000),),
+                    env_mount=(EnvMount(kind="ssh"),))
+        a = runner.build_create_argv(p, profile_name="work", created_iso="t",
+                                     claude_config_path="/cfg", workspace_path="/ws",
+                                     shell_history_host_dir="/hist", ssh_auth_sock="/sock")
+        self.assertEqual(a.count("--memory"), 1)
+        self.assertEqual(a.count("--memory-swap"), 1)
+
+    def test_rejects_junk_loudly(self) -> None:
+        # settings.load() coerces junk to the default; a bad PROGRAMMATIC value must fail, not render
+        # an argv docker would reject (or silently drop the cap).
+        with self.assertRaises(ValueError):
+            self._argv(memory="lots")
+        with self.assertRaises(ValueError):
+            self._argv(memory="512m")  # below the 1g floor
+        with self.assertRaises(ValueError):
+            self._argv(memory="")      # empty is NOT "no cap" — the cap is mandatory
+
+    def test_render_memory_is_pure_and_exact(self) -> None:
+        self.assertEqual(runner._render_memory("2.0G"), ["--memory", "2g", "--memory-swap", "2g"])
+
+
 class ProjectTintTest(unittest.TestCase):
     """The per-project colour must be STABLE (same colour every run/window) and a curated palette pick
     — it keys on a process-stable SHA-256, not the salted builtin hash()."""

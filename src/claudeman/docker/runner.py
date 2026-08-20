@@ -11,6 +11,9 @@ Security notes (see CLAUDE.md invariants 1 & 2):
     environment and never appears in the host process argv (``ps aux``).
   * ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` are never rendered.
   * No ``.credentials.json`` is mounted; auth is the env token only.
+  * A HARD memory cap (``--memory``/``--memory-swap``, ``Settings.container_memory``, default 16g)
+    is always rendered beside ``_HARDENING`` — an in-container runaway can OOM only itself, never
+    the host (issue #29).
 """
 
 from __future__ import annotations
@@ -91,6 +94,24 @@ _BAKED_ENV = {
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }
+
+
+def _render_memory(limit: str) -> list[str]:
+    """Render the HARD memory cap — ``--memory X --memory-swap X``. PART OF THE FLOOR, ALWAYS PRESENT
+    (issue #29): unlike the additive renderers below it is never empty, only its VALUE is operator-chosen
+    (``Settings.container_memory``, default ``16g``, ``1g`` minimum). Equal ``--memory-swap`` means the
+    container gets NO swap — the cap is a true ceiling, so a runaway can neither starve the host of RAM
+    nor thrash its swap/zram. When the cgroup hits the cap the kernel OOM-kills INSIDE the container
+    (the biggest process in *that* cgroup — the runaway), and the host never sees memory pressure.
+    Without this a 30 GB in-container ``node`` took out the host's Chrome under the GLOBAL OOM killer.
+
+    The value is re-validated + canonicalised here (``config.normalise_memory_limit``) so the pure argv
+    can never carry a string docker would reject; ``settings.load`` already coerces junk to the default,
+    so in practice this only ever raises for a bad PROGRAMMATIC caller — loudly, by design.
+    Sits beside ``_HARDENING`` (which stays byte-identical — tests pin both).
+    """
+    value = config.normalise_memory_limit(limit)
+    return ["--memory", value, "--memory-swap", value]
 
 
 def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[str]:
@@ -240,6 +261,7 @@ def build_create_argv(
     git_env: dict[str, str] | None = None,
     shell_history_host_dir: str | None = None,
     tint: bool = False,
+    memory: str = config.DEFAULT_CONTAINER_MEMORY,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
 
@@ -247,7 +269,9 @@ def build_create_argv(
     / ``workspace_path`` default to the project's host state dirs. ``file_env`` is the
     already-parsed-and-scrubbed contents of ``project.env_file`` (resolved host-side by
     ``create``); its keys are injected as docker env PASS-THROUGH (``-e KEY`` with no
-    value) so secrets never appear in the host argv (``ps aux``).
+    value) so secrets never appear in the host argv (``ps aux``). ``memory`` is the hard
+    per-container memory cap (``Settings.container_memory``) — ALWAYS rendered, see
+    ``_render_memory``.
     """
     cfg_path = claude_config_path or str(config.claude_config_dir(project.slug))
     ws_path = workspace_path or str(config.workspace_dir(project.slug))
@@ -257,6 +281,8 @@ def build_create_argv(
         labels.build(project, profile=profile_name, version=version, created_iso=created_iso)
     )
     argv += _HARDENING
+    # The hard memory cap — part of the floor, always present (issue #29); value from settings.
+    argv += _render_memory(memory)
 
     # Baked env (explicit for clarity even though the image bakes it).
     for key, value in _BAKED_ENV.items():
@@ -385,6 +411,7 @@ def create(
     shell_history_host_dir: str | None = None,
     hybrid_header: str | None = None,
     tint: bool = False,
+    memory: str = config.DEFAULT_CONTAINER_MEMORY,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -393,7 +420,8 @@ def create(
     appear in ``ps aux``. ``env_file`` is parsed + scrubbed host-side (review SEC-2). ``token`` may be
     ``None`` (e.g. before any profile token is minted) — the container still builds and a shell
     works, but in-container ``claude`` won't authenticate. ``gh_token`` is ``None`` unless the operator
-    configured one (``config gh-token``); only then is ``GH_TOKEN`` injected.
+    configured one (``config gh-token``); only then is ``GH_TOKEN`` injected. ``memory`` is the hard
+    per-container memory cap from the global settings (always rendered — the floor, issue #29).
     """
     file_env = read_env_file(project.env_file) if project.env_file else {}
     # Resolve the host ssh-agent socket only if an ssh env-mount is configured (the socket PATH is not
@@ -407,7 +435,7 @@ def create(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
         file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
         ssh_auth_sock=ssh_sock, git_env=git_env, shell_history_host_dir=shell_history_host_dir,
-        tint=tint,
+        tint=tint, memory=memory,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:

@@ -15,12 +15,17 @@
 #   - [git] identity is injected into containers via git ENV-config (no writable file needed under
 #     the read-only rootfs), so `git commit` works without "Author identity unknown". Changing the
 #     identity needs a `claudemanctl project recreate <slug>` to apply (it's stamped at create time).
+#   - [container] memory is the HARD per-container memory cap, rendered on every create as
+#     `--memory X --memory-swap X` (no swap spill). Always applied — part of the hardened floor;
+#     you only choose the value. Recreate a project to apply.
 #
 # Edit via the CLI/TUI rather than by hand if you prefer:
 #   claudemanctl config show                       # print resolved settings + git identity
 #   claudemanctl config git --name "…" --email "…" # set the injected git identity (--clear to reset)
 #   claudemanctl config git --clear                # back to inherit-from-host
-# TUI: press ',' for the Settings screen; 'g' edits the git identity (blank field = inherit host).
+#   claudemanctl config memory 24g                 # the hard container memory cap (--default = 16g)
+# TUI: press ',' for the Settings screen; 'g' edits the git identity (blank field = inherit host),
+# 'm' the memory cap.
 
 [ssh]
 # Host private-key PATHS to ensure-load into the host ssh-agent (never the key material itself).
@@ -43,3 +48,11 @@ user_email = ""
 # apply — the tint env is stamped at container create). The terminal EMULATOR itself is chosen via
 # `claudemanctl config terminal` (the program/command keys, omitted here — auto-detected by default).
 tint = false
+
+[container]
+# Hard memory cap for EVERY project container — a docker size string (16g, 8192m, 1.5g; units
+# k/m/g/t), minimum 1g. Rendered as `--memory X --memory-swap X`, so the container gets no swap: a
+# runaway inside is OOM-killed in its own cgroup instead of starving the host desktop. This is part
+# of the hardened floor and is always applied; a bad/too-small value here falls back to the 16g
+# default at load. Fixed at container create -> `claudemanctl project recreate <slug>` to apply.
+memory = "16g"

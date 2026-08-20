@@ -40,6 +40,10 @@ What crosses each way, and what must never cross:
 - `--user 1000:1000` (non-root, matches host uid so workspace edits keep correct ownership), real
   baked `/etc/passwd` entry.
 - `--pids-limit 1024` bounds fork bombs while still allowing claude's tool subprocesses.
+- `--memory X --memory-swap X` (default `16g`, operator-settable, **never absent**) bounds memory
+  bombs / runaway builds the same way: the container has a hard ceiling and **no swap**, so a
+  runaway OOM-kills itself inside its own cgroup instead of starving the host (issue #29 — a 30 GB
+  in-container `node` once took out the host's Chrome under the global OOM killer).
 - `tmpfs` mounts are `nosuid`; `exec` is required (claude/MCP execute helpers from temp).
 - The `/home/agent/.cache` tmpfs is pinned **agent-owned** (`uid=1000,gid=1000,mode=0700`). A bare
   tmpfs defaults to `root:root` mode `0755`, which the uid-1000 agent cannot write — so node/corepack

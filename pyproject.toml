@@ -61,5 +61,11 @@ include = ["/src", "/images", "/library", "/templates", "/tests", "/*.md", "/LIC
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# Pin the rule set explicitly: ruff 0.16 widened its DEFAULT selection (~400 rules) and CI runs
+# `uvx ruff check` unpinned, so an unchanged tree went from green to ~200 findings overnight. This is
+# the pre-0.16 default set the codebase was written against; widen deliberately, not by upgrade.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

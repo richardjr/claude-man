@@ -19,9 +19,10 @@ It exists to solve seven things at once:
    across container restarts and host reboots **until you explicitly delete it**. The manager
    shows the live state, profile, egress mode, and version of every project.
 3. **Secure sandbox** — every project runs in its own hardened container (read-only rootfs,
-   all capabilities dropped, no-new-privileges, non-root, pid-limited), loadable with project
-   environment variables and extra software via image overlays. Egress is open by default and
-   **lockable** to a strict per-project allowlist.
+   all capabilities dropped, no-new-privileges, non-root, pid-limited, **hard memory-capped** —
+   `16g` by default, `config memory` to change), loadable with project environment variables and
+   extra software via image overlays. Egress is open by default and **lockable** to a strict
+   per-project allowlist.
 4. **Curated packs** — an in-repo library of guidance templates (focused `CLAUDE.md` fragments +
    skills, bundled as **packs**: guardrails, code-quality, per-language conventions) that
    projects opt into. Selections materialize into each project's config automatically, so house
@@ -131,6 +132,7 @@ blast radius is **one disposable container**, not your machine.
 | **Poison host `~/.claude/settings.json` hooks** | The per-project `~/.claude` is seeded from a **filtered allowlist with hooks/statusLine stripped**; there is no path for a poisoned host hook to ride into the container, nor (today) for a container-written hook to reach the host. |
 | **`rm -rf ~/` destructive trip-wire** | `~` is `/home/agent` inside the sandbox — the wiper can only touch the re-seedable per-project config and a tmpfs. **The host home is untouched.** |
 | **`-setup.pth` / daemon persistence** | The rootfs is **read-only** (`--read-only`), capabilities are **all dropped** (`--cap-drop ALL`), `no-new-privileges`, non-root, pid-limited. Image-level persistence is impossible; anything in a `/workspace` venv dies on recreate. |
+| **Memory bomb / runaway build starves the host** | Every container carries a **hard memory cap** (`--memory X --memory-swap X`, `16g` default — no swap spill). A runaway is OOM-killed **inside its own cgroup**; the host desktop never sees memory pressure. (Before this, a 30 GB in-container `node` took out the host's Chrome under the global OOM killer.) |
 | **Malicious skill runs `Bash(*)` / reverse shell** | The command still runs — but **inside** the sandbox: no host reach, and the reverse shell needs egress + tooling the minimal base image doesn't ship. Under **strict egress** the connection is refused outright. |
 | **Exfiltrate secrets / redirect OAuth token to attacker infra** | **Strict egress** (below) routes every connection through an allowlisting proxy on a no-direct-route network — the token and any env secrets can only reach Anthropic/allowlisted hosts, never an attacker endpoint. |
 | **Steal the host GitHub PAT during clone** | Repos are cloned **host-side** with the PAT masked; the host git PAT **never enters the container**. |
@@ -497,6 +499,25 @@ In the TUI, Settings (`,`) → `e` opens the picker. The preference lives in
 The TUI also opens with a short **boot splash** (the logo sweeps in, then scrolls up to reveal
 the live table — about a second, any key skips it). Turn it off with
 `claudemanctl config splash off` (`[ui] splash = false`).
+
+## Container memory cap
+
+Every project container is created with a **hard memory limit** — `--memory X --memory-swap X`
+(equal values, so the container gets **no swap**: a true ceiling). When something inside hits it,
+the kernel OOM-kills **inside that container's cgroup** (the runaway process), and the host never
+comes under memory pressure. The cap is part of the hardened floor — it is **always applied**;
+you only choose its value. Default **`16g`**, minimum `1g`:
+
+```bash
+uv run claudemanctl config memory               # show the current cap
+uv run claudemanctl config memory 24g           # set it (docker size string: 24g, 8192m, 1.5g)
+uv run claudemanctl config memory --default     # back to 16g
+```
+
+In the TUI, Settings (`,`) → `m`. The value lives in `~/.config/claude-man/config.toml` under
+`[container] memory`. It is fixed at container create, so **recreate a project to apply** — running
+containers keep their current cap until then. Hosts without swap accounting get docker's "memory
+limited without swap" warning and still create (the RAM cap holds).
 
 ## Building images
 
