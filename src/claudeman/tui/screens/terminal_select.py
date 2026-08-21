@@ -1,10 +1,11 @@
 """Pick the terminal emulator used for project shell/claude/nvim windows (Settings -> ``e``).
 
 Lists the host platform's launcher table with installed/not-installed status, plus "auto"
-(detect — the default) and, when a template is configured, "custom". Dismisses the chosen
-program name ("" = auto) or ``None`` on cancel; the Settings screen persists it via
-``settings.set_terminal``. A custom TEMPLATE itself is edited via the CLI
-(``claudemanctl config terminal --custom '…'``) — this picker only selects between launchers.
+(detect — the default) and "custom" (always shown — the escape hatch for a terminal that isn't
+in the table, issue #31). Dismisses the chosen program name ("" = auto) or ``None`` on cancel;
+the Settings screen persists it via ``settings.set_terminal``, and a "custom" pick opens the
+``CustomTerminalScreen`` template editor (prefilled — that's also how an existing template is
+edited).
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ class TerminalSelectScreen(ModalScreen["str | None"]):
             yield Label("Terminal for shell/claude/nvim windows", classes="title")
             yield DataTable(id="terms", cursor_type="row")
             yield Label(
-                "custom template is set via `claudemanctl config terminal --custom '…'`",
+                "terminal not listed? pick `custom` and define its launcher template",
                 id="term-note",
             )
             with Horizontal(id="buttons"):
@@ -65,10 +66,10 @@ class TerminalSelectScreen(ModalScreen["str | None"]):
             mark = " ←" if spec.name == self._current else ""
             status = "installed" if spec.available() else "not installed"
             table.add_row(f"{spec.name}{mark}", status, key=spec.name)
-        if "{argv}" in self._custom_command:
-            mark = " ←" if self._current == terminals.CUSTOM_PROGRAM else ""
-            table.add_row(f"custom{mark}", " ".join(self._custom_command),
-                          key=terminals.CUSTOM_PROGRAM)
+        mark = " ←" if self._current == terminals.CUSTOM_PROGRAM else ""
+        template = (" ".join(self._custom_command) if "{argv}" in self._custom_command
+                    else "(define a launcher template)")
+        table.add_row(f"custom{mark}", template, key=terminals.CUSTOM_PROGRAM)
         table.focus()
 
     def _selected(self) -> str | None:

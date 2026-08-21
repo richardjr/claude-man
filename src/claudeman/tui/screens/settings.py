@@ -27,6 +27,8 @@ from .add_key import AddKeyScreen
 from .gh_token import GhTokenScreen
 from .git_identity import GitIdentityScreen
 from .memory_limit import MemoryLimitScreen
+from .setup import SetupWizardScreen
+from .terminal_custom import CustomTerminalScreen
 from .terminal_select import TerminalSelectScreen
 
 _KEY_COLUMNS = ("Ssh key", "Status")
@@ -43,6 +45,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("t", "gh_token", "GH token"),
         Binding("e", "terminal", "Terminal"),
         Binding("m", "memory", "Memory"),
+        Binding("w", "wizard", "Setup wizard"),
         Binding("escape", "close", "Close"),
     ]
     CSS = """
@@ -69,7 +72,7 @@ class SettingsScreen(ModalScreen[None]):
             yield Label("", id="terminal", classes="panel-title")
             yield Label("", id="memory", classes="panel-title")
             yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · m Memory "
-                        "· esc Close", id="settings-status")
+                        "· w Wizard · esc Close", id="settings-status")
             with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
@@ -78,6 +81,7 @@ class SettingsScreen(ModalScreen[None]):
                 yield Button("GH", id="ghtoken")
                 yield Button("Terminal", id="term")
                 yield Button("Memory", id="memory-btn")
+                yield Button("Wizard", id="wizard")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
@@ -244,10 +248,30 @@ class SettingsScreen(ModalScreen[None]):
     def _on_terminal(self, choice) -> None:
         if choice is None:  # cancelled
             return
+        if choice == terminals.CUSTOM_PROGRAM:
+            # A "custom" pick opens the template editor prefilled (that's also how an existing
+            # template gets edited); program + template are persisted together on save.
+            self.app.push_screen(
+                CustomTerminalScreen(settings_registry.load().terminal_command),
+                self._on_custom_terminal,
+            )
+            return
         settings_registry.set_terminal(program=choice)
         self._render_terminal()
         label = choice or "auto-detect"
         self._status(lifecycle.Result(True, f"terminal preference saved: {label}"))
+
+    def _on_custom_terminal(self, template) -> None:
+        if template is None:  # cancelled
+            return
+        try:
+            settings_registry.set_terminal(program=terminals.CUSTOM_PROGRAM,
+                                           command=list(template))
+        except Exception as exc:  # noqa: BLE001 - the modal pre-validates; surface anything else
+            self._status(lifecycle.Result(False, f"custom terminal not saved: {exc}"))
+            return
+        self._render_terminal()
+        self._status(lifecycle.Result(True, f"custom terminal saved: {' '.join(template)}"))
 
     @on(Button.Pressed, "#memory-btn")
     def action_memory(self) -> None:
@@ -266,6 +290,11 @@ class SettingsScreen(ModalScreen[None]):
         self._status(lifecycle.Result(
             True, f"container memory cap saved: {s.container_memory} — recreate a project to apply"
         ))
+
+    @on(Button.Pressed, "#wizard")
+    def action_wizard(self) -> None:
+        """Re-run the first-run setup wizard on demand (checks / terminal / profile / image)."""
+        self.app.push_screen(SetupWizardScreen())
 
     @on(Button.Pressed, "#close")
     def action_close(self) -> None:

@@ -138,6 +138,34 @@ class RegistryTest(unittest.TestCase):
         self.assertIn("# keep me", cleared)
         self.assertFalse(projects.load("p").ssh_auto_trust)
 
+    def test_auth_roundtrips_terse_and_patches(self) -> None:
+        # "login" persists; the default "token" emits no key (terse template).
+        projects.save(Project(slug="conn", auth="login"))
+        self.assertEqual(projects.load("conn").auth, "login")
+        self.assertIn('auth = "login"', (Path(self.tmp.name) / "projects" / "conn.toml").read_text())
+        projects.save(Project(slug="tok"))
+        self.assertNotIn("auth", (Path(self.tmp.name) / "projects" / "tok.toml").read_text())
+        self.assertEqual(projects.load("tok").auth, "token")
+        # The comment-preserving scalar patch sets it and drops the key on return to token.
+        commented = '[project]\nslug = "a"\n# keep me\noverlay = "base"\n'
+        (Path(self.tmp.name) / "projects" / "a.toml").write_text(commented)
+        u = projects.set_auth("a", "login")
+        self.assertEqual(u.auth, "login")
+        text = (Path(self.tmp.name) / "projects" / "a.toml").read_text()
+        self.assertIn('auth = "login"', text)
+        self.assertIn("# keep me", text)
+        projects.set_auth("a", "token")
+        cleared = (Path(self.tmp.name) / "projects" / "a.toml").read_text()
+        self.assertNotIn("auth", cleared)
+        self.assertIn("# keep me", cleared)
+
+    def test_auth_invalid_mode_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            Project(slug="bad", auth="apikey")
+        projects.save(Project(slug="ok"))
+        with self.assertRaises(ValidationError):
+            projects.set_auth("ok", "apikey")
+
     def test_set_packs_patches_and_validates(self) -> None:
         projects.save(Project(slug="packed", packs=("guardrails",)))
         p = projects.set_packs("packed", ("guardrails", "workflow"))

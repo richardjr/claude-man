@@ -28,9 +28,9 @@ It exists to solve seven things at once:
    projects opt into. Selections materialize into each project's config automatically, so house
    rules are versioned, reviewed, and improved in **one place** instead of drifting per project.
 5. **Config sync-back** — when you close a session, changes the agent made to its Claude config
-   (agents, skills, slash-commands, `settings.json`, MCP servers, memory, `CLAUDE.md`) are
-   diffed against a baseline and offered back to your host config behind an **accept/reject
-   gate**. Credentials and identity are **never** synced.
+   (agents, skills, slash-commands, `settings.json`, MCP servers) are diffed against a baseline
+   and offered back to your host config behind an **accept/reject gate**. Credentials and
+   identity are **never** synced.
 6. **A working dev environment** — every container is also a curated **hardened dev shell** you
    (not just the agent) work in: a starship git-aware prompt, prefix + fuzzy (`Ctrl-R`) history
    search, the `n` neovim shortcut (file tree on open), and `eza`/`zoxide`/`fzf`/`bat` — plus a
@@ -49,34 +49,43 @@ It exists to solve seven things at once:
   <img src="docs/images/shell-banner.png" alt="claude-man dev-shell banner — the CLAUDE MAN block wordmark over a cheat-sheet of shell commands (n, ls/lt, g/gcm, Ctrl-R), history mode, and the git-prompt legend" width="680">
 </p>
 
-> Status: **alpha — phases 0–4 + 6 working, 5 planned** (2026-06-12). Mint work/home profiles; create /
-> start / stop / shell / run Claude in hardened containers under a chosen account; switch accounts
-> (mismatch-guarded); watch per-account token usage; commit + push from inside a container
-> (inherited git identity + `gh` baked into every image);
-> add / remove / inspect a project's git repos with live state; mount ssh (agent-forward) + host
-> files into a container; publish service ports; **lock a project to strict egress** (a squid
-> allowlist proxy on a no-direct-route network); select **curated packs** of CLAUDE.md guidance +
-> skills per project (defaults by language, drift-tracked, applied live); and open a **curated
-> hardened dev shell** (starship git-prompt, prefix + `Ctrl-R` history search, `n` for neovim,
-> `eza`/`zoxide`/`fzf`/`bat`, a shell-open cheat-sheet banner, opt-in persistent history) + a baked
-> neovim in any container; and **pin a local model** for hybrid mode — your claude.ai subscription **and**
-> a host Ollama model in one `/model` picker, the subscription passthrough verified live (Phase 9, issue
-> #14) — all from both the CLI and the TUI.
-> **Not yet implemented** (an honest `NotImplementedError` stub): Phase 5 review-gated config
-> sync-back — see [`ROADMAP.md`](ROADMAP.md). 709 dependency-free tests; the hardened image is
-> `image smoke`-gated.
+> Status: **alpha** (2026-08-21). Working today, from both the TUI and the CLI: multi-account
+> profiles; hardened per-project containers with the full lifecycle; live repo state; ssh/file/env
+> mounts; published ports; strict-egress lockdown; curated packs; review-gated config sync-back;
+> the baked dev shell + neovim; hybrid local models (subscription passthrough verified live); and
+> a first-run **setup wizard** + `claudemanctl doctor` host checks. 800+ dependency-free tests;
+> the hardened image is `image smoke`-gated. See [`ROADMAP.md`](ROADMAP.md) for what's next.
 
-## Platform support
+## What it protects against
 
-| Host | Status | Notes |
-|---|---|---|
-| **Linux** | ✅ supported | The reference platform (developed against Docker 29.x). |
-| **macOS** | ✅ supported | Docker Desktop runs the same Linux image; ssh-agent forwarding uses Docker Desktop's built-in default-agent socket; Terminal.app works out of the box (iTerm2/kitty/alacritty/wezterm too). |
-| **Windows** | ✅ via **WSL2** only | Run claude-man *inside* a WSL2 distro (with Docker Desktop's WSL backend or docker-ce in the distro) — there it *is* Linux. Windows Terminal (`wt`) and `explorer.exe`/`wslview` are auto-detected for spawned windows / Browse. **Native Windows is out of scope.** |
+claude-man's containment is a **headline feature**, not a side effect. The 2026 wave of
+supply-chain attacks on AI coding agents — poisoned npm/PyPI packages whose install hooks steal
+`~/.claude/.credentials.json`, GitHub/cloud/SSH keys; malicious skills/agents that run shell
+commands without approval; `~/.claude.json` rewrites that redirect your OAuth token to an
+attacker; `rm -rf ~/` trip-wires; `-setup.pth` startup-hook persistence — all assume **the agent,
+its config, and your credentials share one host filesystem**. Running Claude Code inside a
+hardened, per-project container breaks that assumption by construction. The point isn't to stop a
+compromised package from *installing* — `npm install` still runs its hooks — it's to ensure the
+blast radius is **one disposable container**, not your machine.
 
-The container side is identical everywhere: the image is Linux regardless of host, so the hardened
-profile never varies. On macOS, note that bind-mount I/O (VirtioFS) is slower than native Linux —
-large `yarn`/`npm` installs in `/workspace` take noticeably longer.
+| Attack technique (real 2026 TTPs) | What claude-man does |
+|---|---|
+| **Steal `~/.claude/.credentials.json`** | Your **host** file is never in any container. Token mode (default): auth is an env-var OAuth token — no credentials file exists inside at all. Opt-in **login mode** (for claude.ai connectors): a per-project credential *minted inside* the container lives only in that project's own bind — one disposable sandbox, never synced back, `project logout` removes it (invariant 1). |
+| **Harvest SSH private keys** | Keys **never enter the container**: only the host ssh-agent *socket* is forwarded, so a payload can't exfiltrate a key (it can sign while connected — a documented residual). |
+| **Poison host `~/.claude/settings.json` hooks** | The per-project `~/.claude` is seeded from a **filtered allowlist with hooks/statusLine stripped**; there is no path for a poisoned host hook to ride into the container, nor for a container-written hook to reach the host unreviewed. |
+| **`rm -rf ~/` destructive trip-wire** | `~` is `/home/agent` inside the sandbox — the wiper can only touch the re-seedable per-project config and a tmpfs. **The host home is untouched.** |
+| **`-setup.pth` / daemon persistence** | The rootfs is **read-only** (`--read-only`), capabilities are **all dropped** (`--cap-drop ALL`), `no-new-privileges`, non-root, pid-limited. Image-level persistence is impossible; anything in a `/workspace` venv dies on recreate. |
+| **Memory bomb / runaway build starves the host** | Every container carries a **hard memory cap** (`--memory X --memory-swap X`, `16g` default — no swap spill). A runaway is OOM-killed **inside its own cgroup**; the host desktop never sees memory pressure. |
+| **Malicious skill runs `Bash(*)` / reverse shell** | The command still runs — but **inside** the sandbox: no host reach, and the reverse shell needs egress + tooling the minimal base image doesn't ship. Under **strict egress** the connection is refused outright. |
+| **Exfiltrate secrets / redirect OAuth token to attacker infra** | **Strict egress** routes every connection through an allowlisting proxy on a no-direct-route network — the token and any env secrets can only reach Anthropic/allowlisted hosts, never an attacker endpoint. |
+| **Steal the host GitHub PAT during clone** | Repos are cloned **host-side** with the PAT masked; the host git PAT **never enters the container**. |
+
+**Strict egress** — the lockable network boundary — is the single biggest lever against the
+*exfiltration* and *command-and-control* steps nearly every one of these attacks depends on:
+the agent runs on an `internal` Docker network with no direct route out, and a squid proxy
+sidecar (CONNECT tunnels, no MITM) is the only path to the internet, enforcing a per-project
+domain allowlist with every denial logged. See [`docs/SECURITY.md`](docs/SECURITY.md) for the
+full threat model and [`CLAUDE.md`](CLAUDE.md) for the load-bearing invariants.
 
 ## How it fits together
 
@@ -106,55 +115,38 @@ docker                        the live status oracle
 
 Both roots default to `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` (falling back to `~/.config` /
 `~/.local/state`), and can be relocated wholesale with the `CLAUDE_MAN_CONFIG_HOME` /
-`CLAUDE_MAN_STATE_HOME` env overrides — the test suite points these at a tmpdir so it never touches
-real operator state.
+`CLAUDE_MAN_STATE_HOME` env overrides. The TOML registry answers *what a project is*; `docker ps`
+(queried fresh, never cached) answers *what state its container is in right now*. On any
+divergence the **registry wins** and the container is recreated.
 
-The TOML registry answers *what a project is*; `docker ps` (queried fresh, never cached) answers
-*what state its container is in right now*. The two never describe the same fact, so they can't
-drift — on any divergence the **registry wins** and the container is recreated.
+## Prerequisites
 
-## What it protects against
+Four things need to be on the host **before** claude-man is useful. `claudemanctl doctor` checks
+them all (and the TUI's first-run wizard walks you through fixing them):
 
-claude-man's containment is a **headline feature**, not a side effect. The 2026 wave of
-supply-chain attacks on AI coding agents — poisoned npm/PyPI packages whose install hooks steal
-`~/.claude/.credentials.json`, GitHub/cloud/SSH keys; malicious skills/agents that run shell
-commands without approval; `~/.claude.json` rewrites that redirect your OAuth token to an
-attacker; `rm -rf ~/` trip-wires; `-setup.pth` startup-hook persistence — all assume **the agent,
-its config, and your credentials share one host filesystem**. Running Claude Code inside a
-hardened, per-project container breaks that assumption by construction. The point isn't to stop a
-compromised package from *installing* — `npm install` still runs its hooks — it's to ensure the
-blast radius is **one disposable container**, not your machine.
+1. **Docker** — the container runtime everything runs in.
+   - *Linux* (the reference platform): [Docker Engine](https://docs.docker.com/engine/install/),
+     rootful, daemon running (`sudo systemctl enable --now docker`). Add yourself to the docker
+     group so claude-man can talk to it without sudo: `sudo usermod -aG docker $USER`, then log
+     out and back in.
+   - *macOS*: [Docker Desktop](https://docs.docker.com/desktop/).
+   - *Windows*: WSL2 only — Docker Desktop's WSL backend, or docker-ce inside the distro. See
+     *Platform support* below.
+   - Verify: `docker version` shows a server version without errors.
+2. **Claude Code on the host** — needed once per account to mint profile tokens
+   (`claude setup-token`); the in-container claude is baked into the image and doesn't use the
+   host install. Install: [claude.com/claude-code](https://claude.com/claude-code).
+3. **A terminal emulator** — project shells/claude/editor open in detached terminal windows.
+   Auto-detected: `ghostty`, `alacritty`, `kitty`, `wezterm`, `foot`, `ptyxis` (GNOME's default
+   on Ubuntu 25.10+/Fedora), `gnome-terminal`, `konsole`, `xterm` on Linux; Terminal.app works
+   with nothing extra on macOS; Windows Terminal on WSL2. Anything else works via a custom
+   launcher template — the setup wizard / Settings picker configures it.
+4. **Python ≥ 3.11 and [`uv`](https://docs.astral.sh/uv/)** — to install and run claude-man
+   itself.
 
-| Attack technique (real 2026 TTPs) | What claude-man does |
-|---|---|
-| **Steal `~/.claude/.credentials.json`** | The file is **never** in the container — auth is an env-var OAuth token, never a credentials file (invariant 1). There is nothing to read. |
-| **Harvest SSH private keys** | Keys **never enter the container**: only the host ssh-agent *socket* is forwarded, so a payload can't exfiltrate a key (it can sign while connected — a documented residual). |
-| **Poison host `~/.claude/settings.json` hooks** | The per-project `~/.claude` is seeded from a **filtered allowlist with hooks/statusLine stripped**; there is no path for a poisoned host hook to ride into the container, nor (today) for a container-written hook to reach the host. |
-| **`rm -rf ~/` destructive trip-wire** | `~` is `/home/agent` inside the sandbox — the wiper can only touch the re-seedable per-project config and a tmpfs. **The host home is untouched.** |
-| **`-setup.pth` / daemon persistence** | The rootfs is **read-only** (`--read-only`), capabilities are **all dropped** (`--cap-drop ALL`), `no-new-privileges`, non-root, pid-limited. Image-level persistence is impossible; anything in a `/workspace` venv dies on recreate. |
-| **Memory bomb / runaway build starves the host** | Every container carries a **hard memory cap** (`--memory X --memory-swap X`, `16g` default — no swap spill). A runaway is OOM-killed **inside its own cgroup**; the host desktop never sees memory pressure. (Before this, a 30 GB in-container `node` took out the host's Chrome under the global OOM killer.) |
-| **Malicious skill runs `Bash(*)` / reverse shell** | The command still runs — but **inside** the sandbox: no host reach, and the reverse shell needs egress + tooling the minimal base image doesn't ship. Under **strict egress** the connection is refused outright. |
-| **Exfiltrate secrets / redirect OAuth token to attacker infra** | **Strict egress** (below) routes every connection through an allowlisting proxy on a no-direct-route network — the token and any env secrets can only reach Anthropic/allowlisted hosts, never an attacker endpoint. |
-| **Steal the host GitHub PAT during clone** | Repos are cloned **host-side** with the PAT masked; the host git PAT **never enters the container**. |
-
-### Strict egress (the lockable network boundary)
-
-Egress is **open by default** and **lockable per project** to a strict allowlist. Because
-`--cap-drop ALL` forbids in-container `iptables`, the firewall lives at the **network layer**: the
-agent runs on an `internal` Docker network with **no direct route out**, and a **squid proxy
-sidecar** is the only path to the internet. Only allowlisted domains are reachable — the base set
-always includes `claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the package registries;
-everything else is **denied and logged** so you can tune the list. HTTPS stays end-to-end (CONNECT
-tunnels, no MITM, no CA install). Lock a project with `project lock <slug>` (or create it
-`--egress strict`); the denied-request log surfaces in the TUI for allowlist tuning. The TUI also
-carries an always-on **Network panel** with a row per project: **Traffic** (whole-container network
-I/O since start, from `docker stats`, for every running project) plus distinct **Blocked/Allowed**
-destination counts for locked projects (from the squid access log).
-
-This is the single biggest lever against the *exfiltration* and *command-and-control* steps that
-nearly every one of the attacks above depends on. See [`docs/SECURITY.md`](docs/SECURITY.md) for
-the full threat model and [`CLAUDE.md`](CLAUDE.md) for the load-bearing invariants that keep these
-guarantees true.
+```bash
+uv run claudemanctl doctor    # checks all of the above, with a fix hint per problem
+```
 
 ## Install
 
@@ -175,388 +167,76 @@ uv tool install dist/*.whl               # or: pipx install dist/*.whl
 git clone https://github.com/richardjr/claude-man.git
 cd claude-man
 uv sync          # installs textual + tomlkit into .venv
-uv run claudemanctl --help
+uv run claudeman --help
 ```
 
 Either way, runtime state lives outside the install, under `~/.config/claude-man` and
-`~/.local/state/claude-man`. (A built wheel finds its bundled data under the package; a checkout
-reads `images/` + `library/` from the source tree — see `config._data_root`.)
+`~/.local/state/claude-man`.
 
-## Quick start
-
-```bash
-uv sync                       # install textual + tomlkit into .venv
-uv run claudemanctl --help    # the CLI surface
-uv run claudeman              # launch the TUI
-uv run python -m unittest     # run the (dependency-free) unit tests
-
-# Build + smoke-test the hardened base image (needs docker + a claude install)
-uv run claudemanctl image build base
-uv run claudemanctl image smoke base
-
-# Mint an account profile, then create + run a project under it
-uv run claudemanctl profile add home --default     # completes `claude setup-token` (browser flow)
-uv run claudemanctl project create demo            # write registry + seed config + create container
-uv run claudemanctl project up demo                # start it
-uv run claudemanctl project shell demo             # open a shell inside (or `project claude|nvim demo`)
-uv run claudemanctl profile usage                  # per-account token usage
-```
-
-Prefer the TUI? [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) is the detailed walkthrough of
-building the same environment from `uv run claudeman` — minting a profile, creating a
-project, adding repos, git identity + GitHub CLI setup, and ssh-agent pass-through, with
-every keybinding and screen.
-
-**Want a ready-made recipe for your use case?** [`docs/SETUP-GUIDES.md`](docs/SETUP-GUIDES.md)
-has quick, copy-pasteable setups — a CLI track and a TUI track each — for a Node/Python/Rust/polyglot
-project and for **Terraform + AWS** (including SSH agent-forwarding and AWS credentials), plus locking
-a project to an allowlist and pinning a local model. The sections below are the full reference behind
-those recipes.
-
-## Setting up accounts (profiles)
-
-A **profile** is one Claude account identity, minted once on the host with `claude setup-token`
-and injected per-launch as `CLAUDE_CODE_OAUTH_TOKEN`. claude-man never copies `.credentials.json`
-and never sets `ANTHROPIC_*` keys (see invariant 1 in [`CLAUDE.md`](CLAUDE.md)).
+## Getting started (TUI)
 
 ```bash
-# A personal subscription account, made the default for new projects:
-uv run claudemanctl profile add home --default
-
-# A WORK account behind SSO — runs `claude auth login --sso` first to point the
-# host session at the right seat, then mints the token for THAT account:
-uv run claudemanctl profile add work --sso --email you@company.com
-
-# Give it a friendlier label shown in the TUI / `profile list`:
-uv run claudemanctl profile add work --sso --display-name "Work (ACME SSO)"
-
-# Other login front-ends, used instead of --sso:
-uv run claudemanctl profile add work --login     # plain `claude auth login`
-uv run claudemanctl profile add api  --console   # Anthropic Console (API billing)
+uv run claudeman          # (or just `claudeman` after a wheel install)
 ```
 
-`--sso`, `--login`, and `--console` all run `claude auth login` **before** `claude setup-token`,
-so the token is minted for the account you just signed into:
+On a completely fresh machine the TUI opens with the **setup wizard**. It runs the same checks as
+`claudemanctl doctor` and then walks through the one-time host setup, every step skippable:
 
-| Flag | Effect |
+1. **System check** — docker (binary, daemon, socket permission — each failure shows its exact
+   fix, e.g. the `usermod -aG docker` line), the host claude CLI, the hardened image, your
+   terminal.
+2. **Terminal** — confirms the auto-detected terminal for project windows, or opens the picker;
+   pick `custom` to define a launcher template for a terminal that isn't in the built-in table.
+3. **Account profile** — creates your first profile inline: the TUI pauses back to your
+   terminal, `claude setup-token` opens the browser, you paste the token, and the TUI resumes.
+4. **Base image** — optionally builds the hardened image now with streamed progress (it
+   otherwise builds automatically on your first project create).
+
+The wizard only auto-appears on a fresh machine; re-run it any time from Settings — press `,`
+then `w`.
+
+From the main screen:
+
+- **`n`** creates your first **project** — name it, pick the account profile, an image overlay
+  (base / python / node / rust / …), a pack language, and the egress mode. The container is
+  created and the hardened image built automatically if needed.
+- With the project row selected: **`s`** starts/stops it, **`Enter`** opens a shell inside,
+  **`c`** opens **claude**, **`e`** the baked neovim, **`b`** the workspace in your file manager.
+- **`g`** manages the project's git repos (add a repo URL — it's cloned host-side into
+  `/workspace`), **`p`** opens the Project menu (env mounts, ports, packs, egress lock, model
+  pin, profile switch, recreate, delete), **`,`** opens Settings.
+- The bottom key bar lists everything; every failure surfaces in the log pane and as a toast.
+
+If something misbehaves, `claudemanctl doctor` from any shell re-checks the host with fix hints.
+The full tour with screenshots of every screen is [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md), and
+ready-made per-stack recipes (Node, Python, Rust, Terraform+AWS, lockdown, local models) are in
+[`docs/SETUP-GUIDES.md`](docs/SETUP-GUIDES.md).
+
+## Platform support
+
+| Host | Status | Notes |
+|---|---|---|
+| **Linux** | ✅ supported | The reference platform (developed against Docker 29.x). |
+| **macOS** | ✅ supported | Docker Desktop runs the same Linux image; ssh-agent forwarding uses Docker Desktop's built-in default-agent socket; Terminal.app works out of the box (iTerm2/kitty/alacritty/wezterm too). |
+| **Windows** | ✅ via **WSL2** only | Run claude-man *inside* a WSL2 distro (with Docker Desktop's WSL backend or docker-ce in the distro) — there it *is* Linux. Windows Terminal (`wt`) and `explorer.exe`/`wslview` are auto-detected for spawned windows / Browse. **Native Windows is out of scope.** |
+
+The container side is identical everywhere: the image is Linux regardless of host, so the hardened
+profile never varies. On macOS, note that bind-mount I/O (VirtioFS) is slower than native Linux —
+large `yarn`/`npm` installs in `/workspace` take noticeably longer.
+
+## Going further
+
+| Doc | What's in it |
 |---|---|
-| `--sso` | `claude auth login --sso` — sign in via your org's SSO seat first |
-| `--login` | plain `claude auth login` first |
-| `--console` | `claude auth login --console` — Anthropic Console (API billing) |
-| `--email <addr>` | passed to the login **and** recorded as the profile's account |
-| `--default` | make this the default profile new projects inherit |
-| `--display-name <s>` | human-readable label for the TUI and `profile list` |
-
-With **no** login flag, `profile add` mints against whatever account your host `claude` is already
-logged into. `--email` is optional; without it the account is read back from `claude auth status`.
-
-Managing existing profiles:
-
-```bash
-uv run claudemanctl profile list            # all profiles, default flag, token age
-uv run claudemanctl profile verify work     # which account the token authenticates as (--raw for JSON)
-uv run claudemanctl profile renew work      # re-mint an expired token (≈1-year life, can't self-refresh)
-uv run claudemanctl profile seed work       # (re)capture the host ~/.claude seed new projects inherit
-uv run claudemanctl profile usage           # per-account token usage across all projects (from transcripts)
-```
-
-## Managing projects
-
-```bash
-# Create a project, choosing its account, image overlay, pack language, and egress mode:
-uv run claudemanctl project create demo --profile work --overlay python --language python --egress open
-#   --profile <name>             account to run under   (default: the default profile)
-#   --overlay base|python|rust|node   toolchain baked into the image (default: base)
-#   --language <tier>            curated-pack tier whose defaults apply (see Curated packs below)
-#   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
-
-uv run claudemanctl project up demo         # create-if-needed + start
-uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug)
-uv run claudemanctl project stop demo       # stop the container (project + workspace are kept)
-uv run claudemanctl project shell demo      # open a shell in a new terminal
-uv run claudemanctl project claude demo     # run claude in a new terminal
-uv run claudemanctl project nvim demo       # open neovim (baked into the image) in a new terminal
-
-# Recreate the container (applies env/port/identity changes). Like `up`, it offers the on-start
-# claude update — prompts on a TTY; --update-yes rebuilds to the latest without asking, --no-update skips:
-uv run claudemanctl project recreate demo
-uv run claudemanctl project recreate demo --update-yes
-# Switch a project to a different account (mismatch-guarded; --force to override + re-seed identity):
-uv run claudemanctl project recreate demo --profile home
-uv run claudemanctl project recreate demo --profile home --force
-```
-
-### Repos in a project's workspace
-
-Repos are cloned **host-side** into `workspace/` (the gh PAT / ssh-agent never enters the container);
-adding one to a live project clones into the running container's `/workspace` bind immediately — no
-recreate. Live git state (branch, clean/dirty, ahead/behind, branch-vs-config drift) is read fresh per
-scan.
-
-```bash
-uv run claudemanctl project repo add demo git@github.com:org/svc.git   # register + clone live
-#   --branch <name>   branch to track          (default: main)
-#   --dir <subdir>    workspace subdir         (default: derived from the url)
-#   --no-clone        register only; a later `sync-repos` clones it
-uv run claudemanctl project repo list demo     # per-repo live state table (fetch-less)
-uv run claudemanctl project sync-repos demo    # clone any missing + git fetch all, then show state
-uv run claudemanctl project pull demo          # fast-forward each repo (ff-only; skips dirty/diverged)
-uv run claudemanctl project repo rm demo svc   # drop from the registry (checkout left on disk)
-uv run claudemanctl project repo rm demo svc --purge   # ...and delete the on-disk checkout
-```
-
-### Environment mounts (ssh + files)
-
-Make host material available **inside** the container for the agent's own runtime / git-over-ssh.
-`ssh` forwards your running ssh-agent (private keys stay on the host); `file` binds a host file at a
-container path (read-only by default). Mounts are fixed at create, so a change needs `recreate`; the
-base image needs `openssh-client` (rebuild with `image build base`).
-
-```bash
-uv run claudemanctl project env add demo ssh                          # agent-forward + ~/.ssh config/known_hosts
-uv run claudemanctl project env add demo file ~/.netrc /home/agent/.netrc   # [--rw] writable
-uv run claudemanctl project env add demo file ~/Work/CLAUDE.md /workspace/   # workspace-root guidance (cp-style trailing /)
-uv run claudemanctl project env list demo
-uv run claudemanctl project resync demo        # re-validate sources + re-seed ssh (no recreate)
-uv run claudemanctl project env rm demo /home/agent/.netrc            # by container dst or 'ssh'
-```
-
-For **ad-hoc** file transfer (no recreate, nothing persisted) use the scratch dir instead of a `file`
-mount: every container gets **`/workspace/scratch/`**, a known drop-zone backed by
-`~/.local/state/claude-man/projects/<slug>/workspace/scratch/` on the host (open it from the TUI's
-Browse action, `b`). Drop files in while the container runs and tell the agent to "check the data" —
-an injected `CLAUDE.md` note points it at `/workspace/scratch/`. It is **wiped on every start and
-stop**, so it never persists; keep durable work in a repo under `/workspace/`.
-
-Projects launch `claude`/shell at **`/workspace`** (`docker exec -w`) — the uniform anchor where the
-workspace `CLAUDE.md` (and any pack-injected guidance) lives; set `[project] workdir = "<subdir>"` in
-the TOML to land in a repo dir instead.
-
-### Curated packs (guidance templates)
-
-A library of **packs** ships in this repo (`library/packs/`): each pack bundles focused `CLAUDE.md`
-fragments and/or skills that travel together — `guardrails` (never commit unasked, no destructive
-git, no secrets), `code-quality`, `workflow`, plus per-language convention packs (`node-conventions`,
-`python-uv`, `rust-cargo`). Projects **select** packs; claude-man **materializes** the selection into
-the project's asset source and syncs it into the live binds, so the agent picks it up at its next
-session launch — changes apply **immediately, no recreate**. Because the library is versioned here,
-improving a rule once improves it for every project on the next start.
-
-```bash
-uv run claudemanctl packs list                       # browse the library (--tier common|node|python|rust)
-uv run claudemanctl project create demo --language node   # defaults: common + node tier packs
-uv run claudemanctl project packs list demo          # the project's selection
-uv run claudemanctl project packs add demo workflow  # select a pack (applies immediately)
-uv run claudemanctl project packs rm demo workflow   # deselect (files removed from source + binds)
-uv run claudemanctl project packs defaults demo      # re-apply the library defaults (REPLACES the selection)
-```
-
-How it behaves (full design: [`docs/PACKS.md`](docs/PACKS.md)):
-
-- **Defaults are explicit, not creeping** — resolved once at `project create` from the `common` +
-  `--language` tiers and written into the project TOML. A new default added to the library later
-  never silently lands in existing projects (`packs defaults` re-applies on demand).
-- **Fragments are linked, not inlined** — they land under `/workspace/.claude-man/<pack>/` and are
-  referenced from the workspace `CLAUDE.md` via a fenced block of `@` imports; everything you write
-  outside that block is never touched. Skills land under `~/.claude/skills/`.
-- **Yours vs theirs is tracked** — a manifest records what the pack system manages. Your own files
-  always win collisions; deselecting removes only pack-managed files; an in-container edit to a
-  pack file is **curated-wins** (re-stamped from the library on next start, backed up first —
-  improvements belong upstream in the library).
-- **TUI**: select a project, `p` → `p` (Project… → Packs…) — a checklist grouped *Common* / your
-  language tier, with a **State** column showing drift (`stale` / `⚠ drifted` / `operator file
-  wins`); `d` re-applies defaults. The create form (`n`) has a Language field, pre-filled from the
-  Overlay choice.
-- The library is **public content** (this repo is public) — house rules and generic conventions go
-  in; anything client- or project-specific stays in the per-project asset source
-  (`~/.config/claude-man/assets/<slug>/`).
-
-### Strict egress (lock a project to an allowlist)
-
-Lock a project so its container can only reach an allowlist of domains, routed through a squid proxy
-sidecar on a no-direct-route network (see *What it protects against* above for why). Egress is fixed
-at container create, so lock/unlock **recreate** the container; the base allowlist always includes
-`claude.ai` (OAuth refresh), the Anthropic API, GitHub, and the package registries.
-
-```bash
-uv run claudemanctl project create demo --egress strict   # locked from the start
-uv run claudemanctl project lock demo            # lock an existing project (builds the proxy image once, recreates)
-uv run claudemanctl project unlock demo          # back to open egress (tears the sidecar + network down, recreates)
-uv run claudemanctl project egress-log demo      # destinations the allowlist BLOCKED — add legit ones to egress.allowlist
-uv run claudemanctl project egress-smoke demo    # verify enforcement: an allowlisted host reaches, a blocked one doesn't
-uv run claudemanctl image build proxy            # (re)build the claude-man:proxy squid sidecar image by hand
-```
-
-Add project-specific allowlist domains either inline from the TUI — the **Project** menu (`p`) →
-**Egress…** (`g`) opens the Egress screen, which locks/unlocks the project (`l`), adds/removes
-allowlist extras (`a`/`x` — a fast, validated registry-only write; `recreate` to apply), and
-promotes a destination the proxy actually blocked straight into the allowlist (`b`) — or by hand
-under `[project.egress]` `allowlist = [...]` in the project's TOML, then `project lock demo` again to
-re-render and recreate. The always-on **Network panel** is the surface that shows per-project
-**Blocked/Allowed** distinct-destination counts (locked projects) alongside whole-container
-**Traffic**. Today's lock covers proxy-aware traffic
-(claude, `git` over HTTPS, npm/pip/apt); `ssh`-based git and direct-DNS tools are intentionally not
-reachable under lock — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § *Network / egress*.
-
-### Git identity + GitHub CLI (`gh`) inside the container
-
-So the agent can `git commit` and `gh` under the read-only rootfs:
-
-- **Git author identity** is injected as git env-config (no writable file needed). It defaults to your
-  **host** `git config --global user.{name,email}`; override it per-host in claude-man's global settings.
-  The on-disk `git config --global` and `gh` config land on a writable tmpfs, so `git config --global`
-  and `gh auth login` work in-container without hitting the read-only rootfs. **Changing the identity
-  needs a `recreate`** to take effect.
-- **`gh` is baked into every image** (pinned GitHub CLI; rebuild base, then any overlay, to add it to an
-  existing install). A GitHub token is injected **only if you opt in** with `config gh-token` (stored
-  `0600` in the state tier, injected pass-through as `GH_TOKEN` — never in argv or the config file).
-  Without one, auth is the operator's job: run `gh auth login` inside the container (it writes the
-  writable config dir), or supply a token via an `env` mount.
-
-```bash
-uv run claudemanctl config show                    # resolved git identity + ssh-key load status
-uv run claudemanctl config git                      # print the resolved identity (host or override)
-uv run claudemanctl config git --name "You" --email you@example.com   # set a claude-man override
-uv run claudemanctl config git --clear              # drop the override; inherit the host git config
-
-# gh needs an image rebuild + a recreate of the project:
-uv run claudemanctl image build base
-uv run claudemanctl image build node                # (or whichever overlay the project uses)
-uv run claudemanctl project recreate demo
-```
-
-In the TUI, the **Settings** screen (press `,`) shows the resolved identity and ssh-key status; press
-`g` there to open the git-identity edit modal (leave a field blank to inherit the host). Recreate a
-project afterwards to apply.
-
-## Local models (hybrid mode)
-
-Run a project's in-container `claude` against a **self-hosted model** *alongside* your claude.ai
-subscription. Pinning a model turns on **hybrid mode**: a per-project **LiteLLM gateway sidecar** fronts
-both legs on one endpoint, so both appear in Claude Code's `/model` picker and switch **mid-session**.
-
-- **Claude leg** — the built-in tiers pass through to `api.anthropic.com` on your **subscription** (the
-  agent's OAuth is forwarded; **no API key is ever injected**, so billing can't slip to console
-  pay-per-token — invariant 1). The gateway maps `claude-*` ids straight through, so new Claude models
-  work with no config edit.
-- **Local leg** — the pinned model shows as `Local: <model>` and routes to your host GPU via Ollama.
-
-```bash
-# Manage the models claude-man can use (host Ollama — see docs/MODELS.md for GPU + bind setup):
-uv run claudemanctl model presets                 # the curated coding-model table (Qwen3-Coder default)
-uv run claudemanctl model add qwen3-coder:30b      # install a preset key or any raw ollama tag (streamed)
-uv run claudemanctl model list [--check]           # installed models; --check = update-available probe
-uv run claudemanctl model show qwen3-coder:30b     # context length, `tools` capability, quant, family
-
-# Pin / unpin a local model on a project (recreate to apply):
-uv run claudemanctl project model set demo qwen3-coder:30b   # -> hybrid mode
-uv run claudemanctl project model show demo
-uv run claudemanctl project model clear demo                 # back to subscription-direct
-uv run claudemanctl project recreate demo
-
-# Or pin a CLAUDE model instead (launched as `claude --model <ref>`; applies at the next
-# launch — no recreate, no gateway, allowed on locked projects; one model choice per project):
-uv run claudemanctl project model set demo --claude claude-fable-5   # or: opus / sonnet / haiku
-```
-
-**Prerequisite:** Ollama runs on the **host** (claude-man manages models, not the server). It needs a
-**GPU build**, a `0.0.0.0:11434` bind so containers can reach it, and the pinned model pulled — all in
-[`docs/MODELS.md`](docs/MODELS.md). On `up`, a hybrid project **pre-flights** the local backend and
-prints a one-line warning if Ollama is unreachable or the model isn't pulled (the Claude leg works
-regardless). The hardened floor is byte-identical whether or not a model is pinned; strict-egress +
-hybrid (air-gapped) is not yet supported and is refused with a clear message.
-
-> **Status (Phase 9, issue #14):** the model framework, the per-project pin, the gateway sidecar, and
-> the **Claude subscription passthrough** are working and **verified live** (a Claude request through the
-> gateway returns 200 and stays on the subscription). The local leg works once the host Ollama
-> prerequisites above are met.
-
-## Terminal & file-manager preferences
-
-`project shell` / `project claude` / `project nvim` open a **detached terminal window** running `docker exec` into
-the container, and Browse (`b` in the TUI) opens the workspace in your file manager. Both are
-auto-detected per platform, and both are configurable:
-
-```bash
-uv run claudemanctl config terminal                 # show the current choice + what's installed
-uv run claudemanctl config terminal --program kitty # pick a launcher explicitly
-uv run claudemanctl config terminal --auto          # back to auto-detect
-# Any other terminal, via a template ('{argv}' expands to the docker exec argv;
-# '{title}' and '{class}' are also substituted):
-uv run claudemanctl config terminal --custom 'myterm --title {title} -e {argv}'
-
-uv run claudemanctl config opener --command 'nautilus'   # Browse opener (the path is appended)
-uv run claudemanctl config opener --auto
-```
-
-Built-in launchers: `ghostty`, `alacritty`, `kitty`, `wezterm`, `foot`, `gnome-terminal`,
-`konsole`, `xterm` (Linux/WSL2); `terminal-app` (Terminal.app — the zero-install macOS fallback),
-`iterm2`, plus `kitty`/`alacritty`/`wezterm` (macOS); `wt` (Windows Terminal, WSL2).
-Auto-detection prefers `ghostty` → `alacritty` → the rest, so existing setups behave unchanged.
-In the TUI, Settings (`,`) → `e` opens the picker. The preference lives in
-`~/.config/claude-man/config.toml` under `[terminal]` / `[opener]`.
-
-The TUI also opens with a short **boot splash** (the logo sweeps in, then scrolls up to reveal
-the live table — about a second, any key skips it). Turn it off with
-`claudemanctl config splash off` (`[ui] splash = false`).
-
-## Container memory cap
-
-Every project container is created with a **hard memory limit** — `--memory X --memory-swap X`
-(equal values, so the container gets **no swap**: a true ceiling). When something inside hits it,
-the kernel OOM-kills **inside that container's cgroup** (the runaway process), and the host never
-comes under memory pressure. The cap is part of the hardened floor — it is **always applied**;
-you only choose its value. Default **`16g`**, minimum `1g`:
-
-```bash
-uv run claudemanctl config memory               # show the current cap
-uv run claudemanctl config memory 24g           # set it (docker size string: 24g, 8192m, 1.5g)
-uv run claudemanctl config memory --default     # back to 16g
-```
-
-In the TUI, Settings (`,`) → `m`. The value lives in `~/.config/claude-man/config.toml` under
-`[container] memory`. It is fixed at container create, so **recreate a project to apply** — running
-containers keep their current cap until then. Hosts without swap accounting get docker's "memory
-limited without swap" warning and still create (the RAM cap holds).
-
-## Building images
-
-```bash
-uv run claudemanctl image build base                  # the hardened base image
-uv run claudemanctl image build python                # an overlay (base|python|rust|node)
-uv run claudemanctl image build base --claude-version 2.1.160   # pin the claude version
-uv run claudemanctl image build base --dry-run        # print the docker build argv only, don't run
-uv run claudemanctl image smoke base                  # gate an image against the hardened run profile
-```
-
-See [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) for the TUI walkthrough (profile → project →
-GitHub → ssh), [`CLAUDE.md`](CLAUDE.md) for the invariants any contributor (human or Claude)
-must keep, [`ROADMAP.md`](ROADMAP.md) for the phase plan,
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design,
-[`docs/PACKS.md`](docs/PACKS.md) for the curated-pack system, and
-[`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and hardening rationale.
-
-## Host requirements
-
-- **Linux** (the reference platform), **macOS** (Docker Desktop), or **Windows via WSL2** — see
-  *Platform support* above.
-- Docker — rootful docker-ce on Linux/WSL2 (designed against Docker 29.x), or Docker Desktop on
-  macOS (also fine as the WSL2 backend on Windows).
-- Python ≥ 3.11 and [`uv`](https://docs.astral.sh/uv/).
-- A terminal emulator for spawned shells — any of the built-in launchers above, or your own via
-  `config terminal --custom`. macOS needs nothing extra (Terminal.app); on WSL2, Windows Terminal
-  is picked up automatically (install [`wslu`](https://wslutiliti.es/wslu/) for the best Browse
-  experience — `wslview` translates paths for Windows Explorer).
-- A Claude Code install on the host to mint profile tokens (`claude setup-token`).
-
-### Windows (WSL2) notes
-
-Everything runs **inside** the WSL2 distro — clone, `uv sync`, and run claude-man there, with
-either Docker Desktop's WSL integration or docker-ce installed in the distro. The host ssh-agent,
-state dirs, and workspaces are all distro-side, exactly like native Linux. `project shell|claude|nvim`
-opens Windows Terminal tabs (running `wsl.exe -e docker exec …`), and Browse opens the workspace
-in Explorer via `wslview`. Running claude-man from native Windows (PowerShell/cmd) is not
-supported.
+| [`docs/CLI.md`](docs/CLI.md) | **The full `claudemanctl` reference** (power users / scripting): profiles, projects, repos, env mounts, ports, packs, egress, sync-back, models, images, all config verbs. |
+| [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) | The detailed TUI walkthrough — every screen and keybinding. |
+| [`docs/SETUP-GUIDES.md`](docs/SETUP-GUIDES.md) | Copy-pasteable per-stack recipes (Node / Python / Rust / polyglot / Terraform+AWS), strict-egress lockdown, hybrid local models. |
+| [`docs/MODELS.md`](docs/MODELS.md) | Local/hybrid models — host Ollama setup, curated presets, the per-project pin. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The full design: stores, lifecycle, hardened run profile, egress, sync-back, TUI internals. |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | The threat model behind the hardening. |
+| [`docs/PACKS.md`](docs/PACKS.md) | The curated-pack system design. |
+| [`CLAUDE.md`](CLAUDE.md) | The load-bearing invariants any contributor (human or Claude) must keep. |
+| [`ROADMAP.md`](ROADMAP.md) | The phase plan and current status. |
 
 ## Contributing & security
 

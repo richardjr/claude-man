@@ -24,6 +24,11 @@ claude-model pin as ``--model <ref>`` (registry ``claude_model`` via ``claude_mo
 launch-time only, so the pin needs no recreate). ``spawn_path`` opens a HOST directory (the
 workspace bind source) in the system file manager (``xdg-open`` / ``open`` / ``wslview`` per
 platform).
+
+``spawn`` returns a ``SpawnHandle`` (Popen + a stderr capture) that every caller hands to
+``watch_spawn``: a short post-spawn wait classifies what the launcher did (still running /
+exited 0 / failed with a stderr tail), so a launcher that starts and then fails is surfaced
+instead of logged as success (issue #31).
 """
 
 from __future__ import annotations
@@ -33,8 +38,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
+from typing import IO, NamedTuple
 
 from .. import config, hostplatform
 from ..registry import projects
@@ -130,6 +137,12 @@ _LINUX_TERMINALS: tuple[TerminalSpec, ...] = (
                  ("wezterm", "start", "--class", "{class}", "--", "{argv}")),
     TerminalSpec("foot", "foot",
                  ("foot", "--app-id={class}", "--title={title}", "{argv}")),
+    # Ptyxis: GNOME's default terminal since Ubuntu 25.10 / Fedora 41 (issue #31). No
+    # --class/--app-id flag exists (every window is app-id org.gnome.Ptyxis), so per-project
+    # identity rides the title only — same shape as gnome-terminal/konsole below. Placed before
+    # gnome-terminal so a stock GNOME box auto-detects its actual desktop default.
+    TerminalSpec("ptyxis", "ptyxis",
+                 ("ptyxis", "--new-window", "-T", "{title}", "--", "{argv}")),
     TerminalSpec("gnome-terminal", "gnome-terminal",
                  ("gnome-terminal", "--title={title}", "--", "{argv}")),
     TerminalSpec("konsole", "konsole", ("konsole", "-e", "{argv}")),
@@ -233,7 +246,16 @@ def resolve_spec(platform: str | None = None) -> TerminalSpec:
     s = _safe_settings()
     table = platform_terminals(platform)
     if s.terminal_program == CUSTOM_PROGRAM:
-        return _custom_spec(s.terminal_command)
+        spec = _custom_spec(s.terminal_command)
+        # Probe the custom launcher like any named one (issue #31: a stale custom template whose
+        # binary is gone otherwise fails silently at Popen, after a green "opened" log line).
+        if not spec.available():
+            raise RuntimeError(
+                f"configured custom terminal {spec.binary or '(empty command)'!r} not found on "
+                f"PATH — install it, fix the [terminal] command in {config.settings_toml_path()}, "
+                f"or `claudemanctl config terminal --auto`"
+            )
+        return spec
     if s.terminal_program:
         for spec in table:
             if spec.name == s.terminal_program:
@@ -290,24 +312,99 @@ def _tint_hex(slug: str) -> str | None:
     return config.project_tint(slug) if _safe_settings().terminal_tint else None
 
 
+# ---------------------------------------------------------------------------
+# Spawn outcome — a launcher that starts and then fails must not look like success (issue #31:
+# stdout/stderr were DEVNULL'd and nothing checked the exit status, so a broken launcher produced
+# a green "opened" log line and no window). Client-server terminals (gnome-terminal, ptyxis,
+# konsole, wt) exit almost immediately — 0 on success, non-zero on failure — so a short post-spawn
+# wait catches them; window-lifetime terminals (ghostty, alacritty, …) are still running at the
+# probe and count as success. Fails OPEN: a launcher failing after the probe window stays silent
+# (same as before), and the watcher itself never raises.
+# ---------------------------------------------------------------------------
+SPAWN_PROBE_S = 1.5   # post-spawn grace: client-server launchers exit well within this
+
+
+@dataclass(frozen=True)
+class SpawnOutcome:
+    ok: bool
+    state: str              # "running" | "exited" | "failed"
+    returncode: int | None  # None = still running at probe time
+    stderr_tail: str = ""   # last lines of the launcher's stderr (failed only)
+
+
+def classify_spawn(returncode: int | None, stderr_tail: str = "") -> SpawnOutcome:
+    """Pure: map a launcher's exit status at probe time to an outcome."""
+    if returncode is None:
+        return SpawnOutcome(True, "running", None)
+    if returncode == 0:
+        return SpawnOutcome(True, "exited", 0)
+    return SpawnOutcome(False, "failed", returncode, stderr_tail)
+
+
+class SpawnHandle(NamedTuple):
+    """A spawned launcher plus its stderr capture; hand it to ``watch_spawn`` (which closes it)."""
+
+    proc: subprocess.Popen
+    stderr_file: IO[bytes]
+
+
+def _stderr_tail(f: IO[bytes], *, max_bytes: int = 2048, max_lines: int = 6) -> str:
+    """The last non-blank lines of a captured-stderr file. Never raises."""
+    try:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(max(0, size - max_bytes))
+        lines = [ln for ln in f.read(max_bytes).decode("utf-8", "replace").splitlines()
+                 if ln.strip()]
+        return "\n".join(lines[-max_lines:])
+    except (OSError, ValueError):
+        return ""
+
+
+def watch_spawn(handle: SpawnHandle, *, timeout: float = SPAWN_PROBE_S) -> SpawnOutcome:
+    """Wait briefly for a spawned launcher and classify what happened. Never raises; always
+    closes the handle's stderr capture. Blocks up to ``timeout`` — call off the UI thread."""
+    rc: int | None
+    try:
+        rc = handle.proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        rc = None
+    except OSError:
+        rc = handle.proc.poll()
+    tail = _stderr_tail(handle.stderr_file)
+    try:
+        handle.stderr_file.close()
+    except OSError:
+        pass
+    return classify_spawn(rc, tail)
+
+
 def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
-          args: tuple[str, ...] = ()) -> subprocess.Popen:
-    """Launch a detached terminal window. ``program`` is typically 'bash' or 'claude'."""
+          args: tuple[str, ...] = ()) -> SpawnHandle:
+    """Launch a detached terminal window. ``program`` is typically 'bash' or 'claude'.
+
+    Returns a ``SpawnHandle``; every caller must pass it to ``watch_spawn`` so a launcher that
+    starts and then fails is surfaced (and the stderr capture is closed)."""
     argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=_tint_hex(slug),
                       args=args)
-    return subprocess.Popen(
-        argv,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    stderr_file = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+        )
+    except BaseException:
+        stderr_file.close()
+        raise
+    return SpawnHandle(proc, stderr_file)
 
 
-def spawn_shell(slug: str) -> subprocess.Popen:
+def spawn_shell(slug: str) -> SpawnHandle:
     return spawn(slug, "bash", workdir=launch_workdir(slug))
 
 
-def spawn_nvim(slug: str) -> subprocess.Popen:
+def spawn_nvim(slug: str) -> SpawnHandle:
     """Open neovim (baked read-only into the image — images/nvim) in the project's launch workdir.
 
     No one-per-container guard: unlike claude (invariant 6), parallel nvim instances share no
@@ -354,7 +451,7 @@ def claude_model_args(slug: str) -> tuple[str, ...]:
     return ("--model", model) if model else ()
 
 
-def spawn_claude(slug: str) -> subprocess.Popen:
+def spawn_claude(slug: str) -> SpawnHandle:
     if claude_already_running(slug):
         raise RuntimeError(
             f"claude is already running in {slug!r} — one claude per container (a second races "
@@ -373,7 +470,9 @@ def _pick_opener(platform: str | None = None) -> list[str] | None:
     ``xdg-open``/``gio open`` (Linux)."""
     s = _safe_settings()
     if s.opener_command:
-        return list(s.opener_command)
+        # Probe like the terminal path: a configured opener whose binary is gone must surface as
+        # an error (via build_open_path_argv), not fail silently at Popen.
+        return list(s.opener_command) if shutil.which(s.opener_command[0]) else None
     if hostplatform.is_macos(platform):
         candidates: tuple[list[str], ...] = (["open"],)
     elif hostplatform.is_wsl(platform):
@@ -390,6 +489,12 @@ def build_open_path_argv(path: str) -> list[str]:
     """Pure: argv to open ``path`` in the system file manager. Raises if no opener is on PATH."""
     opener = _pick_opener()
     if opener is None:
+        cfg = _safe_settings().opener_command
+        if cfg:
+            raise RuntimeError(
+                f"configured opener {cfg[0]!r} not found on PATH — install it, or "
+                f"`claudemanctl config opener --auto`"
+            )
         raise RuntimeError(
             "no file-manager opener found (need xdg-open/gio on Linux, wslview on WSL2) — "
             "or set one with `claudemanctl config opener --command '…'`"

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 
+from rich.markup import escape
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -19,7 +20,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Header, Label, RichLog, Static
 
-from .. import config, lifecycle, usage
+from .. import config, doctor, lifecycle, usage
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
 from ..docker import stats, status
@@ -27,8 +28,10 @@ from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
 from . import rowfx
+from . import setupview
 from . import terminals
 from .screens.add_repo import AddRepoScreen
+from .screens.auth import AuthScreen
 from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
@@ -47,6 +50,7 @@ from .screens.stop_all_confirm import StopAllConfirmScreen
 from .screens.models import ModelsScreen
 from .screens.remove_repo import RemoveRepoScreen
 from .screens.settings import SettingsScreen
+from .screens.setup import SetupWizardScreen
 from .screens.splash import SplashScreen
 from .screens.sync_review import SyncReviewScreen
 from .screens.update_confirm import UpdateConfirmScreen
@@ -61,6 +65,9 @@ _NET_COLUMNS = ("Project", "Egress", "Blocked", "Allowed", "Traffic")
 _USAGE_COLUMNS = ("Profile", "Account", "Token", "In", "Out", "Cache", "Total")
 # Braille spinner frames for the header "work in progress" indicator (start/stop/recreate/… take time).
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Row key for the empty-state placeholder row (no projects yet). NUL-prefixed so it can never
+# collide with a real slug (validate_slug forbids it); _current_slug maps it to None.
+_EMPTY_ROW_KEY = "\0empty"
 # Band passes for a repo-panel git-change sweep ("a few times" — start/stop row sweeps run once).
 _GIT_SWEEP_REPEATS = 3
 # Responsive vertical breakpoints (terminal rows). The Projects table is `height: 1fr`, so when the
@@ -85,6 +92,9 @@ _KEYBAR = (
 class ClaudeManApp(App):
     TITLE = "claude-man"
     CSS = """
+    /* Startup problem banner (issue #31): docker missing/down/permission-denied used to surface
+       only as an empty table + opaque build failures. Hidden unless the startup probe FAILs. */
+    #banner { display: none; height: auto; padding: 0 1; background: $error 20%; }
     /* Projects is the priority area: 1fr to claim slack, min-height so a content-heavy Repos panel
        can never squeeze it to nothing within a breakpoint band (panels still drop on resize — see
        _reflow_panels). */
@@ -154,6 +164,7 @@ class ClaudeManApp(App):
         ("i", "Overlay (image)…", "overlay"),
         ("m", "Model…", "model_pin"),
         ("f", "Profile…", "profile"),
+        ("a", "Auth…", "auth"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -165,6 +176,7 @@ class ClaudeManApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
+            yield Static("", id="banner")
             yield DataTable(id="projects", cursor_type="row")
             yield Label("Repos · —", id="repos-title", classes="panel-title")
             yield DataTable(id="repos")
@@ -238,6 +250,7 @@ class ClaudeManApp(App):
         self._dispatch_gitstate(fetch=False)
         self._render_repo_detail()
         self._bootstrap_env()  # load configured ssh keys into the agent so containers can use them
+        self._startup_doctor()  # one-shot docker probe -> banner/toast on FAIL (issue #31)
         # Poll container liveness OFF the UI thread (refresh_projects is a thread worker). 10s is plenty
         # for a status column — every lifecycle action triggers an immediate refresh too. Phase 2 would
         # replace the poll with a `docker events` worker.
@@ -248,6 +261,22 @@ class ClaudeManApp(App):
         # Row state-change sweeps: 30 fps only while one is live (resumed by _render_projects when a
         # status flip is detected, paused again by _tick_rowfx once the last band exits).
         self._fx_timer = self.set_interval(1 / rowfx.FPS, self._tick_rowfx, pause=True)
+        # First-run setup wizard: auto-offered ONLY on a completely fresh machine (no config.toml,
+        # no profiles, no projects — setupview.should_offer; Skip/Finish materialise config.toml so
+        # it never auto-offers again). Pushed BEFORE the splash: the stack is LIFO, so the splash
+        # (pushed last) plays on top and scrolls off to reveal the wizard. Deliberately OUTSIDE the
+        # splash gate below — `config splash off` or a small terminal must not suppress first-run
+        # guidance. Re-run any time: Settings (,) -> w.
+        try:
+            offer = setupview.should_offer(
+                config_exists=config.settings_toml_path().exists(),
+                profile_count=len(profiles_registry.list_names()),
+                project_count=len(projects.list_slugs()),
+            )
+        except Exception:  # noqa: BLE001 - a bad registry must not block startup
+            offer = False
+        if offer:
+            self.push_screen(SetupWizardScreen())
         # Boot splash, pushed LAST: everything above is already scheduled, so the table fills
         # underneath while the logo plays and the scroll-off reveals live data, not an empty shell.
         # Skipped when disabled (`config splash off`) or the terminal can't fit the logo.
@@ -297,7 +326,8 @@ class ClaudeManApp(App):
             # claude --model pin (mutually exclusive in the schema). The cell is a display hint,
             # not a parser — claude refs never carry a colon, ollama tags usually do, but a bare
             # local name ("devstral") is legal; `project model show` names the kind exactly.
-            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model)
+            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
+             p.auth)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -334,7 +364,10 @@ class ClaudeManApp(App):
         # slug so the sweep + settle repaints reuse the exact same colour.
         self._name_colors = {r.slug: config.project_name_color(r.slug) for r in rows}
         for row in rows:
-            cells = [row.slug, row.kind, row.profile, row.egress, row.model or "-",
+            # A login-mode project badges its Profile cell — the auth posture must never be
+            # silent (invariant 1's login amendment), and the badge avoids a ninth column.
+            profile_cell = f"{row.profile} [login]" if row.auth == "login" else row.profile
+            cells = [row.slug, row.kind, profile_cell, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
             # Colour the Project name with its gradient tint, and the Status cell green = UP /
@@ -345,6 +378,14 @@ class ClaudeManApp(App):
             prev = prev_kinds.get(row.slug)
             if prev is not None and prev != row.kind and status.UP in (prev, row.kind):
                 self._rowfx[row.slug] = time.monotonic()
+        if not rows:
+            # Empty-state guidance: a fresh install used to show a silently empty grid with no
+            # hint at all. The sentinel key never reaches the action handlers (_current_slug
+            # returns None for it), so every project verb stays inert on this row.
+            table.add_row(Text("(no projects yet)", style="dim"), "", "", "", "", "", "",
+                          Text("press n to create one · , then w runs guided setup",
+                               style="dim"),
+                          key=_EMPTY_ROW_KEY)
         self._row_cells = cells_map
         self._rowfx = {s: v for s, v in self._rowfx.items() if s in cells_map}
         if self._rowfx:
@@ -558,9 +599,10 @@ class ClaudeManApp(App):
         if table.row_count == 0:
             return None
         try:
-            return table.coordinate_to_cell_key((table.cursor_row, 0)).row_key.value
+            key = table.coordinate_to_cell_key((table.cursor_row, 0)).row_key.value
         except Exception:
             return None
+        return None if key == _EMPTY_ROW_KEY else key
 
     def _log(self, message: str) -> None:
         self.query_one("#log", RichLog).write(message)
@@ -692,12 +734,14 @@ class ClaudeManApp(App):
         try:
             ws.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            self._log(f"[red]browse: cannot access {ws}: {exc}[/]")
+            self._log(f"[red]browse: cannot access {ws}: {escape(str(exc))}[/]")
+            self.notify(f"browse failed: cannot access {ws}: {exc}", severity="error", timeout=10)
             return
         try:
             terminals.spawn_path(str(ws))
         except (RuntimeError, OSError) as exc:
-            self._log(f"[red]browse failed: {exc}[/]")
+            self._log(f"[red]browse failed: {escape(str(exc))}[/]")
+            self.notify(f"browse failed: {exc}", severity="error", timeout=10)
             return
         self._log(f"[green]browsing[/] {ws}")
 
@@ -737,17 +781,42 @@ class ClaudeManApp(App):
 
     def _spawn_terminal(self, slug: str, program: str) -> None:
         """Spawn the detached terminal window (UI thread). Wrapped so a missing terminal binary
-        (RuntimeError from build_argv) or a spawn failure logs instead of bubbling up."""
+        (RuntimeError from build_argv/resolve_spec) or a spawn failure surfaces instead of bubbling
+        up; a watcher worker then classifies what the launcher actually did, so a launcher that
+        starts and then fails is surfaced too (issue #31). Failures go to BOTH the log pane and a
+        toast — the log pane is auto-hidden on short terminals (_HIDE_LOG_BELOW)."""
         spawn, verb, past = {
             "claude": (terminals.spawn_claude, "claude", "launched"),
             "nvim": (terminals.spawn_nvim, "editor", "opened"),
         }.get(program, (terminals.spawn_shell, "shell", "opened"))
         try:
-            spawn(slug)
+            handle = spawn(slug)
         except (RuntimeError, OSError) as exc:
-            self._log(f"[red]{verb} for {slug} failed: {exc}[/]")
+            self._log(f"[red]{verb} for {slug} failed: {escape(str(exc))}[/]")
+            self.notify(f"{verb} failed for {slug}: {exc}", severity="error", timeout=10)
             return
-        self._log(f"[green]{verb}[/] {past} for {slug}")
+        self._log(f"launching {verb} for {slug} …")
+        self._watch_spawn_worker(slug, verb, past, handle)
+
+    @work(thread=True, group="spawnwatch", exclusive=False)
+    def _watch_spawn_worker(self, slug: str, verb: str, past: str,
+                            handle: terminals.SpawnHandle) -> None:
+        """Off the UI thread: brief post-spawn wait (terminals.SPAWN_PROBE_S) + classify."""
+        outcome = terminals.watch_spawn(handle)
+        self.call_from_thread(self._after_spawn_watch, slug, verb, past, outcome)
+
+    def _after_spawn_watch(self, slug: str, verb: str, past: str,
+                           outcome: terminals.SpawnOutcome) -> None:
+        if outcome.ok:
+            self._log(f"[green]{verb}[/] {past} for {slug}")
+            return
+        tail = f" — {escape(outcome.stderr_tail)}" if outcome.stderr_tail else ""
+        self._log(f"[red]{verb} for {slug} failed: terminal launcher exited "
+                  f"{outcome.returncode}{tail}[/]")
+        msg = f"{verb} failed for {slug}: terminal launcher exited {outcome.returncode}"
+        if outcome.stderr_tail:
+            msg += f"\n{outcome.stderr_tail}"
+        self.notify(msg, severity="error", timeout=10)
 
     @work(thread=True, group="create")
     def _up_then_spawn_worker(self, slug: str, program: str) -> None:
@@ -943,6 +1012,26 @@ class ClaudeManApp(App):
         if "no ssh keys configured" not in res.detail:
             self.call_from_thread(self._log, f"[{'green' if res.ok else 'yellow'}]{res.detail}[/]")
 
+    @work(thread=True, group="doctor", exclusive=True)
+    def _startup_doctor(self) -> None:
+        """One-shot startup docker probe (issue #31): binary missing, daemon down, and socket
+        permission denied all used to be indistinguishable — query_containers returns {} for each,
+        so the operator saw only an empty table and, later, an opaque build failure. A FAIL raises
+        the banner (+ log + toast) with the doctor's per-cause fix hint. One-shot by design: the
+        wizard and `claudemanctl doctor` cover re-checks."""
+        check = doctor.probe_docker()
+        if check.status == doctor.FAIL:
+            self.call_from_thread(self._show_docker_banner, check)
+
+    def _show_docker_banner(self, check: doctor.CheckResult) -> None:
+        text = f"⚠ {check.label}: {check.detail}" + (f" — {check.hint}" if check.hint else "")
+        banner = self.query_one("#banner", Static)
+        banner.update(escape(text))
+        banner.display = True
+        self._log(f"[red]{escape(text)}[/]")
+        self.notify(f"{check.detail}\n{check.hint}" if check.hint else check.detail,
+                    severity="error", timeout=12)
+
     def action_refresh_gitstate(self) -> None:
         # On-demand: a *fetch-ful* rescan (the 30 s background tick is fetch-less).
         self._dispatch_gitstate(fetch=True)
@@ -983,6 +1072,7 @@ class ClaudeManApp(App):
             "overlay": self.action_overlay,
             "model_pin": self.action_model_pin,
             "profile": self.action_profile,
+            "auth": self.action_auth,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1278,6 +1368,54 @@ class ClaudeManApp(App):
             res = lifecycle.set_egress(slug, mode, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- auth mode (token | login) ----------------------------------------
+    def action_auth(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]auth: select a defined project (orphan rows aren't managed)[/]")
+            return
+        project = projects.load(slug)
+        cred = (config.claude_config_dir(slug) / ".credentials.json").exists()
+        self._log(f"managing auth for {slug} (a mode switch recreates to apply)")
+        self.push_screen(AuthScreen(slug, project.auth, cred),
+                         lambda choice: self._on_auth(slug, choice))
+
+    def _on_auth(self, slug: str, choice) -> None:
+        if choice is None:  # closed without a change
+            return
+        if choice == "logout":
+            if not self._reserve(slug, "logout"):
+                return
+            self._logout_worker(slug)
+            return
+        if not self._reserve(slug, "auth"):
+            return
+        self._log(f"switching {slug} auth to {choice} (recreating to apply) …")
+        self._auth_worker(slug, choice)
+
+    @work(thread=True, group="create")
+    def _auth_worker(self, slug: str, mode: str) -> None:
+        """Apply an auth-mode change off the UI thread: registry patch, then recreate (auth is
+        fixed at `docker create` — the token env + label render there). Mirrors _egress_worker;
+        the recreate's `up` appends the /login first-launch hint itself when needed."""
+        try:
+            res = lifecycle.set_auth(slug, mode)
+            if res.ok:
+                res = lifecycle.recreate(slug, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"auth change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    @work(thread=True, group="create")
+    def _logout_worker(self, slug: str) -> None:
+        """Remove a minted login credential off the UI thread (lifecycle.logout probes docker
+        for a running container, which must stay off the event loop)."""
+        try:
+            res = lifecycle.logout(slug)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"logout failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- overlay (image variant) ------------------------------------------

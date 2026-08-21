@@ -6,6 +6,50 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Per-project login auth mode** (`Project.auth = "token"|"login"`) so claude.ai **account
+  connectors** (remote MCP) work inside containers: the default setup-token carries only the
+  `user:inference` scope and can never see them (upstream-intentional — new investigation entry
+  in `docs/DEBUGGING.md`). Under the opt-in `login` mode no token env is injected; the operator
+  runs `/login` once inside the container (code-paste flow) and claude **mints its own**
+  credential in that project's claude-config bind, self-refreshing in place and surviving
+  stop/recreate. Invariant 1 is amended, not repealed: copying/bind-mounting any HOST credential
+  stays forbidden in both modes (the `EnvMount` guard and every `ANTHROPIC_*` scrub are
+  unchanged, test-pinned; token-mode create argv is byte-identical). New verbs: `project auth
+  <slug> [token|login]` (show/set; recreate to apply), `project logout <slug>` (remove the minted
+  credential; refused while running), `project create --auth login`; in the TUI, Project menu →
+  **Auth…** (`a`) — a mode-switch screen mirroring the Egress recreate-to-apply flow, with the
+  credential state shown and a Logout button. Never silent: a
+  `claude-man.auth` container label, an AUTH column in `project status` (+ a credential
+  present/absent line), and a `[login]` badge on the TUI Profile cell. On `up`, the logged-in
+  account is verified against the profile (warn on mismatch; an empty profile email is
+  backfilled) so the cross-account guards keep working; a forced cross-account re-seed now also
+  removes a minted credential. Docs: SECURITY.md residual risk 6, ARCHITECTURE/CLI/SETUP-GUIDES
+  sections.
+- **First-run setup wizard** (issue #31 onboarding): on a completely fresh machine (no config.toml,
+  no profiles, no projects) the TUI opens a guided wizard — system checks with per-cause fix hints,
+  terminal confirmation/pick, **inline first-profile minting** (the TUI suspends, `claude
+  setup-token` runs in the terminal with its browser flow, the TUI resumes), and an optional
+  streamed base-image build. Every step skippable; Skip/Finish materialise `config.toml` so it
+  never auto-offers again; re-run any time from Settings (`,` → `w`).
+- **`claudemanctl doctor`**: host prerequisite checks — platform, docker (binary on PATH / daemon
+  reachable / socket permission, each with its own fix hint incl. the `usermod -aG docker` line),
+  host `claude` CLI, base image, terminal launcher, profiles/tokens, config. rc 0 unless something
+  blocking FAILs. New pure/impure `doctor.py` module shared by the CLI verb, the wizard, and the
+  TUI's startup banner.
+- **Ptyxis launcher support** (issue #31): GNOME's default terminal on Ubuntu 25.10+/Fedora joins
+  the built-in Linux table (`ptyxis --new-window -T {title} -- {argv}`, title-only — Ptyxis has no
+  class flag), auto-detected ahead of gnome-terminal. Flatpak-only installs use the custom template
+  (documented).
+- **Custom terminal template editing in the TUI**: the terminal picker's `custom` row is always
+  shown and opens a validated template editor (`{argv}` placement checked inline, off-PATH binary
+  warned) — previously CLI-only, which stranded exactly the user whose terminal isn't in the table.
+- **TUI empty-state + startup banner**: an empty projects table now shows "(no projects yet — press
+  n …)" guidance instead of a silent grid, and a failed startup docker probe raises a visible
+  banner + error toast with the fix hint.
+- **Docs restructure**: the README is now the average-user path (prerequisites → install → a
+  TUI-first *Getting started* built around the wizard); the full CLI reference moved to the new
+  [`docs/CLI.md`](docs/CLI.md). TUI-GUIDE §0 and SETUP-GUIDES defer to the wizard instead of
+  triplicating the CLI setup steps.
 - **Hard per-container memory cap** (issue #29): every `docker create` now renders `--memory X
   --memory-swap X` beside the fixed hardening flags — part of the floor, never absent. Equal values
   mean the container gets no swap, so a runaway inside is OOM-killed in its own cgroup instead of
@@ -17,9 +61,19 @@ may land in minor versions until 1.0).
   present, canonicalised, floor byte-identical beside it) and `test_settings`.
 
 ### Fixed
+- **Silent terminal-spawn failures** (issue #31): a configured custom launcher whose binary is gone
+  now errors at resolve time (probed like any named launcher, same for a configured Browse opener),
+  and every spawn is watched briefly after launch — a launcher that starts and then exits non-zero
+  (stale template, display problem) surfaces its exit code + stderr tail as a red log line **and an
+  error toast** (the log pane auto-hides on short terminals, which made the old failure invisible)
+  in the TUI, and a non-zero exit on the CLI. Previously both paths reported success with all
+  launcher output discarded.
+- **`claudeman <group>` dispatch**: `claudeman config|packs|model …` silently launched the TUI
+  instead of the CLI (`__main__._CTL_GROUPS` had gone stale); the set now covers every CLI group
+  (incl. the new `doctor`) and a test pins parity with the real parser.
 - An in-container runaway (a 30 GB `node` rasterising an SVG) could exhaust host RAM and take out
   host applications under the kernel's global OOM killer — the sandbox bounded PIDs but not memory
-  (issue #29). Closed by the cap above.
+  (issue #29). Closed by the memory cap above.
 
 ## [0.1.0] — 2026-06-30
 

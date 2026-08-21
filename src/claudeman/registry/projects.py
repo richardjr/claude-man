@@ -121,6 +121,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         packs=tuple(proj.get("packs", []) or ()),
         model=str(proj.get("model", "") or ""),
         claude_model=str(proj.get("claude_model", "") or ""),
+        auth=str(proj.get("auth", config.DEFAULT_AUTH) or config.DEFAULT_AUTH),
     )
 
 
@@ -183,6 +184,8 @@ def save(project: Project) -> Path:
         proj["workdir"] = project.workdir
     if project.ssh_auto_trust:  # opt-in; default off stays absent (terse template)
         proj["ssh_auto_trust"] = True
+    if project.auth != config.DEFAULT_AUTH:  # opt-in login mode; default token stays absent
+        proj["auth"] = project.auth
     if project.extra_apt:
         proj["extra_apt"] = list(project.extra_apt)
     if project.env_file:
@@ -628,6 +631,31 @@ def set_ssh_auto_trust(slug: str, enabled: bool) -> Project:
         proj["ssh_auto_trust"] = True
     elif "ssh_auto_trust" in proj:
         del proj["ssh_auto_trust"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
+def set_auth(slug: str, mode: str) -> Project:
+    """Set the project's auth mode (comment-preserving scalar patch, atomic write).
+
+    Pure registry edit — the recreate-to-apply reminder and the leftover-credential warning are
+    the caller's job (``lifecycle.set_auth``). ``"login"`` writes ``auth = "login"``; ``"token"``
+    deletes the key so a default-mode project stays terse. Raises ``ValidationError`` on an
+    unknown mode (via the ``Project`` constructor)."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, auth=mode)  # ValidationError on a bad mode
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if mode != config.DEFAULT_AUTH:
+        proj["auth"] = mode
+    elif "auth" in proj:
+        del proj["auth"]
     _atomic_write(path, tomlkit.dumps(doc))
     return updated
 

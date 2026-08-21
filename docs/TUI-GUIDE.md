@@ -9,41 +9,31 @@ CLI-only (the TUI deliberately doesn't cover it), the step says so and gives the
 
 This is the *operator* walkthrough. For what the screens are built on, see
 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md); for why the container is shaped the way it is, see
-[`docs/SECURITY.md`](SECURITY.md); for the CLI-first version of everything here, see the
-[`README.md`](../README.md).
+[`docs/SECURITY.md`](SECURITY.md); for the CLI version of everything here, see
+[`CLI.md`](CLI.md).
 
-## 0. Before you launch: one-time host setup (CLI)
+## 0. Before you launch: the setup wizard has you covered
 
-Two things can't be done from the TUI and are needed once per host.
+On a completely fresh machine, the first `uv run claudeman` opens the **setup wizard**: it
+checks the host (docker binary/daemon/socket permission, the host `claude` CLI, the hardened
+image, your terminal — each problem with its exact fix), confirms or picks the terminal
+launcher, **creates your first account profile inline** (the TUI pauses, `claude setup-token`
+opens the browser, you paste the token, the TUI resumes — the token lands `0600` at
+`~/.local/state/claude-man/profiles/<name>/token` and is injected per-launch as
+`CLAUDE_CODE_OAUTH_TOKEN`; `.credentials.json` never enters a container), and optionally builds
+the base image with streamed progress. Every step is skippable, and the wizard is re-runnable
+any time from Settings (`,` → `w`).
 
-**Mint at least one account profile.** The TUI's New-project form only *selects* among
-already-defined profiles — minting one is CLI-only because it's an interactive browser flow:
-
-```bash
-uv run claudemanctl profile add home --default     # personal subscription account
-uv run claudemanctl profile add work --sso --email you@company.com   # SSO work seat
-```
-
-`profile add` runs `claude setup-token` on the host (after `claude auth login` if you passed
-`--sso`/`--login`/`--console`): complete the flow in the browser, copy the token it prints at
-the end, and paste it at claude-man's `Paste the long-lived token:` prompt. The token lands
-`0600` at `~/.local/state/claude-man/profiles/<name>/token` and is injected per-launch as
-`CLAUDE_CODE_OAUTH_TOKEN` — claude-man never copies `.credentials.json` into a container.
-Tokens live ~1 year and can't self-refresh; `profile list` flags them `EXPIRING` past 330 days
-(`profile renew <name>` re-mints). See [`README.md`](../README.md) § *Setting up accounts* for
-all the login-flow flags.
-
-**(Recommended) smoke-test the hardened image.** You don't *have* to build images by hand —
-project create/start auto-builds any missing image, streaming docker progress into the TUI's
-log pane — but the smoke gate is CLI-only and worth running once:
-
-```bash
-uv run claudemanctl image build base    # explicit build (always rebuilds)
-uv run claudemanctl image smoke base    # probe battery under the real hardened run profile
-```
+Prefer the CLI, or want the SSO/console login flows and extra profiles? The same setup is three
+commands — `claudemanctl doctor`, `profile add`, `image build base` — documented in
+[`CLI.md`](CLI.md) (§ *Doctor*, § *Setting up accounts*). Tokens live ~1 year and can't
+self-refresh; `profile list` flags them `EXPIRING` past 330 days (`profile renew <name>`
+re-mints).
 
 You can create a project with **no** profile/token — it builds and starts fine — but the
-in-container `claude` won't authenticate, and the log pane tells you so.
+in-container `claude` won't authenticate, and the log pane tells you so. The `image smoke`
+hardened-profile gate stays CLI-only and is worth running once:
+`claudemanctl image build base && claudemanctl image smoke base`.
 
 ## 1. Launch and orientation
 
@@ -101,7 +91,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -111,7 +101,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `n` | New project |
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
 | `v` | View… → `u` Refresh usage · `l` Logs (live `docker logs -f`, escape/q to close) |
-| `,` | Settings (ssh keys · git identity · GH token · terminal) |
+| `,` | Settings (ssh keys · git identity · GH token · terminal · setup wizard `w`) |
 | `m` | Models — install / update / remove / inspect local Ollama models (the Phase 9 management screen, section 8) |
 | `q` | Quit immediately — containers keep running |
 
@@ -135,8 +125,9 @@ Press `n`. The **New project** form has six fields:
   pre-fills the matching tier as a suggestion; pick a language yourself and the suggestion
   stops. Leave `(none)` for common-tier packs only.
 - **Egress** — `open` or `strict`. `strict` runs the project behind the allowlist egress
-  proxy (a squid sidecar on a no-route internal network — see the README's strict-egress
-  section); it can also be toggled later with `claudemanctl project lock|unlock <slug>`.
+  proxy (a squid sidecar on a no-route internal network — see [`CLI.md` § Strict
+  egress](CLI.md#strict-egress-lock-a-project-to-an-allowlist)); it can also be toggled later
+  with `claudemanctl project lock|unlock <slug>`.
   Start with `open` unless you've already tuned an allowlist.
 - **SSH auto-trust (TOFU)** — `off` (default) or `on`. `on` sets `StrictHostKeyChecking
   accept-new` so in-container ssh records an *unknown* host's key on first connect instead of
@@ -191,10 +182,13 @@ Then:
 
 Terminal windows open at `/workspace` — the uniform anchor where the workspace `CLAUDE.md`
 and any pack-injected guidance live (a `workdir` setting in the project TOML lands you in a
-repo dir instead). The terminal program is auto-detected
-per platform (Linux: ghostty → alacritty → kitty → …; macOS falls back to Terminal.app; WSL2
-picks up Windows Terminal); change it in Settings (`,` → `e`) or with
-`claudemanctl config terminal`.
+repo dir instead). The terminal program is auto-detected per platform (Linux: ghostty →
+alacritty → kitty → wezterm → foot → ptyxis → gnome-terminal → …; macOS falls back to
+Terminal.app; WSL2 picks up Windows Terminal); change it in Settings (`,` → `e`) — the picker's
+`custom` row opens a template editor for any terminal not in the built-in table — or with
+`claudemanctl config terminal`. A launcher that starts and then fails (a stale custom template,
+a display problem) is surfaced with its exit code and stderr as a toast + log line instead of
+failing silently.
 
 **One `claude` per container.** A second `c` on the same project is refused while a claude is
 already running (two would race on `.claude.json`). A second *shell* is always fine — but
@@ -350,6 +344,12 @@ Project… menu. Each persists the choice and applies it itself — no manual
   other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
   **local** model is **refused on a locked (strict-egress) project** — unlock first;
   claude picks and unpinning stay allowed when locked.
+- **`a` Auth…** — the project's claude auth mode: **token** (default — the profile's
+  setup-token as env; inference-only, so claude.ai account connectors are unavailable) or
+  **login** (opt-in — no token env; run `/login` once inside the container and claude mints a
+  self-refreshing credential in the project's bind, enabling account connectors). Switching
+  recreates to apply; the Projects table badges login projects `[login]` on the Profile cell.
+  When a minted credential exists, **Logout** removes it (project must be stopped).
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams
@@ -394,12 +394,12 @@ and deletions reject.
 
 | Task | Command |
 |---|---|
-| Mint / renew / verify / seed a profile | `claudemanctl profile add\|renew\|verify\|seed <name>` |
+| Renew / verify / seed a profile; SSO/console login flows (a first profile mints in the setup wizard) | `claudemanctl profile renew\|verify\|seed <name>` / `profile add --sso\|--console` |
 | Explicit image build / hardened smoke gate | `claudemanctl image build\|smoke <overlay>` |
-| Custom terminal template, Browse opener | `claudemanctl config terminal --custom '…'` / `config opener` |
+| Browse opener | `claudemanctl config opener --command '…'` |
 | Boot splash toggle | `claudemanctl config splash on\|off` |
 | Clone missing repos (fetch-all is `g` → `r` in the TUI) | `claudemanctl project sync-repos <slug>` |
 | Claude release channel / version pin | `claudemanctl config image --channel …` |
 | Browse the whole pack library across tiers (the Packs… screen shows your project's tiers) | `claudemanctl packs list [--tier …]` |
 
-Everything else in this guide has a CLI equivalent too — see [`README.md`](../README.md).
+Everything else in this guide has a CLI equivalent too — see [`CLI.md`](CLI.md).

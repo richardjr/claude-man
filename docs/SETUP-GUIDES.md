@@ -2,8 +2,8 @@
 
 Task-oriented recipes for getting a working project running fast. Each guide has a **CLI track** and
 a **TUI track** — pick whichever you prefer; they build the same thing. These string together the
-reference commands documented feature-by-feature in the [README](../README.md); follow the links
-there when you want the full detail or all the flags.
+reference commands documented feature-by-feature in [`CLI.md`](CLI.md); follow the links there
+when you want the full detail or all the flags.
 
 All CLI commands run from the checkout and are shown with their `uv run` prefix; the TUI is
 `uv run claudeman`. Replace `myproj`/`web`/`infra` etc. with your own slug.
@@ -32,15 +32,22 @@ Pick a guide:
 
 ## Before you start (once per machine)
 
-You need this **once**, then every guide below is a couple of commands. Full detail: README
-[Install](../README.md#install), [Quick start](../README.md#quick-start),
-[Setting up accounts](../README.md#setting-up-accounts-profiles).
+You need this **once**, then every guide below is a couple of commands.
+
+**The easy way:** install ([README § Install](../README.md#install)), then launch
+`uv run claudeman` — on a fresh machine the **setup wizard** checks the host (docker, the
+`claude` CLI, terminal), creates your first account profile, and can build the base image, all
+guided ([README § Getting started](../README.md#getting-started-tui)). `claudemanctl doctor`
+re-checks the host any time.
+
+**The CLI track** (full detail: [`CLI.md`](CLI.md)):
 
 ```bash
 # 1. Install (from a git checkout — it IS the install; keep the clone around).
 git clone https://github.com/richardjr/claude-man.git
 cd claude-man
 uv sync
+uv run claudemanctl doctor                              # host prerequisites, with fix hints
 
 # 2. Build + smoke-test the hardened base image (needs docker + network).
 uv run claudemanctl image build base
@@ -50,9 +57,6 @@ uv run claudemanctl image smoke base
 uv run claudemanctl profile add home --default          # personal subscription, default for new projects
 # work account behind SSO:  profile add work --sso --email you@company.com
 ```
-
-**TUI equivalent for step 3:** launch `uv run claudeman`, and follow
-[`docs/TUI-GUIDE.md`](TUI-GUIDE.md) for minting a profile and the full screen-by-screen walkthrough.
 
 > Building an **overlay** image (node/python/rust/python-node/terraform) is also a one-time-per-machine
 > step — each guide notes which to build. Rebuild only when you bump the baked toolchain.
@@ -152,6 +156,24 @@ and the (hidden) value; repeat per variable, then `p` → `r` **Recreate**.
   <container-path>` (read-only by default; add `--rw` to make it writable). TUI: Kind = **file**.
 - **A GitHub token** for `gh`: `config gh-token` (TUI: Settings `,` → `t`). Or just run
   `gh auth login` inside the container.
+
+### claude.ai connectors (remote MCP) — login auth mode
+
+The default setup-token auth is inference-only, so your claude.ai **account connectors**
+(Gmail/Drive/Linear/custom, configured on claude.ai) never appear in-container. Opt the project
+into **login mode**:
+
+```bash
+uv run claudemanctl project auth myproj login && uv run claudemanctl project recreate myproj
+uv run claudemanctl project claude myproj    # first launch: /login — authorise in the host
+                                             # browser, paste the code back into the terminal
+```
+
+The minted credential lives in that project's own bind (survives stop/recreate; `project logout
+myproj` removes it). Locally-added MCP (`claude mcp add`) needs none of this. On a **locked**
+project, allowlist each connector's hosts via `project egress-log`. Details + security
+trade-offs: [`CLI.md` § Auth mode](CLI.md#auth-mode-claudeai-connectors),
+`docs/SECURITY.md` residual risk 6.
 
 ---
 
@@ -284,8 +306,8 @@ provider/cloud hosts. See the next guide; for AWS+Terraform the extras are typic
 
 Restrict a container to an **allowlist** of domains, routed through a squid proxy on a no-direct-route
 network — for running untrusted code, or just to keep an infra project from talking to anything but
-its provider APIs. Egress is fixed at create, so lock/unlock **recreate**. Full detail: README
-[Strict egress](../README.md#strict-egress-lock-a-project-to-an-allowlist).
+its provider APIs. Egress is fixed at create, so lock/unlock **recreate**. Full detail:
+[`CLI.md` § Strict egress](CLI.md#strict-egress-lock-a-project-to-an-allowlist).
 
 **CLI:**
 
@@ -319,8 +341,8 @@ the key that makes inline allowlist edits take effect on a locked project. The a
 
 Run a project's in-container `claude` against a **self-hosted model** alongside your claude.ai
 subscription — both appear in the `/model` picker and switch mid-session. Requires host Ollama (GPU
-build, `0.0.0.0:11434` bind, model pulled). Full setup: [`docs/MODELS.md`](MODELS.md); behaviour:
-README [Local models](../README.md#local-models-hybrid-mode).
+build, `0.0.0.0:11434` bind, model pulled). Full setup: [`docs/MODELS.md`](MODELS.md); the CLI
+verbs: [`CLI.md` § Local models](CLI.md#local-models-hybrid-mode).
 
 **CLI:**
 
@@ -338,6 +360,7 @@ next `c` launches, `claude --model <ref>`).
 
 ---
 
-See also: [README](../README.md) (the full reference), [`docs/TUI-GUIDE.md`](TUI-GUIDE.md) (every
+See also: [`CLI.md`](CLI.md) (the full command reference), [README](../README.md) (getting
+started + prerequisites), [`docs/TUI-GUIDE.md`](TUI-GUIDE.md) (every
 keybinding + screen), [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) (how it works),
 [`docs/SECURITY.md`](SECURITY.md) (the hardening model).

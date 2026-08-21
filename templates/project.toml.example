@@ -17,6 +17,14 @@ extra_apt = ["jq"]          # optional: thin per-project apt layer baked at crea
 #                                # (github/gitlab/bitbucket/azure) are pre-trusted by the baked
 #                                # known_hosts regardless — turn this on only for self-hosted/other
 #                                # forges. Toggle: `project ssh-trust <slug> on|off` / TUI Env mounts (t).
+# auth = "login"                 # opt-in (default "token"): NO token env is injected — run /login once
+#                                # inside the container (paste the code the browser shows back into the
+#                                # terminal) and claude mints its own credential in this project's
+#                                # claude-config bind (self-refreshes in place; survives stop/recreate).
+#                                # Enables claude.ai account connectors (remote MCP), which the
+#                                # setup-token can't reach (docs/DEBUGGING.md). Recreate to apply.
+#                                # Manage: `project auth <slug> [token|login]`; `project logout <slug>`
+#                                # removes the minted credential.
 
 # Curated packs (docs/PACKS.md): bundles of CLAUDE.md fragments + skills from the in-repo library,
 # materialized into the asset source and synced into the binds on every start. `language` picks the

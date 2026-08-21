@@ -15,6 +15,7 @@ SLUG = f"{config.LABEL_PREFIX}.slug"
 PROFILE = f"{config.LABEL_PREFIX}.profile"
 OVERLAY = f"{config.LABEL_PREFIX}.overlay"
 EGRESS = f"{config.LABEL_PREFIX}.egress"
+AUTH = f"{config.LABEL_PREFIX}.auth"
 REPOS = f"{config.LABEL_PREFIX}.repos"
 VERSION = f"{config.LABEL_PREFIX}.version"
 CREATED = f"{config.LABEL_PREFIX}.created"
@@ -35,6 +36,7 @@ def build(project: Project, *, profile: str, version: str, created_iso: str) -> 
         PROFILE: profile,
         OVERLAY: project.overlay,
         EGRESS: project.egress,
+        AUTH: project.auth,
         REPOS: str(len(project.repos)),
         VERSION: version,
         CREATED: created_iso,
