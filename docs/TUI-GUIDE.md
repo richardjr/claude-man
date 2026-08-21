@@ -91,7 +91,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -344,6 +344,12 @@ Project… menu. Each persists the choice and applies it itself — no manual
   other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
   **local** model is **refused on a locked (strict-egress) project** — unlock first;
   claude picks and unpinning stay allowed when locked.
+- **`a` Auth…** — the project's claude auth mode: **token** (default — the profile's
+  setup-token as env; inference-only, so claude.ai account connectors are unavailable) or
+  **login** (opt-in — no token env; run `/login` once inside the container and claude mints a
+  self-refreshing credential in the project's bind, enabling account connectors). Switching
+  recreates to apply; the Projects table badges login projects `[login]` on the Profile cell.
+  When a minted credential exists, **Logout** removes it (project must be stopped).
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams

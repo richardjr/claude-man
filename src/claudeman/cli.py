@@ -177,7 +177,8 @@ def cmd_project_status(args) -> int:
         # MODEL shows the project's one model choice: the local hybrid pin or the claude --model
         # pin (mutually exclusive in the schema). Display hint only — a bare local name is legal,
         # so the cell doesn't encode the kind; `project model show <slug>` does.
-        (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model)
+        (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
+         p.auth)
         for p in projects.list_projects()
     ]
     rows = status.join(defined, status.query_containers())
@@ -186,16 +187,23 @@ def cmd_project_status(args) -> int:
         if not rows:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
-    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'REPOS':<5} {'VERSION':<10} MODEL")
+    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'AUTH':<6} {'REPOS':<5} "
+          f"{'VERSION':<10} MODEL")
     for r in rows:
-        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.repos:<5} "
+        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.auth:<6} {r.repos:<5} "
               f"{(r.version or '-'):<10} {r.model or '-'}")
-    # For a single project, also show its published ports (config — registry-only, recreate to apply).
+    # For a single project, also show its published ports (config — registry-only, recreate to apply)
+    # and, in login mode, whether the in-container-minted credential exists (never silent).
     if args.slug and projects.exists(args.slug):
-        ports = projects.load(args.slug).ports
-        if ports:
+        p = projects.load(args.slug)
+        if p.auth == "login":
+            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            state = (f"present ({cred})" if cred.exists()
+                     else f"absent — run /login via `project claude {args.slug}`")
+            print(f"\nauth: login (credential {state})")
+        if p.ports:
             print("\npublished ports:")
-            _print_ports(ports)
+            _print_ports(p.ports)
     return 0
 
 
@@ -260,7 +268,7 @@ def cmd_project_create(args) -> int:
 
     res = lifecycle.create_project(
         args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
-        language=args.language, ssh_auto_trust=args.ssh_auto_trust,
+        language=args.language, ssh_auto_trust=args.ssh_auto_trust, auth=args.auth,
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -993,6 +1001,37 @@ def cmd_project_ssh_trust(args) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_project_auth(args) -> int:
+    """Show or set a project's auth mode: token (default) | login (in-container /login)."""
+    from . import lifecycle
+
+    if args.mode is None:
+        if not projects.exists(args.slug):
+            print(f"no project {args.slug!r}", file=sys.stderr)
+            return 1
+        p = projects.load(args.slug)
+        print(f"{args.slug}: auth = {p.auth}")
+        if p.auth == "login":
+            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            if cred.exists():
+                print(f"credential: present ({cred})")
+            else:
+                print(f"credential: absent — run /login via `project claude {args.slug}`")
+        return 0
+    res = lifecycle.set_auth(args.slug, args.mode)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_logout(args) -> int:
+    """Remove a login-mode credential from the project's claude-config bind (stop first)."""
+    from . import lifecycle
+
+    res = lifecycle.logout(args.slug)
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
 def cmd_project_egress_log(args) -> int:
     """Show the destinations a locked project tried to reach but the allowlist blocked (for tuning)."""
     from .network import egress
@@ -1457,6 +1496,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--ssh-auto-trust", action="store_true", dest="ssh_auto_trust",
                     help="auto-trust unknown SSH host keys on first connect (TOFU; accept-new). Default "
                          "off — the common forges are already pre-trusted by the baked known_hosts")
+    pc.add_argument("--auth", choices=config.AUTH_MODES,
+                    help="claude auth mode: token (default — the profile setup-token injected as "
+                         "env) or login (opt-in: /login once in-container; enables claude.ai "
+                         "account connectors)")
     pc.set_defaults(func=cmd_project_create)
     pup = proj.add_parser("up", help="create-if-needed + start (checks for a newer claude first)")
     pup.add_argument("slug", type=_slug_arg)
@@ -1476,6 +1519,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("unlock", cmd_project_unlock, "return to open egress (recreates)"),
         ("egress-log", cmd_project_egress_log, "show denied egress destinations (for allowlist tuning)"),
         ("egress-smoke", cmd_project_egress_smoke, "verify a locked project's allowlist enforces (daemon)"),
+        ("logout", cmd_project_logout,
+         "remove a login-mode credential from the project's bind (stop first)"),
     ]:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug", type=_slug_arg)
@@ -1485,6 +1530,12 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("slug", type=_slug_arg)
     pst.add_argument("state", choices=("on", "off"))
     pst.set_defaults(func=cmd_project_ssh_trust)
+    pau = proj.add_parser("auth", help="per-project claude auth mode: token (default) | login "
+                                       "(in-container /login → claude.ai connectors; recreate "
+                                       "to apply)")
+    pau.add_argument("slug", type=_slug_arg)
+    pau.add_argument("mode", nargs="?", choices=config.AUTH_MODES)
+    pau.set_defaults(func=cmd_project_auth)
     proj.add_parser(
         "stop-all", help="stop + sync-out every running container (end-of-day batch)"
     ).set_defaults(func=cmd_project_stop_all)

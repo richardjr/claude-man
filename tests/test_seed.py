@@ -97,6 +97,20 @@ class SeedTest(unittest.TestCase):
         seed.seed_project_config(Project(slug="demo3"), None)
         self.assertEqual(json.loads((cfg / ".claude.json").read_text()), {"sentinel": True})
 
+    def test_overwrite_identity_removes_stale_credential(self) -> None:
+        # A forced cross-account re-seed must not leave the OLD account's login-mode credential
+        # authenticating in the bind (invariant 1's login amendment); a plain re-seed leaves it.
+        work = Profile(name="work", account_email="w@co.com")
+        home = Profile(name="home", account_email="h@me.com")
+        project = Project(slug="cred")
+        cfg = seed.seed_project_config(project, work)
+        cred = cfg / ".credentials.json"
+        cred.write_text("{}")                                # a /login-minted credential
+        seed.seed_project_config(project, work)              # normal re-seed: untouched
+        self.assertTrue(cred.exists())
+        seed.seed_project_config(project, home, overwrite_identity=True)
+        self.assertFalse(cred.exists())                      # identity switch takes it with it
+
     def test_account_mismatch_guard_and_reseed(self) -> None:
         from claudeman import lifecycle
         work = Profile(name="work", account_email="w@co.com")

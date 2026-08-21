@@ -73,8 +73,11 @@ lost. The "Claude API" banner under token auth is cosmetic; requests still bill 
 - Keep the image on claude ≥2.1.173 (it normalises the `[1m]` model-ID suffix Fable carries).
 - Do **not** pin the image back to 2.1.160: its `fable` alias errors outright, and the
   GrowthBook-era gating is being retired server-side, so the old picker behaviour won't return.
-- Never copy `.credentials.json` into a container to "fix" this — invariant 1 forbids it, and the
-  headless refresh bug makes it self-defeating anyway.
+- **The supported full fix is per-project login mode** (`project auth <slug> login` — see the
+  connectors entry below): a full login credential gets no restrictions, so the picker row and
+  "Claude Max" banner return. Never copy a HOST `.credentials.json` into a container to "fix"
+  this — invariant 1 forbids it and the headless refresh bug makes it self-defeating; login mode
+  is different in kind (the credential is *minted inside* the container's own bind).
 
 ### How to re-test (after a claude version bump or a suspected server-side fix)
 
@@ -118,6 +121,56 @@ injecting `CLAUDE_CODE_SUBSCRIPTION_TYPE=max` into containers is the next experi
   snapshot the flag caches before/after the bump.
 - Isolated per-version probes (downloaded via `claude.ai/install.sh <version>` into a temp HOME):
   auth status + `--model fable` + resulting `policy-limits.json` / cache keys, per version above.
+
+## claude.ai connectors unavailable under setup-token auth (Aug 2026)
+
+**Status: upstream-intentional (not a bug) — resolved in claude-man by the opt-in per-project
+login auth mode (`project auth <slug> login`).**
+
+### Symptom
+
+Inside a (token-mode) container, `/mcp` never lists the account's claude.ai **connectors**
+(remote MCP servers configured at claude.ai/settings/connectors) — Gmail/Drive/Linear/custom
+connectors that work on the host and on claude.ai are simply absent. Locally-configured MCP
+servers (`claude mcp add`, `.mcp.json`) work fine.
+
+### Root cause
+
+`claude setup-token` mints an OAuth token with **only the `user:inference` scope** — the docs
+state it "can only make model requests". Account connectors are fetched **server-side, only when
+the active auth is a full claude.ai subscription login**; the fetch needs scopes the setup-token
+never carries (`user:mcp_servers` and friends — the full login scope set is
+`user:profile user:inference user:sessions:claude_code user:mcp_servers`). The docs explicitly
+list connectors as unavailable when `CLAUDE_CODE_OAUTH_TOKEN` is the active credential. This is
+the same credential-scope family as the Fable picker gate above and the removed usage bars
+(`user:profile`).
+
+Upstream refs: [#22450](https://github.com/anthropics/claude-code/issues/22450) (`claude usage`
+fails — setup-token lacks `user:profile`), [#21328](https://github.com/anthropics/claude-code/issues/21328)
+(missing `user:profile` blocks usage data + Max features),
+[#62556](https://github.com/anthropics/claude-code/issues/62556) (connectors fail without the
+`user:mcp_servers` scope — the smoking-gun debug line), and
+[#79597](https://github.com/anthropics/claude-code/issues/79597) (the Fable wall above).
+
+### Resolution: login mode
+
+`project auth <slug> login` + `project recreate <slug>`: no token env is injected; run `/login`
+once inside the container (it prints a URL — authorise in the host browser and paste the code
+back; no in-container browser needed). The minted credential lands in the project's claude-config
+bind, self-refreshes in place, and carries the full login scopes — connectors appear in `/mcp`,
+and the Fable picker/banner return. Token mode stays the default (docs/SECURITY.md residual risk
+6 records the trade-off).
+
+### Caveats
+
+- **Context cost**: account connectors auto-load into every session with no per-environment
+  opt-out ([#50062](https://github.com/anthropics/claude-code/issues/50062) reports ~100K tokens
+  of tool definitions for a heavily-connected account). Consider a lean connector set on the
+  account you use for containers.
+- **Strict egress**: connector endpoints are remote MCP hosts — each needs a `project egress-log`
+  → allowlist pass on a locked project (the `/login` flow itself rides the base allowlist's
+  `claude.ai` + Anthropic entries).
+- Local MCP (`claude mcp add`) never needed any of this — it works under token mode.
 
 ## Locked project (strict egress) troubleshooting
 

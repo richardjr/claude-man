@@ -106,6 +106,15 @@ Settings `w`), the `claudemanctl doctor` prerequisite checks (`doctor.py`, pure/
 toasts), the TUI empty-state row + startup docker banner, the `claudeman <group>` dispatch fix,
 and the docs split (user-first README, the CLI reference out to `docs/CLI.md`).
 
+**Login auth mode (2026-08):** an opt-in per-project `auth = "login"` (invariant 1 amendment —
+minted-in-container credential in the project's own bind, never copied in) so claude.ai **account
+connectors** work in containers — the setup-token's `user:inference`-only scope can't reach them
+(docs/DEBUGGING.md). `project auth <slug> [token|login]` / `project logout` / `--auth` at create;
+the `claude-man.auth` label + status AUTH column + TUI `[login]` badge keep it surfaced; up-time
+identity verify/backfill keeps the cross-account guards alive. The TUI Project-menu **Auth…**
+screen (`p` → `a`) mirrors the Egress… recreate-to-apply flow — mode switch + Logout, with the
+credential state shown.
+
 **Next up:** **Phase 6c** (deeper curation — port the operator's existing skills into
 `library/packs/`); the projects-table `docker events` push-refresh (the async off-UI-thread `docker
 ps` worker (TUI-2) is DONE — only the event-driven trigger remains); and the deferred hardening
@@ -219,7 +228,9 @@ the profile column upgrade is also where the **TUI-2** docker-events worker land
   permanently stuck on `re-mint`/`http 429`. `usage_api.py`, the `profile limits` CLI, the TUI 5h/Week
   columns + `refresh_utilization` worker, and the `OAUTH_USAGE_*` config/scope were all stripped out.
   Token minting reverted to `setup-token`'s default `user:inference` scope. The transcript-based
-  per-profile token-totals panel (above) is unaffected.
+  per-profile token-totals panel (above) is unaffected. (Cross-ref, 2026-08: a **login-mode**
+  project's in-container-minted credential does carry the `user:profile` scope the endpoint
+  needed — noted for the record only; the feature stays removed.)
 - [~] docker-events-driven refresh — the async off-UI-thread worker (TUI-2) is **DONE** (projects/usage/util/gitstate/net panels all run off-thread); what remains is replacing the 10 s poll with a `docker events` push trigger
 
 ## Phase 3 — Persistent multi-repo checkouts + full lifecycle
@@ -312,7 +323,11 @@ module (the `hostplatform.py` "all branches go through here" pattern), selected 
 `Project.agent` field (default `claude`). A provider parameterizes BEHAVIOUR, never SECURITY:
 invariants 1–3 are enforced BY the layer for every provider, not exposed as per-provider knobs (no
 `.credentials.json` copy, no `ANTHROPIC_*`/misbilling-key injection, floor byte-identical, locked =
-no route out but the allowlist proxy — for any agent). The 3-way sync-back ENGINE, masking, backup,
+no route out but the allowlist proxy — for any agent). *(Amended 2026-08: invariant 1's auth is
+now per-project `token`|`login` — the no-copy/no-`ANTHROPIC_*`/no-host-credential rules bind every
+provider in BOTH modes; `login` legalises only an in-container-MINTED credential in the project's
+own bind, opt-in + surfaced — the same doctrine as the Phase-9 hybrid posture note below, and a
+down-payment on 7c's auth-kind divergence.)* The 3-way sync-back ENGINE, masking, backup,
 flock, audit-commit, the update semver compare, and the usage render helpers are all reused; only the
 provider's policy DATA varies._
 

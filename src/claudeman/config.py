@@ -25,6 +25,12 @@ CONTAINER_PREFIX = "claude-man-"      # container name = claude-man-<slug>
 
 DEFAULT_OVERLAY = "base"
 DEFAULT_EGRESS = "open"               # "open" | "strict"
+# Per-project claude auth mode (invariant 1): "token" = the profile setup-token injected as the
+# CLAUDE_CODE_OAUTH_TOKEN env (the secure default; user:inference-only scope — claude.ai account
+# connectors unavailable); "login" = opt-in, NO token env — the operator runs /login once inside
+# the container and claude mints its own credential in the per-project claude-config bind
+# (self-refreshes in place; enables account connectors). docs/SECURITY.md, docs/DEBUGGING.md.
+DEFAULT_AUTH = "token"                # "token" | "login"
 
 # `docker stop` grace before SIGKILL. The baked CMD is `sleep infinity` as PID 1, which ignores
 # SIGTERM (the kernel applies no default disposition to PID 1), so `docker stop` ALWAYS waits the
@@ -32,6 +38,7 @@ DEFAULT_EGRESS = "open"               # "open" | "strict"
 DOCKER_STOP_GRACE_S = 2
 OVERLAYS = ("base", "python", "rust", "node", "python-node", "terraform")
 EGRESS_MODES = ("open", "strict")
+AUTH_MODES = ("token", "login")
 
 # ---------------------------------------------------------------------------
 # Strict egress (Phase 4) — a squid proxy sidecar on a no-direct-route internal network.

@@ -18,6 +18,7 @@ Canonical TOML shape (see templates/profile.toml.example)::
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import tomllib
 from pathlib import Path
@@ -118,6 +119,30 @@ def save(profile: Profile, *, make_default: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomlkit.dumps(doc))
     return path
+
+
+def set_account_email(name: str, email: str) -> Profile:
+    """Record ``email`` as the profile's account (comment-preserving scalar patch).
+
+    Used by login-mode identity backfill (``lifecycle._verify_login_identity``): when a profile
+    has no mint-time account record and a login-mode container's ``/login`` reveals one, the
+    profile adopts it so the cross-account guards work. Deliberately NOT routed through ``save``
+    — ``_parse`` reads ``[profile.scrub] keep_identity_fields`` but ``save`` never writes that
+    table back, so a wholesale save would silently drop an operator's scrub customisation.
+    One-way and idempotent; callers only invoke it when the current value is empty."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing profile TOML requires the 'tomlkit' dependency") from exc
+
+    profile = load(name)  # FileNotFoundError for an unknown profile
+    path = config.profile_toml_path(name)
+    doc = tomlkit.parse(path.read_text())
+    doc["profile"]["account_email"] = email
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text(tomlkit.dumps(doc))
+    tmp.replace(path)
+    return dataclasses.replace(profile, account_email=email)
 
 
 def _clear_other_defaults(except_name: str) -> None:

@@ -36,6 +36,12 @@ def seed_project_config(
 
     claude_json = cfg / ".claude.json"
     if overwrite_identity or not claude_json.exists():
+        if overwrite_identity:
+            # An identity overwrite means "this dir now belongs to a different account" — a
+            # login-mode credential minted by the OLD account must not survive the switch and
+            # keep authenticating as it (invariant 1's login-mode amendment). No-op in token
+            # mode (the file never exists there).
+            (cfg / ".credentials.json").unlink(missing_ok=True)
         email = profile.account_email if profile else ""
         keep = profile.keep_identity_fields if profile else identity.DEFAULT_KEEP
         oauth = {"emailAddress": email} if email else {}

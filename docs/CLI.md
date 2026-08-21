@@ -44,7 +44,9 @@ uv run claudemanctl profile usage                  # per-account token usage
 
 A **profile** is one Claude account identity, minted once on the host with `claude setup-token`
 and injected per-launch as `CLAUDE_CODE_OAUTH_TOKEN`. claude-man never copies `.credentials.json`
-and never sets `ANTHROPIC_*` keys (see invariant 1 in [`../CLAUDE.md`](../CLAUDE.md)).
+into a container and never sets `ANTHROPIC_*` keys (see invariant 1 in
+[`../CLAUDE.md`](../CLAUDE.md)). Need claude.ai **account connectors** in a project? The
+setup-token can't reach them — see *Auth mode* under Managing projects below.
 
 ```bash
 # A personal subscription account, made the default for new projects:
@@ -212,6 +214,33 @@ or by hand under `[project.egress]` `allowlist = [...]` in the project's TOML, t
 demo` again to re-render and recreate. Today's lock covers proxy-aware traffic (claude, `git` over
 HTTPS, npm/pip/apt) plus git-over-ssh to the SSH-over-443 forges; direct-DNS tools are intentionally
 not reachable under lock — see [`ARCHITECTURE.md`](ARCHITECTURE.md) § *Network / egress*.
+
+### Auth mode (claude.ai connectors)
+
+By default a project authenticates with the profile's setup-token (`CLAUDE_CODE_OAUTH_TOKEN`).
+That token is **inference-only** — claude.ai **account connectors** (remote MCP configured on
+your claude.ai account) are unavailable under it (upstream-intentional; local `claude mcp add`
+servers work fine — see `docs/DEBUGGING.md`). The opt-in **login mode** fixes that: no token env
+is injected, and you run `/login` once inside the container — claude mints its own credential in
+the project's claude-config bind, where it self-refreshes and survives stop/recreate.
+
+```bash
+uv run claudemanctl project auth demo               # show the mode (+ credential present/absent)
+uv run claudemanctl project auth demo login         # opt in (recreate to apply)
+uv run claudemanctl project recreate demo
+uv run claudemanctl project claude demo             # first launch: /login — authorise in the host
+                                                    # browser, paste the code back in the terminal
+uv run claudemanctl project auth demo token         # back to the default (recreate to apply)
+uv run claudemanctl project logout demo             # remove the minted credential (stop first)
+uv run claudemanctl project create demo2 --auth login   # or opt in at create
+```
+
+Notes: the project still selects a profile (identity/seeding); on `up` the logged-in account is
+verified against it (a mismatch warns; an empty profile email is backfilled). Under **strict
+egress**, connector endpoints are remote MCP hosts — allowlist them via `project egress-log` →
+the Egress screen. Account connectors auto-load into every session (they can cost significant
+context on a heavily-connected account). Security trade-offs: `docs/SECURITY.md` residual risk 6.
+In the TUI: Project menu (`p`) → **Auth…** (`a`) — mode switch (recreates to apply) + Logout.
 
 ### Git identity + GitHub CLI (`gh`) inside the container
 

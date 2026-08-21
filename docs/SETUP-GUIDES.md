@@ -157,6 +157,24 @@ and the (hidden) value; repeat per variable, then `p` → `r` **Recreate**.
 - **A GitHub token** for `gh`: `config gh-token` (TUI: Settings `,` → `t`). Or just run
   `gh auth login` inside the container.
 
+### claude.ai connectors (remote MCP) — login auth mode
+
+The default setup-token auth is inference-only, so your claude.ai **account connectors**
+(Gmail/Drive/Linear/custom, configured on claude.ai) never appear in-container. Opt the project
+into **login mode**:
+
+```bash
+uv run claudemanctl project auth myproj login && uv run claudemanctl project recreate myproj
+uv run claudemanctl project claude myproj    # first launch: /login — authorise in the host
+                                             # browser, paste the code back into the terminal
+```
+
+The minted credential lives in that project's own bind (survives stop/recreate; `project logout
+myproj` removes it). Locally-added MCP (`claude mcp add`) needs none of this. On a **locked**
+project, allowlist each connector's hosts via `project egress-log`. Details + security
+trade-offs: [`CLI.md` § Auth mode](CLI.md#auth-mode-claudeai-connectors),
+`docs/SECURITY.md` residual risk 6.
+
 ---
 
 ## Guide: Node / frontend app

@@ -29,6 +29,25 @@ class ProfileSaveTest(unittest.TestCase):
         self.cfg.cleanup()
         self.state.cleanup()
 
+    def test_set_account_email_scalar_patch_preserves_scrub(self) -> None:
+        # The login-mode identity backfill must be a scalar patch: `save()` never writes the
+        # [profile.scrub] table back, so routing the backfill through it would silently drop an
+        # operator's keep_identity_fields customisation. Comments must survive too.
+        from claudeman import config as config_mod
+        path = config_mod.profile_toml_path("work")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '[profile]\nname = "work"\n# keep me\ndefault = false\n\n'
+            '[profile.scrub]\nkeep_identity_fields = ["emailAddress"]\n'
+        )
+        updated = profiles.set_account_email("work", "me@x.com")
+        self.assertEqual(updated.account_email, "me@x.com")
+        self.assertEqual(profiles.load("work").account_email, "me@x.com")
+        self.assertEqual(profiles.load("work").keep_identity_fields, ("emailAddress",))
+        text = path.read_text()
+        self.assertIn("# keep me", text)
+        self.assertIn("[profile.scrub]", text)
+
     def test_save_roundtrip(self) -> None:
         profiles.save(Profile(name="home", display_name="Home", account_email="me@example.com"))
         loaded = profiles.load("home")

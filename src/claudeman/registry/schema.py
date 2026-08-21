@@ -409,6 +409,12 @@ class Project:
     #                                      only — no container change, no recreate, floor untouched; works
     #                                      on locked projects (no gateway). Mutually exclusive with `model`
     #                                      (one model choice per project).
+    auth: str = config.DEFAULT_AUTH      # "token" (default: the profile setup-token injected as env) |
+    #                                      "login" (opt-in: NO token env — /login once in-container mints
+    #                                      a credential in the per-project claude-config bind, self-
+    #                                      refreshing in place; enables claude.ai account connectors.
+    #                                      Fixed at create -> recreate to apply. Invariant 1 amendment:
+    #                                      minted-in-place, never copied in.)
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
@@ -432,6 +438,10 @@ class Project:
         if self.egress not in config.EGRESS_MODES:
             raise ValidationError(
                 f"invalid egress {self.egress!r}: one of {config.EGRESS_MODES}"
+            )
+        if self.auth not in config.AUTH_MODES:
+            raise ValidationError(
+                f"invalid auth {self.auth!r}: one of {config.AUTH_MODES}"
             )
         if self.model and not _MODEL_RE.match(self.model):
             raise ValidationError(
