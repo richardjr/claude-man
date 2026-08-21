@@ -31,6 +31,7 @@ from . import rowfx
 from . import setupview
 from . import terminals
 from .screens.add_repo import AddRepoScreen
+from .screens.auth import AuthScreen
 from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
@@ -163,6 +164,7 @@ class ClaudeManApp(App):
         ("i", "Overlay (image)…", "overlay"),
         ("m", "Model…", "model_pin"),
         ("f", "Profile…", "profile"),
+        ("a", "Auth…", "auth"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -324,7 +326,8 @@ class ClaudeManApp(App):
             # claude --model pin (mutually exclusive in the schema). The cell is a display hint,
             # not a parser — claude refs never carry a colon, ollama tags usually do, but a bare
             # local name ("devstral") is legal; `project model show` names the kind exactly.
-            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model)
+            (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
+             p.auth)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -361,7 +364,10 @@ class ClaudeManApp(App):
         # slug so the sweep + settle repaints reuse the exact same colour.
         self._name_colors = {r.slug: config.project_name_color(r.slug) for r in rows}
         for row in rows:
-            cells = [row.slug, row.kind, row.profile, row.egress, row.model or "-",
+            # A login-mode project badges its Profile cell — the auth posture must never be
+            # silent (invariant 1's login amendment), and the badge avoids a ninth column.
+            profile_cell = f"{row.profile} [login]" if row.auth == "login" else row.profile
+            cells = [row.slug, row.kind, profile_cell, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
             # Colour the Project name with its gradient tint, and the Status cell green = UP /
@@ -1066,6 +1072,7 @@ class ClaudeManApp(App):
             "overlay": self.action_overlay,
             "model_pin": self.action_model_pin,
             "profile": self.action_profile,
+            "auth": self.action_auth,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1361,6 +1368,54 @@ class ClaudeManApp(App):
             res = lifecycle.set_egress(slug, mode, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- auth mode (token | login) ----------------------------------------
+    def action_auth(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]auth: select a defined project (orphan rows aren't managed)[/]")
+            return
+        project = projects.load(slug)
+        cred = (config.claude_config_dir(slug) / ".credentials.json").exists()
+        self._log(f"managing auth for {slug} (a mode switch recreates to apply)")
+        self.push_screen(AuthScreen(slug, project.auth, cred),
+                         lambda choice: self._on_auth(slug, choice))
+
+    def _on_auth(self, slug: str, choice) -> None:
+        if choice is None:  # closed without a change
+            return
+        if choice == "logout":
+            if not self._reserve(slug, "logout"):
+                return
+            self._logout_worker(slug)
+            return
+        if not self._reserve(slug, "auth"):
+            return
+        self._log(f"switching {slug} auth to {choice} (recreating to apply) …")
+        self._auth_worker(slug, choice)
+
+    @work(thread=True, group="create")
+    def _auth_worker(self, slug: str, mode: str) -> None:
+        """Apply an auth-mode change off the UI thread: registry patch, then recreate (auth is
+        fixed at `docker create` — the token env + label render there). Mirrors _egress_worker;
+        the recreate's `up` appends the /login first-launch hint itself when needed."""
+        try:
+            res = lifecycle.set_auth(slug, mode)
+            if res.ok:
+                res = lifecycle.recreate(slug, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"auth change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    @work(thread=True, group="create")
+    def _logout_worker(self, slug: str) -> None:
+        """Remove a minted login credential off the UI thread (lifecycle.logout probes docker
+        for a running container, which must stay off the event loop)."""
+        try:
+            res = lifecycle.logout(slug)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"logout failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- overlay (image variant) ------------------------------------------

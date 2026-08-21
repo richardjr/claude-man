@@ -17,10 +17,14 @@ bridge gateway `172.17.0.1`).
   reads → mutates → atomically rewrites `$CLAUDE_CONFIG_DIR/.credentials.json` (mode `0600`)
   **in place**. So if a token file were present in a bind-mounted config dir, refreshes would land
   back on the host automatically.
-- **But we do not seed a credential file at all.** Copying `.credentials.json` into a headless
-  container triggers a known 401/no-refresh failure. Instead we mint a long-lived token with
-  `claude setup-token` and inject it as `CLAUDE_CODE_OAUTH_TOKEN`, which removes credential
-  sync-back entirely and structurally avoids that bug.
+- **But we never seed or copy a credential file in.** Copying a HOST `.credentials.json` into a
+  headless container triggers a known 401/no-refresh failure. In **token mode** (the default) we
+  mint a long-lived token with `claude setup-token` and inject it as `CLAUDE_CODE_OAUTH_TOKEN` —
+  no credential file exists in the bind at all, which structurally avoids that bug. In the opt-in
+  **login mode** (`Project.auth = "login"`) there is still no seeding or copying: the in-container
+  claude *mints* its own `.credentials.json` via `/login`, and the in-place-refresh behaviour
+  above is exactly what keeps it live in the project's bind across stop/recreate (a
+  minted-in-place credential is the file the refresh machinery expects, unlike a copied one).
 - **The hardened profile needs a real `/etc/passwd` entry.** Under `--read-only --user 1000:1000`
   with no passwd entry, `getpwuid`/`os.userInfo()` fails and `HOME` resolves to `/`. The image
   bakes uid 1000 → `/home/agent` and `HOME`/`CLAUDE_CONFIG_DIR` env.
@@ -41,9 +45,9 @@ The Definition and State roots resolve from `$XDG_CONFIG_HOME` / `$XDG_STATE_HOM
 real path logic without touching operator state. See `config.config_home()` / `config.state_home()`.
 
 A project **exists iff** its `projects/<slug>.toml` exists — fully decoupled from whether a
-container is alive. Labels (`claude-man.{slug,profile,overlay,egress,repos,version,created}`) make
-`docker ps` self-describing, but they are a **projection**: on divergence the registry wins and
-claude-man reconciles by recreating the container, never by editing the registry from labels.
+container is alive. Labels (`claude-man.{slug,profile,overlay,egress,auth,repos,version,created}`)
+make `docker ps` self-describing, but they are a **projection**: on divergence the registry wins
+and claude-man reconciles by recreating the container, never by editing the registry from labels.
 
 ## Profile / account model
 
@@ -58,14 +62,22 @@ config seed.
   block (`emailAddress`/`displayName`/`organizationName` only — never `accountUuid`/`userID`)
   plus `{hasCompletedOnboarding: true, installMethod: "native"}` to suppress the onboarding prompt.
 
-At launch, `CLAUDE_CODE_OAUTH_TOKEN=$(cat token)` is injected and `ANTHROPIC_API_KEY` /
-`ANTHROPIC_AUTH_TOKEN` are scrubbed from the env. A project inherits the `default = true` profile
+At launch (token mode), `CLAUDE_CODE_OAUTH_TOKEN=$(cat token)` is injected and `ANTHROPIC_API_KEY`
+/ `ANTHROPIC_AUTH_TOKEN` are scrubbed from the env. A project inherits the `default = true` profile
 unless its `projects/<slug>.toml` sets `profile = "..."`. Switching a profile is just choosing
 which token + identity to inject, then `project recreate` (same workspace + config dir; no
 re-clone). A guard warns if the config dir's existing `oauthAccount.emailAddress` mismatches the
 new profile's email, to stop work/home cross-contamination. The TUI surfaces token age/expiry and
 warns before the ~1-year cliff (the token cannot self-refresh; a 401 in a work container means
 *re-mint*, not a code bug).
+
+A **login-mode** project (`auth = "login"`, opt-in per project) still selects a profile — the
+identity stub and asset seed come from it — but no token env is injected; the operator runs
+`/login` once inside the container and the minted credential lives in that project's bind. On
+`up`, claude-man reads the bind's logged-in `oauthAccount` email and verifies it against the
+profile (warn-only; the blocking gate stays the recreate-time mismatch guard) — and when the
+profile has no recorded email at all (e.g. it was never minted through `profile add`), the
+logged-in account is backfilled onto the profile so the cross-account guards keep working.
 
 **Implemented account verbs.** `profile add <name>` runs `claude auth login` (optionally `--sso`/
 `--console`/`--email`) then `claude setup-token`, stores the `0600` token, and records the account
@@ -173,7 +185,8 @@ docker create --name claude-man-<slug> \
   -e XDG_CACHE_HOME=/home/agent/.cache -e XDG_STATE_HOME=/home/agent/.cache/state \
   -e GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig -e GH_CONFIG_DIR=/home/agent/.cache/gh \
   -e USE_BUILTIN_RIPGREP=0 -e DISABLE_AUTOUPDATER=1 \
-  -e CLAUDE_CODE_OAUTH_TOKEN=<profile token>  (ANTHROPIC_API_KEY/AUTH_TOKEN omitted) \
+  -e CLAUDE_CODE_OAUTH_TOKEN=<profile token>  (ANTHROPIC_API_KEY/AUTH_TOKEN omitted; the whole
+                                               line omitted under `auth = "login"`) \
   -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=user.name -e GIT_CONFIG_VALUE_0=<name> \
   -e GIT_CONFIG_KEY_1=user.email -e GIT_CONFIG_VALUE_1=<email>   (when a git identity resolves) \
   -v <state>/projects/<slug>/claude-config:/home/agent/.claude \
@@ -285,7 +298,8 @@ verified empirically against the exact hardened profile, including a real GitHub
   **containment-checked** (`schema.EnvMount`, with a leading-`//` collapse so the kernel's
   normalization can't be used to slip the check): it may not be relative, contain `..`, or target a
   claude-man-managed mount — **never** `/home/agent/.claude/…` (a bind there smuggles a working
-  `.credentials.json` — a verified attack), the `.claude.json` sibling, `/home/agent/.ssh` (no binding
+  `.credentials.json` — a verified attack; unchanged under login mode, where only the in-container
+  claude may mint a credential there), the `.claude.json` sibling, `/home/agent/.ssh` (no binding
   a private key in), `/home/agent/.local/` (the baked claude launcher runs with the OAuth token),
   `/tmp`, or `/home/agent/.cache`. **`/workspace/<path>` IS allowed** (a workspace-root `CLAUDE.md`
   above the per-repo ones is a primary use case) — gitstate reads the registry not the filesystem, so

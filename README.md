@@ -70,7 +70,7 @@ blast radius is **one disposable container**, not your machine.
 
 | Attack technique (real 2026 TTPs) | What claude-man does |
 |---|---|
-| **Steal `~/.claude/.credentials.json`** | The file is **never** in the container — auth is an env-var OAuth token, never a credentials file (invariant 1). There is nothing to read. |
+| **Steal `~/.claude/.credentials.json`** | Your **host** file is never in any container. Token mode (default): auth is an env-var OAuth token — no credentials file exists inside at all. Opt-in **login mode** (for claude.ai connectors): a per-project credential *minted inside* the container lives only in that project's own bind — one disposable sandbox, never synced back, `project logout` removes it (invariant 1). |
 | **Harvest SSH private keys** | Keys **never enter the container**: only the host ssh-agent *socket* is forwarded, so a payload can't exfiltrate a key (it can sign while connected — a documented residual). |
 | **Poison host `~/.claude/settings.json` hooks** | The per-project `~/.claude` is seeded from a **filtered allowlist with hooks/statusLine stripped**; there is no path for a poisoned host hook to ride into the container, nor for a container-written hook to reach the host unreviewed. |
 | **`rm -rf ~/` destructive trip-wire** | `~` is `/home/agent` inside the sandbox — the wiper can only touch the re-seedable per-project config and a tmpfs. **The host home is untouched.** |

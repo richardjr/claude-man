@@ -13,13 +13,19 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import json  # noqa: E402
 import subprocess  # noqa: E402
 
 from claudeman import assets, config, lifecycle  # noqa: E402
 from claudeman.checkout.gitstate import RepoState  # noqa: E402
 from claudeman.checkout.repos import RepoResult  # noqa: E402
 from claudeman.docker.images import BuildResult  # noqa: E402
-from claudeman.registry.schema import PortMapping, Project, Repo, Settings, Sync  # noqa: E402
+from claudeman.profiles import seed  # noqa: E402
+from claudeman.registry import profiles as profiles_registry  # noqa: E402
+from claudeman.registry import projects as projects_registry  # noqa: E402
+from claudeman.registry.schema import (  # noqa: E402
+    PortMapping, Profile, Project, Repo, Settings, Sync,
+)
 from claudeman.updates import ReleaseCheck  # noqa: E402
 
 
@@ -1025,6 +1031,154 @@ class SetSshAutoTrustTest(unittest.TestCase):
         res = lifecycle.set_ssh_auto_trust("ghost", True)
         self.assertFalse(res.ok)
         self.assertIn("no project", res.detail)
+
+
+class LoginIdentityActionTest(unittest.TestCase):
+    """The pure login-mode identity classifier (no filesystem, no registry)."""
+
+    def test_truth_table(self) -> None:
+        cases = {
+            ("", ""): "none",                       # nothing readable in the bind
+            ("", "me@x.com"): "none",
+            ("me@x.com", ""): "backfill",           # profile has no record — adopt the login's
+            ("other@x.com", "me@x.com"): "mismatch",
+            ("me@x.com", "me@x.com"): "ok",
+        }
+        for (seeded, profile_email), want in cases.items():
+            self.assertEqual(lifecycle.login_identity_action(seeded, profile_email), want,
+                             (seeded, profile_email))
+
+
+class LoginModeTest(unittest.TestCase):
+    """Login auth mode: deliberate token=None, the /login note, identity verify/backfill,
+    set_auth, and logout — all over real tmp registries, only docker mocked."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+
+    def tearDown(self) -> None:
+        for k in ("CLAUDE_MAN_CONFIG_HOME", "CLAUDE_MAN_STATE_HOME"):
+            os.environ.pop(k, None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    def _profile_with_token(self, name: str = "home", email: str = "") -> None:
+        profiles_registry.save(Profile(name=name, account_email=email, default=True))
+        tok = config.profile_token_path(name)
+        tok.parent.mkdir(parents=True, exist_ok=True)
+        tok.write_text("sk-ant-oat-test\n")
+
+    def _ensure_created(self, project: Project):
+        """Run the real ensure_created with only docker/images/git mocked out."""
+        with mock.patch.object(lifecycle.runner, "exists", return_value=False), \
+                mock.patch.object(lifecycle.images, "ensure_chain",
+                                  return_value=BuildResult(True, [], "")), \
+                mock.patch.object(lifecycle.images, "image_claude_version", return_value=None), \
+                mock.patch.object(lifecycle.gitconfig, "container_env", return_value={}), \
+                mock.patch.object(lifecycle.runner, "create",
+                                  return_value=subprocess.CompletedProcess([], 0)) as create:
+            res = lifecycle.ensure_created(project)
+        return res, create
+
+    def test_login_mode_passes_no_token_even_when_minted(self) -> None:
+        # The profile HAS a fully-minted token — login mode must still resolve token=None
+        # (deliberate, not accidental absence) and hint at /login, never at minting.
+        self._profile_with_token()
+        res, create = self._ensure_created(Project(slug="demo", auth="login"))
+        self.assertTrue(res.ok)
+        self.assertIsNone(create.call_args.kwargs["token"])
+        self.assertIn("login mode — no credential yet", res.detail)
+        self.assertNotIn("mint one", res.detail)
+
+    def test_login_note_silent_when_credential_present(self) -> None:
+        self._profile_with_token()
+        cc = config.claude_config_dir("demo")
+        cc.mkdir(parents=True)
+        (cc / ".credentials.json").write_text("{}")
+        res, create = self._ensure_created(Project(slug="demo", auth="login"))
+        self.assertTrue(res.ok)
+        self.assertIsNone(create.call_args.kwargs["token"])
+        self.assertNotIn("login mode", res.detail)
+
+    def test_token_mode_unchanged(self) -> None:
+        self._profile_with_token()
+        res, create = self._ensure_created(Project(slug="demo"))
+        self.assertTrue(res.ok)
+        self.assertEqual(create.call_args.kwargs["token"], "sk-ant-oat-test")
+
+    # -- identity verify / backfill ---------------------------------------
+    def _seed_then_login_as(self, email: str) -> Project:
+        project = Project(slug="demo", auth="login")
+        seed.seed_project_config(project, profiles_registry.load("home"))
+        # Simulate a real in-container /login rewriting the bind's identity.
+        (config.claude_config_dir("demo") / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {"emailAddress": email}}))
+        return project
+
+    def test_verify_backfills_empty_profile_email(self) -> None:
+        self._profile_with_token(email="")
+        project = self._seed_then_login_as("me@x.com")
+        note = lifecycle._verify_login_identity(project)
+        self.assertIn("recorded account", note)
+        self.assertEqual(profiles_registry.load("home").account_email, "me@x.com")
+        # Idempotent: a second up produces no further note (now "ok").
+        self.assertEqual(lifecycle._verify_login_identity(project), "")
+
+    def test_verify_warns_on_mismatch_and_never_writes(self) -> None:
+        self._profile_with_token(email="orig@x.com")
+        project = self._seed_then_login_as("other@x.com")
+        note = lifecycle._verify_login_identity(project)
+        self.assertIn("WARNING", note)
+        self.assertEqual(profiles_registry.load("home").account_email, "orig@x.com")
+
+    # -- set_auth ----------------------------------------------------------
+    def test_set_auth_reminds_recreate_and_login(self) -> None:
+        projects_registry.save(Project(slug="demo"))
+        res = lifecycle.set_auth("demo", "login")
+        self.assertTrue(res.ok)
+        self.assertIn("recreate", res.detail)
+        self.assertIn("/login", res.detail)
+        self.assertEqual(projects_registry.load("demo").auth, "login")
+
+    def test_set_auth_same_mode_is_noop(self) -> None:
+        projects_registry.save(Project(slug="demo"))
+        res = lifecycle.set_auth("demo", "token")
+        self.assertTrue(res.ok)
+        self.assertIn("nothing to do", res.detail)
+
+    def test_set_auth_back_to_token_warns_on_leftover_credential(self) -> None:
+        projects_registry.save(Project(slug="demo", auth="login"))
+        cc = config.claude_config_dir("demo")
+        cc.mkdir(parents=True)
+        (cc / ".credentials.json").write_text("{}")
+        res = lifecycle.set_auth("demo", "token")
+        self.assertTrue(res.ok)
+        self.assertIn("project logout demo", res.detail)   # never silent
+
+    # -- logout ------------------------------------------------------------
+    def test_logout_refused_while_running(self) -> None:
+        projects_registry.save(Project(slug="demo", auth="login"))
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=True):
+            res = lifecycle.logout("demo")
+        self.assertFalse(res.ok)
+        self.assertIn("stop it first", res.detail)
+
+    def test_logout_removes_and_is_idempotent(self) -> None:
+        projects_registry.save(Project(slug="demo", auth="login"))
+        cc = config.claude_config_dir("demo")
+        cc.mkdir(parents=True)
+        cred = cc / ".credentials.json"
+        cred.write_text("{}")
+        with mock.patch.object(lifecycle.runner, "is_running", return_value=False):
+            res = lifecycle.logout("demo")
+            self.assertTrue(res.ok)
+            self.assertFalse(cred.exists())
+            again = lifecycle.logout("demo")
+        self.assertTrue(again.ok)
+        self.assertIn("nothing to do", again.detail)
 
 
 if __name__ == "__main__":

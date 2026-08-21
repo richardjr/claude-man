@@ -6,6 +6,25 @@ may land in minor versions until 1.0).
 ## [Unreleased]
 
 ### Added
+- **Per-project login auth mode** (`Project.auth = "token"|"login"`) so claude.ai **account
+  connectors** (remote MCP) work inside containers: the default setup-token carries only the
+  `user:inference` scope and can never see them (upstream-intentional — new investigation entry
+  in `docs/DEBUGGING.md`). Under the opt-in `login` mode no token env is injected; the operator
+  runs `/login` once inside the container (code-paste flow) and claude **mints its own**
+  credential in that project's claude-config bind, self-refreshing in place and surviving
+  stop/recreate. Invariant 1 is amended, not repealed: copying/bind-mounting any HOST credential
+  stays forbidden in both modes (the `EnvMount` guard and every `ANTHROPIC_*` scrub are
+  unchanged, test-pinned; token-mode create argv is byte-identical). New verbs: `project auth
+  <slug> [token|login]` (show/set; recreate to apply), `project logout <slug>` (remove the minted
+  credential; refused while running), `project create --auth login`; in the TUI, Project menu →
+  **Auth…** (`a`) — a mode-switch screen mirroring the Egress recreate-to-apply flow, with the
+  credential state shown and a Logout button. Never silent: a
+  `claude-man.auth` container label, an AUTH column in `project status` (+ a credential
+  present/absent line), and a `[login]` badge on the TUI Profile cell. On `up`, the logged-in
+  account is verified against the profile (warn on mismatch; an empty profile email is
+  backfilled) so the cross-account guards keep working; a forced cross-account re-seed now also
+  removes a minted credential. Docs: SECURITY.md residual risk 6, ARCHITECTURE/CLI/SETUP-GUIDES
+  sections.
 - **First-run setup wizard** (issue #31 onboarding): on a completely fresh machine (no config.toml,
   no profiles, no projects) the TUI opens a guided wizard — system checks with per-cause fix hints,
   terminal confirmation/pick, **inline first-profile minting** (the TUI suspends, `claude

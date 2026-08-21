@@ -282,7 +282,12 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
 
     profile = effective_profile(project)
     profile_name = profile.name if profile else "none"
-    token = profiles_registry.load_token(profile.name) if profile else None
+    # Login mode (invariant 1's opt-in amendment): resolve token=None DELIBERATELY — no
+    # CLAUDE_CODE_OAUTH_TOKEN env is rendered, and the in-container /login-minted credential in
+    # the claude-config bind is the auth instead (a fully-minted profile token is ignored).
+    login_mode = project.auth == "login"
+    token = None if login_mode else (
+        profiles_registry.load_token(profile.name) if profile else None)
 
     seed_mod.seed_project_config(project, profile)
     # Create workspace/ operator-owned BEFORE docker binds it, or Docker auto-creates it root:root and
@@ -349,7 +354,11 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
     notes = []
-    if not token:
+    if login_mode:
+        note = _login_note(project)
+        if note:
+            notes.append(note)
+    elif not token:
         notes.append("no token — in-container `claude` won't authenticate "
                      "(mint one with `claude setup-token` → "
                      f"{config.profile_token_path(profile_name)})" if profile
@@ -545,8 +554,17 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
     if _has_ssh_mount(project):
         _seed_ssh(project)  # populate the ~/.ssh tmpfs config/known_hosts (post-start, exec-stdin)
+    login_note = ""
+    if project.auth == "login":
+        # ensure_created's note only fires on a fresh create — repeat the /login hint for the
+        # existing-container start path, and verify/backfill the logged-in identity (warn-only).
+        hint = _login_note(project)
+        if hint and "created" not in created.detail:
+            login_note = f"; {hint}"
+        login_note += _verify_login_identity(project)
     prefix = created.detail + "; " if "created" in created.detail else ""
-    return Result(True, f"{prefix}started {project.container}{packs_note}{sync_note}{scratch_note}")
+    return Result(True, f"{prefix}started {project.container}"
+                        f"{packs_note}{sync_note}{scratch_note}{login_note}")
 
 
 def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
@@ -772,6 +790,64 @@ def set_packs(slug: str, names: tuple[str, ...]) -> Result:
     return Result(rep.ok, detail)
 
 
+# ---------------------------------------------------------------------------
+# Login auth mode (invariant 1's opt-in amendment): no token env is injected; the in-container
+# claude mints its own .credentials.json in the per-project claude-config bind via /login.
+# ---------------------------------------------------------------------------
+def _login_credential_path(slug: str):
+    """The in-container-minted credential's host-side location (inside the claude-config bind)."""
+    return config.claude_config_dir(slug) / ".credentials.json"
+
+
+def _login_note(project: Project) -> str:
+    """The first-launch /login hint — '' unless a login-mode project has no minted credential."""
+    if project.auth != "login" or _login_credential_path(project.slug).exists():
+        return ""
+    return (f"login mode — no credential yet; run /login once inside the container "
+            f"(`claudemanctl project claude {project.slug}`, then paste the code the browser "
+            f"shows back into the terminal — no in-container browser needed)")
+
+
+def login_identity_action(seeded_email: str, profile_email: str) -> str:
+    """Pure classifier for the login-mode identity check on ``up``.
+
+    ``seeded_email`` is the bind's ``.claude.json`` ``oauthAccount`` email (the seeded stub's
+    profile email until a real ``/login`` rewrites it with the actual signed-in account);
+    ``profile_email`` is the profile's recorded account. Returns:
+    ``"none"`` (nothing readable) | ``"backfill"`` (profile has no record — adopt the seeded one)
+    | ``"mismatch"`` (logged in as a different account) | ``"ok"``."""
+    if not seeded_email:
+        return "none"
+    if not profile_email:
+        return "backfill"
+    return "mismatch" if seeded_email != profile_email else "ok"
+
+
+def _verify_login_identity(project: Project) -> str:
+    """Warn-only identity check for a login-mode project on ``up`` (never blocks a start).
+
+    Backfills an empty profile ``account_email`` from the bind's identity (one-way, idempotent —
+    the profile-TOML patch is atomic; same lock-free exposure as ``profiles.save``) so the
+    cross-account guards (``account_mismatch`` on recreate) work for login-created profiles.
+    Returns a '; '-prefixed note for the ``up`` detail, or ''."""
+    profile = effective_profile(project)
+    if profile is None:
+        return ""
+    seeded = seed_mod.read_seeded_email(project.slug)
+    action = login_identity_action(seeded, profile.account_email)
+    if action == "backfill":
+        try:
+            profiles_registry.set_account_email(profile.name, seeded)
+        except (OSError, RuntimeError):
+            return ""  # best-effort — never fail a start over a bookkeeping write
+        return f"; recorded account {seeded!r} on profile {profile.name!r} (from the container login)"
+    if action == "mismatch":
+        return (f"; WARNING: container is logged in as {seeded!r} but profile {profile.name!r} "
+                f"is {profile.account_email!r} — /login again in-container, or "
+                f"`project recreate {project.slug} --profile <right-one> --force` to re-seed")
+    return ""
+
+
 def account_mismatch(project: Project, profile: Profile | None) -> str | None:
     """Return the existing seeded email if it conflicts with ``profile``'s account, else None.
 
@@ -986,6 +1062,60 @@ def set_ssh_auto_trust(slug: str, enabled: bool) -> Result:
     return Result(True, f"{slug} ssh auto-trust {verb} — `up` the project to apply")
 
 
+def set_auth(slug: str, mode: str) -> Result:
+    """Set a project's auth mode (registry-only + flocked; recreate-to-apply).
+
+    Auth is fixed at ``docker create`` (the token env + label render there), so like egress/ports
+    the change applies on the next ``recreate``. Switching login→token deliberately warns when a
+    minted credential remains in the bind (never silent — ``project logout`` removes it)."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    if project.auth == mode:
+        return Result(True, f"{slug} auth already {mode!r} (nothing to do)")
+    try:
+        with _slug_lock(slug):
+            projects_registry.set_auth(slug, mode)
+    except ValidationError as exc:
+        return Result(False, str(exc))
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    if mode == "login":
+        return Result(True, f"{slug} auth = login — `recreate` to apply (drops the injected "
+                            f"token env); then run /login once inside the container")
+    leftover = ""
+    if _login_credential_path(slug).exists():
+        leftover = (f"; a minted login credential remains in the bind — remove it with "
+                    f"`project logout {slug}`")
+    return Result(True, f"{slug} auth = token — `recreate` to apply (re-injects the profile "
+                        f"token){leftover}")
+
+
+def logout(slug: str) -> Result:
+    """Remove the in-container-minted login credential from a project's claude-config bind.
+
+    Refuses while the container runs (claude holds the credential in memory and may rewrite it
+    on refresh — a delete would race the refresh's atomic rewrite). Idempotent; mode-agnostic
+    (also cleans a leftover credential on a token-mode project). The login session identity
+    (``oauthAccount`` in ``.claude.json``) and history remain — ``recreate --force`` re-seeds
+    the identity (which also removes the credential), ``delete`` removes everything."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    if runner.is_running(slug):
+        return Result(False, f"{slug} is running — stop it first (claude holds the credential "
+                             f"in memory and may rewrite it on refresh)")
+    path = _login_credential_path(slug)
+    if not path.exists():
+        return Result(True, f"no credential in {slug}'s claude-config bind (nothing to do)")
+    try:
+        path.unlink()
+    except OSError as exc:
+        return Result(False, f"could not remove {path}: {exc}")
+    return Result(True, f"removed .credentials.json from {slug}'s claude-config bind — the "
+                        f"login identity and session history remain (`recreate --force` "
+                        f"re-seeds the identity; `delete` removes everything)")
+
+
 def create_project(
     slug: str,
     *,
@@ -994,6 +1124,7 @@ def create_project(
     egress: str | None = None,
     language: str | None = None,
     ssh_auto_trust: bool = False,
+    auth: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Write (or load) the project definition, then create the container.
@@ -1019,6 +1150,7 @@ def create_project(
             language=language or "",
             packs=default_packs,
             ssh_auto_trust=ssh_auto_trust,
+            auth=auth or config.DEFAULT_AUTH,
         )
         try:
             with _slug_lock(slug):  # serialise with concurrent add_repo/remove_repo on this slug

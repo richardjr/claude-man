@@ -11,7 +11,7 @@ controls, and the residual risks.
         host (trusted)                         container (sandboxed, semi-trusted)
   ┌───────────────────────────┐          ┌──────────────────────────────────────┐
   │ ~/.config/claude-man  TOML │          │  claude (uid 1000, no caps, ro rootfs)│
-  │ ~/.local/state/.../token   │── env ──▶│  CLAUDE_CODE_OAUTH_TOKEN (this proj)  │
+  │ ~/.local/state/.../token   │── env ──▶│  CLAUDE_CODE_OAUTH_TOKEN (token mode) │
   │ gh PAT (clone host-side)   │  0600    │  /workspace      (bind, rw)           │
   │ ~/.claude (sync-back tgt)  │◀─ gate ──│  /home/agent/.claude (bind, rw)       │
   └───────────────────────────┘  review  └──────────────────────────────────────┘
@@ -23,8 +23,8 @@ What crosses each way, and what must never cross:
 
 | Direction | Allowed | Forbidden |
 |---|---|---|
-| host → container | the **one** profile's OAuth token (env), an opt-in `GH_TOKEN` when the operator configures one (`config gh-token`, injected pass-through), the non-secret git author identity (name/email), project env vars, the checked-out repos | `.credentials.json`, the host `gh` PAT / `~/.config/gh`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
-| container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (auth is env-injected — no token file exists in the bind to refresh back), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
+| host → container | the **one** profile's OAuth token (env — **token mode**; login mode injects nothing), an opt-in `GH_TOKEN` when the operator configures one (`config gh-token`, injected pass-through), the non-secret git author identity (name/email), project env vars, the checked-out repos | any **host** `.credentials.json` (in both auth modes — login mode's credential is *minted inside* the container, never copied in), the host `gh` PAT / `~/.config/gh`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
+| container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (token mode: no credential file exists in the bind at all; **login mode**: the in-container-minted `.credentials.json` refreshes in place *inside the per-project bind* — denylisted from sync-back, it must still never reach host config), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
 
 ## Controls
 
@@ -56,12 +56,24 @@ What crosses each way, and what must never cross:
   (tmpfs options are fixed at `docker create`; no image rebuild).
 
 ### Credential isolation
-- **No `.credentials.json` ever enters a container.** Auth is a long-lived token minted by
-  `claude setup-token`, stored `0600` (dir `0700`) under `XDG_STATE`, injected per-launch as
-  `CLAUDE_CODE_OAUTH_TOKEN`. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are scrubbed from the
-  rendered env so they can't silently outrank the OAuth token or bill the wrong account — including
-  any `env_file`, which is parsed + scrubbed host-side (not handed to `docker --env-file`) and its
-  survivors injected as pass-through so secret values never appear in argv (`ps aux`).
+- **No host credential ever enters a container — and no credential is ever COPIED in.** In
+  **token mode** (default) auth is a long-lived token minted by `claude setup-token`, stored
+  `0600` (dir `0700`) under `XDG_STATE`, injected per-launch as `CLAUDE_CODE_OAUTH_TOKEN` — no
+  credentials file exists inside at all. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are scrubbed
+  from the rendered env so they can't silently outrank the OAuth token or bill the wrong account —
+  including any `env_file`, which is parsed + scrubbed host-side (not handed to `docker
+  --env-file`) and its survivors injected as pass-through so secret values never appear in argv
+  (`ps aux`).
+- **Login mode (opt-in, per-project — `project auth <slug> login`)**: no token env is injected;
+  the operator runs `/login` once inside the container and the in-container claude *mints* its own
+  `.credentials.json` in that project's claude-config bind (self-refreshing in place — the write
+  races are bounded by the one-claude-per-container guard, invariant 6). The credential never
+  crosses the trust boundary: it is created inside, lives only in that project's bind, is
+  denylisted from sync-back, and is removed by `project logout`, any forced cross-account
+  re-seed, and `project delete`. The mode is surfaced everywhere (container label, status AUTH
+  column, TUI badge) so it is never silent. It exists because the setup-token's
+  `user:inference`-only scope cannot reach claude.ai account connectors (see residual risk 6 for
+  the trade-off).
 - Each profile's token dir is isolated; work and home tokens never share a file. A switch-time
   email-mismatch guard refuses to cross identities into an existing config dir.
 - The **`gh` PAT stays on the host** — repos are cloned host-side; the container only sees the
@@ -212,7 +224,8 @@ What crosses each way, and what must never cross:
    inherent to env-var injection and the same caveat Anthropic flags for sandboxed agents. →
    Per-project isolation + strict egress (no arbitrary exfil path) is the real mitigation; recommend
    strict egress for untrusted code. (The token carries only `setup-token`'s default `user:inference`
-   scope — no profile/usage/billing/write power beyond the inference it authorises.)
+   scope — no profile/usage/billing/write power beyond the inference it authorises. Under **login
+   mode** the scope trade-off inverts — see risk 6.)
 3. **The hardened profile is stricter than Anthropic's reference devcontainer**; an undocumented
    write path may only surface at runtime (`EROFS`/`getpwuid`). → `image smoke` gate; add writable
    mounts reactively; re-verify per claude version bump.
@@ -221,6 +234,18 @@ What crosses each way, and what must never cross:
    re-verified on each bump (pinned per image).
 5. **Two-store coherence (TOML vs labels).** A manual `docker run` or partial delete can desync. →
    Registry always wins; reconcile by recreate; delete is an idempotent transaction.
+6. **Login mode places a broader-scoped, self-refreshing credential inside the sandbox.** An
+   opt-in `auth = "login"` project holds an in-container-minted `.credentials.json` with full
+   subscription scopes (account connectors, profile — not just inference), readable by the agent,
+   persistent at rest in the per-project bind; `/login` also writes the full account identity
+   (UUIDs) into the bind's `.claude.json`. → Opt-in per-project only — token mode stays the
+   default and the recommendation whenever connectors aren't needed; the mode is surfaced
+   (container label / status AUTH column / TUI `[login]` badge / up-notes) so it is never
+   invisible; the credential is denylisted from sync-back at every layer, removed by
+   `project logout`, any forced cross-account re-seed, and `project delete`; strict egress bounds
+   exfiltration exactly as it does for the env token; and the one-claude guard (invariant 6)
+   bounds refresh write races. The credential authenticates one account for one project's
+   disposable sandbox — never the host.
 
 ## Reporting
 

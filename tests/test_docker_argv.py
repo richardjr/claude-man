@@ -192,6 +192,48 @@ class HardenedArgvTest(unittest.TestCase):
         self.assertIn("claude-man.slug=landarna", joined)
         self.assertIn("claude-man.profile=work", joined)
         self.assertIn("claude-man.repos=1", joined)
+        self.assertIn("claude-man.auth=token", joined)
+
+
+class LoginModeArgvTest(unittest.TestCase):
+    """auth = "login" (invariant 1's opt-in amendment): NO token env is rendered, the auth label
+    self-describes the mode, and the hardened floor is byte-identical modulo exactly those two."""
+
+    def _argv(self, *, auth: str, inject_token: bool) -> list:
+        import dataclasses
+        return runner.build_create_argv(
+            dataclasses.replace(_project(), auth=auth),
+            profile_name="work",
+            version="2.1.159",
+            created_iso="2026-06-01T00:00:00Z",
+            claude_config_path="/state/landarna/claude-config",
+            workspace_path="/state/landarna/workspace",
+            inject_token=inject_token,
+        )
+
+    def test_login_mode_renders_no_token_env(self) -> None:
+        argv = self._argv(auth="login", inject_token=False)
+        self.assertFalse(any(OAUTH_TOKEN_ENV in a for a in argv),
+                         "login mode must not reference the OAuth token env at all")
+
+    def test_auth_label_stamped_both_modes(self) -> None:
+        self.assertIn("claude-man.auth=login",
+                      " ".join(self._argv(auth="login", inject_token=False)))
+        self.assertIn("claude-man.auth=token",
+                      " ".join(self._argv(auth="token", inject_token=True)))
+
+    def test_floor_byte_identical_modulo_token_and_label(self) -> None:
+        token_argv = self._argv(auth="token", inject_token=True)
+        login_argv = self._argv(auth="login", inject_token=False)
+        # The ONLY differences allowed: the one `-e CLAUDE_CODE_OAUTH_TOKEN` pass-through pair
+        # and the auth label's value. Everything else — every hardening flag — is identical.
+        i = token_argv.index(OAUTH_TOKEN_ENV)
+        self.assertEqual(token_argv[i - 1], "-e")
+
+        def norm(argv: list) -> list:
+            return ["claude-man.auth=X" if a.startswith("claude-man.auth=") else a for a in argv]
+
+        self.assertEqual(norm(token_argv[:i - 1] + token_argv[i + 1:]), norm(login_argv))
 
 
 class RepoFeatureDoesNotTouchHardeningTest(unittest.TestCase):
