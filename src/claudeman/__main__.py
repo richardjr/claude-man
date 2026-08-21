@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import sys
 
-_CTL_GROUPS = {"profile", "project", "sync", "image"}
+# Every top-level claudemanctl group/verb, so `claudeman <group> …` reaches the CLI instead of
+# launching the TUI. Kept as a literal (deriving it from cli.build_parser() would import the CLI +
+# registry on every TUI launch); tests/test_main_dispatch.py pins parity with the real parser.
+_CTL_GROUPS = {"profile", "project", "packs", "model", "sync", "config", "image", "doctor"}
 
 
 def main(argv: list[str] | None = None) -> int:

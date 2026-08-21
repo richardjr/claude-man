@@ -493,14 +493,21 @@ tuning loop). The per-destination CLI readout stays at `project egress-log`.
   quitting the app never leaks a `docker logs -f`. Read-only — it never writes to the container.
 - **Terminal spawn** (`tui/terminals.py`): a **separate OS window** (not `suspend()`), launched
   detached via `Popen(..., start_new_session=True)`. The emulator is chosen from a **settings-driven
-  per-platform launcher table**: on Linux 8 built-ins (`ghostty`, `alacritty`, `kitty`, `wezterm`,
-  `foot`, `gnome-terminal`, `konsole`, `xterm`), on macOS `kitty`/`alacritty`/`wezterm` plus iTerm2
+  per-platform launcher table**: on Linux 9 built-ins (`ghostty`, `alacritty`, `kitty`, `wezterm`,
+  `foot`, `ptyxis`, `gnome-terminal`, `konsole`, `xterm` — ptyxis title-only, it has no class flag;
+  issue #31), on macOS `kitty`/`alacritty`/`wezterm` plus iTerm2
   and the always-present Terminal.app (via `osascript`), and on WSL2 the Linux table plus `wt.exe`.
   The `[terminal] program`/`command` settings (`config terminal`) pick a named launcher or a
-  `program = "custom"` `{argv}` template; absent a setting, auto-detection walks the table in
-  preference order (`ghostty` then `alacritty` first on Linux — the historical default). On
-  Linux/Wayland the launcher's `--class`/`--app-id` carries `claude-man-<slug>` so a compositor rule
-  (e.g. a Hyprland `windowrulev2`) can place the window. The inner command is
+  `program = "custom"` `{argv}` template (editable in the TUI via the picker's custom row); absent a
+  setting, auto-detection walks the table in
+  preference order (`ghostty` then `alacritty` first on Linux — the historical default). A custom
+  template is availability-probed at resolve time exactly like a named launcher. `spawn` returns a
+  `SpawnHandle` (Popen + a tempfile stderr capture) that every caller passes to `watch_spawn`: a
+  short (`SPAWN_PROBE_S`) wait classifies the launcher as still-running / exited-0 (client-server
+  terminals like gnome-terminal/ptyxis) / failed — a start-then-fail surfaces its exit code and
+  stderr tail (TUI: log + error toast; CLI: non-zero exit) instead of a false success (issue #31).
+  On Linux/Wayland the launcher's `--class`/`--app-id` carries `claude-man-<slug>` so a compositor
+  rule (e.g. a Hyprland `windowrulev2`) can place the window. The inner command is
   `docker exec -it -w <launch_workdir> claude-man-<slug> {bash|claude|nvim}`.
   `claude`/shell/nvim open in the project's **`launch_workdir`** (`Project.launch_workdir`): an explicit
   `[project] workdir`, else **`/workspace`** (the uniform anchor since Phase 6 — the lone-repo auto-cd

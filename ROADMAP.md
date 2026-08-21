@@ -98,6 +98,14 @@ locked-hybrid air-gap stays open). The **terraform overlay** (terraform + packer
 switcher** (Project… → `f` — `profilesview.py` + the `profile_select`/`profile_switch_confirm`
 screens). **Packaging/0.1.0** (self-contained wheel + CHANGELOG).
 
+**Onboarding (issue #31, 2026-08):** a first-run **setup wizard** (fresh machine → guided
+checks / terminal / inline profile mint via `app.suspend()` / streamed image build; re-run at
+Settings `w`), the `claudemanctl doctor` prerequisite checks (`doctor.py`, pure/impure split),
+**ptyxis** in the launcher table + in-TUI custom-template editing, spawn-failure surfacing
+(custom-launcher probe + `watch_spawn` post-spawn classify + the codebase's first `notify()`
+toasts), the TUI empty-state row + startup docker banner, the `claudeman <group>` dispatch fix,
+and the docs split (user-first README, the CLI reference out to `docs/CLI.md`).
+
 **Next up:** **Phase 6c** (deeper curation — port the operator's existing skills into
 `library/packs/`); the projects-table `docker events` push-refresh (the async off-UI-thread `docker
 ps` worker (TUI-2) is DONE — only the event-driven trigger remains); and the deferred hardening

@@ -38,6 +38,9 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         self._patch(terminals, "spawn_shell", lambda slug: self.calls.append(f"shell:{slug}"))
         self._patch(terminals, "spawn_claude", lambda slug: self.calls.append(f"claude:{slug}"))
         self._patch(terminals, "spawn_nvim", lambda slug: self.calls.append(f"nvim:{slug}"))
+        # The post-spawn watch (issue #31) runs after every successful spawn; default it to OK.
+        self._patch(terminals, "watch_spawn",
+                    lambda handle, **kw: terminals.SpawnOutcome(True, "running", None))
 
     def _patch(self, module, name, value) -> None:
         original = getattr(module, name)
@@ -113,6 +116,15 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         self._patch(terminals, "spawn_claude", _boom)
         rc = cli.cmd_project_claude(_Args("demo"))
         self.assertEqual(rc, 1)
+
+    # -- launcher started but then failed (issue #31): non-zero, not silent success ------
+    def test_launcher_start_then_fail_returns_nonzero(self) -> None:
+        self._patch(runner, "is_running", lambda slug: True)
+        self._patch(terminals, "watch_spawn",
+                    lambda handle, **kw: terminals.SpawnOutcome(False, "failed", 1, "boom"))
+        rc = cli.cmd_project_shell(_Args("demo"))
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.calls, ["shell:demo"])  # it did spawn — the watch caught the failure
 
 
 if __name__ == "__main__":

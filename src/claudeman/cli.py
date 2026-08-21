@@ -228,9 +228,17 @@ def _open_terminal(slug: str, program: str) -> int:
         "nvim": ("nvim", terminals.spawn_nvim),
     }.get(program, ("shell", terminals.spawn_shell))
     try:
-        spawn(slug)
+        handle = spawn(slug)
     except (RuntimeError, OSError) as exc:
         print(f"failed to open {label} for {slug!r}: {exc}", file=sys.stderr)
+        return 1
+    # Brief post-spawn watch (≤~1.5 s): a launcher that starts and then fails — e.g. a broken
+    # custom template — must exit non-zero here, not report success (issue #31).
+    outcome = terminals.watch_spawn(handle)
+    if not outcome.ok:
+        tail = f"\n{outcome.stderr_tail}" if outcome.stderr_tail else ""
+        print(f"failed to open {label} for {slug!r}: terminal launcher exited "
+              f"{outcome.returncode}{tail}", file=sys.stderr)
         return 1
     return 0
 
@@ -1380,6 +1388,28 @@ def cmd_image_smoke(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# doctor
+# --------------------------------------------------------------------------
+_DOCTOR_TAGS = {"ok": "[ OK ]", "warn": "[warn]", "fail": "[FAIL]"}
+
+
+def cmd_doctor(args) -> int:
+    from . import doctor
+
+    report = doctor.run_all()
+    for check in report.checks:
+        print(f"{_DOCTOR_TAGS[check.status]} {check.label}: {check.detail}")
+        if check.hint:
+            print(f"       ↳ {check.hint}")
+    if report.ok:
+        print("\nready — no blocking problems found")
+        return 0
+    fails = sum(1 for c in report.checks if c.status == doctor.FAIL)
+    print(f"\n{fails} blocking problem(s) — fix the [FAIL] items above", file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -1724,6 +1754,12 @@ def build_parser() -> argparse.ArgumentParser:
     ism = im.add_parser("smoke", help="smoke-test a hardened image")
     ism.add_argument("overlay", choices=config.OVERLAYS)
     ism.set_defaults(func=cmd_image_smoke)
+
+    # doctor (single-level: one verb, no sub-verbs)
+    sub.add_parser(
+        "doctor",
+        help="check host prerequisites (docker daemon, claude CLI, image, terminal, profiles)",
+    ).set_defaults(func=cmd_doctor)
 
     return p
 

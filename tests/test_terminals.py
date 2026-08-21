@@ -170,6 +170,13 @@ class RenderSpecTest(unittest.TestCase):
         argv = self._render("gnome-terminal", terminals._LINUX_TERMINALS)
         self.assertEqual(argv, ["gnome-terminal", "--title=claude:demo", "--", *self.INNER])
 
+    def test_ptyxis_new_window_title_only(self) -> None:
+        # Issue #31: GNOME's default terminal on Ubuntu 25.10+/Fedora. No --class flag exists, so
+        # identity rides the title only — the window class must not leak into any element.
+        argv = self._render("ptyxis", terminals._LINUX_TERMINALS)
+        self.assertEqual(argv, ["ptyxis", "--new-window", "-T", "claude:demo", "--", *self.INNER])
+        self.assertFalse(any("claude-man-demo" in el for el in argv[:5]))
+
     def test_darwin_alacritty_has_no_class_flag(self) -> None:
         argv = self._render("alacritty", terminals._DARWIN_TERMINALS)
         self.assertNotIn("--class", argv)
@@ -216,8 +223,14 @@ class PlatformTableTest(unittest.TestCase):
 
     def test_known_program_names_cover_all_tables(self) -> None:
         names = terminals.known_program_names()
-        for expected in ("ghostty", "kitty", "terminal-app", "wt", "custom"):
+        for expected in ("ghostty", "kitty", "ptyxis", "terminal-app", "wt", "custom"):
             self.assertIn(expected, names)
+
+    def test_ptyxis_detected_before_gnome_terminal(self) -> None:
+        # Stock GNOME ships ptyxis as its default terminal (often with a legacy gnome-terminal
+        # still present) — auto-detection must prefer the actual desktop default.
+        names = [s.name for s in terminals.platform_terminals("linux", wsl=False)]
+        self.assertLess(names.index("ptyxis"), names.index("gnome-terminal"))
 
 
 class ResolveSpecTest(_IsolatedConfig):
@@ -258,10 +271,19 @@ class ResolveSpecTest(_IsolatedConfig):
     def test_custom_template_used_verbatim(self) -> None:
         settings_registry.set_terminal(
             program="custom", command=["myterm", "-T", "{title}", "-e", "{argv}"])
-        with self._platform("linux"), self._which():  # custom needs no detection
+        with self._platform("linux"), self._which("myterm"):  # probed like any named launcher
             argv = terminals.build_argv("demo", "bash", keep_open=False)
         self.assertEqual(argv, ["myterm", "-T", "claude:demo", "-e",
                                 "docker", "exec", "-it", "claude-man-demo", "bash"])
+
+    def test_custom_missing_binary_raises(self) -> None:
+        # Issue #31: a stale custom launcher used to be returned unprobed and fail silently at
+        # Popen (with spawn's stdio discarded) — it must fail at resolve time with the fix hint.
+        settings_registry.set_terminal(
+            program="custom", command=["myterm", "-e", "{argv}"])
+        with self._platform("linux"), self._which("ghostty"):  # ghostty present ≠ custom present
+            with self.assertRaisesRegex(RuntimeError, "myterm"):
+                terminals.resolve_spec("linux")
 
     def test_build_argv_matches_legacy_ghostty_behaviour(self) -> None:
         with self._platform("linux"), self._which("ghostty", "alacritty"):
@@ -300,9 +322,38 @@ class OpenPathArgvTest(_IsolatedConfig):
 
     def test_configured_opener_wins(self) -> None:
         settings_registry.set_opener(["nautilus", "--new-window"])
-        with self._platform("linux"), self._which("xdg-open"):
+        with self._platform("linux"), self._which("nautilus", "xdg-open"):
             self.assertEqual(terminals.build_open_path_argv("/some/ws"),
                              ["nautilus", "--new-window", "/some/ws"])
+
+    def test_configured_opener_missing_binary_raises(self) -> None:
+        # Mirror of the custom-terminal probe: a configured opener whose binary is gone must
+        # surface as an error naming it, not silently fail at Popen (nor silently fall back).
+        settings_registry.set_opener(["nautilus", "--new-window"])
+        with self._platform("linux"), self._which("xdg-open"):
+            with self.assertRaisesRegex(RuntimeError, "configured opener 'nautilus'"):
+                terminals.build_open_path_argv("/some/ws")
+
+
+class SpawnClassifyTest(unittest.TestCase):
+    """`classify_spawn` — the pure half of the post-spawn watch (issue #31)."""
+
+    def test_still_running_is_ok(self) -> None:
+        # Window-lifetime terminals (ghostty/alacritty/…) outlive the probe window.
+        out = terminals.classify_spawn(None, "some warning noise")
+        self.assertEqual((out.ok, out.state, out.returncode, out.stderr_tail),
+                         (True, "running", None, ""))
+
+    def test_clean_exit_is_ok(self) -> None:
+        # Client-server terminals (gnome-terminal/ptyxis/konsole/wt) exit 0 once the window opens.
+        out = terminals.classify_spawn(0, "harmless chatter")
+        self.assertEqual((out.ok, out.state, out.returncode, out.stderr_tail),
+                         (True, "exited", 0, ""))
+
+    def test_nonzero_exit_is_failed_with_tail(self) -> None:
+        out = terminals.classify_spawn(5, "boom: no display")
+        self.assertEqual((out.ok, out.state, out.returncode), (False, "failed", 5))
+        self.assertEqual(out.stderr_tail, "boom: no display")
 
 
 if __name__ == "__main__":
