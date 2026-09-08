@@ -61,6 +61,17 @@ may land in minor versions until 1.0).
   present, canonicalised, floor byte-identical beside it) and `test_settings`.
 
 ### Fixed
+- **False "Docker: docker version timed out — daemon not responding" startup banner** on a
+  socket-activated Docker (issue #34). With `docker.socket` enabled and `docker.service` not (the
+  Arch default) the daemon is started by its FIRST client — on a fresh boot, the TUI's own startup
+  probe — and takes ~8 s to answer (buildkit init dominates); the probe's lone 6 s attempt gave up
+  ~2 s early and raised the banner while `docker ps` went on to succeed. `probe_docker` now retries
+  once with a 30 s cold-start budget, an OK after a slow start says so (`answered after 8s (cold
+  start)`), and a real double timeout reads `no answer in Ns — daemon hung or still starting` with a
+  `systemctl status docker` / `restart` hint (Docker Desktop wording on macOS/WSL2) instead of the
+  misleading `start docker` — a timeout means the socket accepted and nothing answered, never
+  "daemon down" (that is a fast `Cannot connect` rc 1, unchanged). Same fix applies to
+  `claudemanctl doctor` and the setup wizard's docker step.
 - **Silent terminal-spawn failures** (issue #31): a configured custom launcher whose binary is gone
   now errors at resolve time (probed like any named launcher, same for a configured Browse opener),
   and every spawn is watched briefly after launch — a launcher that starts and then exits non-zero

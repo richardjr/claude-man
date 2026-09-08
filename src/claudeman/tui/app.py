@@ -1018,7 +1018,10 @@ class ClaudeManApp(App):
         permission denied all used to be indistinguishable — query_containers returns {} for each,
         so the operator saw only an empty table and, later, an opaque build failure. A FAIL raises
         the banner (+ log + toast) with the doctor's per-cause fix hint. One-shot by design: the
-        wizard and `claudemanctl doctor` cover re-checks."""
+        wizard and `claudemanctl doctor` cover re-checks. On a fresh boot this probe is usually the
+        FIRST client of a socket-activated dockerd — the probe waits out that ~8 s cold start
+        (issue #34) rather than raising a false banner, so a FAIL here means a daemon that stayed
+        silent for the whole cold-start budget."""
         check = doctor.probe_docker()
         if check.status == doctor.FAIL:
             self.call_from_thread(self._show_docker_banner, check)

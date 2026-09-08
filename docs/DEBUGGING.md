@@ -172,6 +172,51 @@ and the Fable picker/banner return. Token mode stays the default (docs/SECURITY.
   `claude.ai` + Anthropic entries).
 - Local MCP (`claude mcp add`) never needed any of this — it works under token mode.
 
+## Startup banner "docker version timed out" on a healthy Docker (Sep 2026, issue #34)
+
+### Symptom
+
+On every fresh boot the TUI raised `⚠ Docker: docker version timed out — daemon not responding —
+start the daemon: sudo systemctl start docker`, yet the projects table filled a moment later and
+containers ran normally. A warm `docker version` answered in ~14 ms. It looked tied to an Omarchy
+update because that update brought a run of reboots — the trigger is a fresh boot, not the update.
+
+### Root cause
+
+Socket activation + a 6 s probe. Arch/Omarchy enable `docker.socket` and NOT `docker.service`, so
+`dockerd` isn't running at boot: systemd holds the socket and starts the daemon on the first client
+connection. On a fresh boot the TUI's startup probe IS that first client, and `dockerd` takes a
+consistent ~8 s to `API listen on /run/docker.sock` — ~6.6 s of it `Initializing buildkit` (a large
+build cache: 1343 records / 59.5 GB here). The probe's single 6 s attempt expired ~2 s early. The
+`docker ps` poll has no timeout, so it waited the 8 s out and succeeded, which is why everything
+worked afterwards.
+
+The key fact: a `docker version` TIMEOUT never means "daemon down". A down daemon with no socket is a
+fast `Cannot connect to the Docker daemon … Is the docker daemon running?` rc 1. A timeout means the
+connection was accepted and not answered — a socket-activated cold start, or a hung daemon.
+
+Evidence, from `journalctl -b -u docker.socket -u docker.service -o short-iso`:
+
+```
+09:15:32  systemd: Listening on Docker Socket for the API.        ← boot; no dockerd yet
+09:17:06  systemd: Starting Docker Application Container Engine…  ← the TUI's first connection
+09:17:08  dockerd: Initializing buildkit
+09:17:14  dockerd: Completed buildkit initialization
+09:17:14  dockerd: API listen on /run/docker.sock                ← 8 s after the first client
+```
+
+`systemctl is-enabled docker docker.socket` → `disabled` / `enabled` confirms the socket-only setup.
+
+### Fix
+
+`doctor.probe_docker` retries once on a timeout with a 30 s cold-start budget and reports an OK
+after a slow start factually (`answered after 8s (cold start)`); a real double timeout reads `no
+answer in Ns — daemon hung or still starting` with a `systemctl status docker` / `restart` hint.
+Nothing to do on the host. If you would rather not pay the cold start at all, `sudo systemctl
+enable docker.service` starts the daemon at boot (a resident daemon in exchange); pruning the build
+cache shrinks the buildkit step but here only ~750 MB of it was reclaimable without also removing
+unused images.
+
 ## Locked project (strict egress) troubleshooting
 
 Strict egress (invariant 3) is the most failure-prone subsystem: a locked project routes ALL traffic
