@@ -42,16 +42,98 @@ class DockerClassifyTest(unittest.TestCase):
         self.assertEqual(c.status, doctor.FAIL)
         self.assertIn("sudo systemctl start docker", c.hint)
 
-    def test_timeout_is_daemon_not_responding(self) -> None:
+    def test_timeout_is_hung_or_starting_never_start_hint(self) -> None:
+        # A timeout = the socket ACCEPTED and nothing answered (a down daemon is a fast rc 1), so the
+        # verdict says hung/starting and hints status/restart — never the misleading `start docker`
+        # (issue #34).
         c = doctor.classify_docker(which_found=True, rc=None, stdout="", stderr="")
         self.assertEqual(c.status, doctor.FAIL)
-        self.assertIn("timed out", c.detail)
+        self.assertIn("no answer", c.detail)
+        self.assertIn("hung or still starting", c.detail)
+        self.assertIn("systemctl status docker", c.hint)
+        self.assertIn("systemctl restart docker", c.hint)
+        self.assertNotIn("systemctl start docker", c.hint)
+
+    def test_double_timeout_reports_seconds_waited(self) -> None:
+        c = doctor.classify_docker(which_found=True, rc=None, stdout="", stderr="",
+                                   slow_start_s=36.4)
+        self.assertEqual(c.status, doctor.FAIL)
+        self.assertIn("no answer in 36s", c.detail)
+
+    def test_timeout_macos_hints_docker_desktop_restart(self) -> None:
+        c = doctor.classify_docker(which_found=True, rc=None, stdout="", stderr="", macos=True,
+                                   slow_start_s=36.0)
+        self.assertEqual(c.status, doctor.FAIL)
+        self.assertIn("Docker Desktop", c.hint)
+
+    def test_cold_start_answered_is_ok_and_says_so(self) -> None:
+        # The retry waited out a socket-activated dockerd start: OK (nothing to fix), but factual.
+        c = doctor.classify_docker(which_found=True, rc=0, stdout="29.7.2\n", stderr="",
+                                   slow_start_s=8.2)
+        self.assertEqual(c.status, doctor.OK)
+        self.assertIn("29.7.2", c.detail)
+        self.assertIn("answered after 8s (cold start)", c.detail)
+        self.assertEqual(c.hint, "")
 
     def test_reachable_daemon_is_ok_with_version(self) -> None:
         c = doctor.classify_docker(which_found=True, rc=0, stdout="29.0.1\n", stderr="")
         self.assertEqual(c.status, doctor.OK)
         self.assertIn("29.0.1", c.detail)
         self.assertEqual(c.hint, "")
+
+
+class DockerProbeRetryTest(unittest.TestCase):
+    """`probe_docker` retries ONCE, only on a first-attempt timeout, with the cold-start budget
+    (issue #34: a socket-activated dockerd takes ~8 s to answer its first client — the TUI's startup
+    probe on a fresh boot — and a lone 6 s attempt false-FAILed). `_run` is mocked; no docker."""
+
+    _ARGV = ["docker", "version", "--format", "{{.Server.Version}}"]
+
+    def _probe(self, results, clock=(0.0, 8.2)):
+        with mock.patch.object(doctor.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(doctor, "_run", side_effect=list(results)) as run, \
+             mock.patch.object(doctor, "time") as t, \
+             mock.patch.object(doctor.hostplatform, "is_macos", return_value=False), \
+             mock.patch.object(doctor.hostplatform, "is_wsl", return_value=False):
+            t.monotonic.side_effect = list(clock)
+            return doctor.probe_docker(timeout=6.0, cold_start_timeout=30.0), run
+
+    def test_first_attempt_ok_never_retries(self) -> None:
+        c, run = self._probe([(0, "29.7.2\n", "")])
+        self.assertEqual(c.status, doctor.OK)
+        self.assertNotIn("cold start", c.detail)
+        self.assertEqual(run.call_args_list, [mock.call(self._ARGV, 6.0)])
+
+    def test_first_attempt_timeout_retries_with_cold_start_budget(self) -> None:
+        c, run = self._probe([(None, "", ""), (0, "29.7.2\n", "")])
+        self.assertEqual(c.status, doctor.OK)
+        self.assertIn("server 29.7.2", c.detail)
+        self.assertIn("answered after 8s (cold start)", c.detail)
+        self.assertEqual(run.call_args_list,
+                         [mock.call(self._ARGV, 6.0), mock.call(self._ARGV, 30.0)])
+
+    def test_both_attempts_timeout_is_fail_with_total_wait(self) -> None:
+        c, run = self._probe([(None, "", ""), (None, "", "")], clock=(0.0, 36.4))
+        self.assertEqual(c.status, doctor.FAIL)
+        self.assertIn("no answer in 36s", c.detail)
+        self.assertIn("systemctl restart docker", c.hint)
+        self.assertEqual(len(run.call_args_list), 2)
+
+    def test_connect_refused_is_final_on_first_attempt(self) -> None:
+        # rc 1 `Cannot connect` = daemon down: a retry would just wait 30 s for the same answer.
+        stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        c, run = self._probe([(1, "", stderr)])
+        self.assertEqual(c.status, doctor.FAIL)
+        self.assertIn("sudo systemctl start docker", c.hint)
+        self.assertEqual(len(run.call_args_list), 1)
+
+    def test_binary_missing_skips_the_probe_entirely(self) -> None:
+        with mock.patch.object(doctor.shutil, "which", return_value=None), \
+             mock.patch.object(doctor, "_run") as run:
+            c = doctor.probe_docker()
+        self.assertEqual(c.status, doctor.FAIL)
+        self.assertIn("not found on PATH", c.detail)
+        run.assert_not_called()
 
 
 class ClaudeClassifyTest(unittest.TestCase):
