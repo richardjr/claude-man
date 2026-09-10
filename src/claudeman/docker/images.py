@@ -45,14 +45,20 @@ class BuildResult:
 
 
 def build_chain(overlay: str) -> list[str]:
-    """The overlays that must exist for ``overlay``, base-first.
+    """The images that must exist for ``overlay``, base-first.
 
     Overlay images are ``FROM claude-man:base`` (see images/overlays/*.Dockerfile), so the base
     layer must be built before any overlay. ``base`` needs only itself; the ``proxy`` sidecar is
     STANDALONE (its own debian base, not ``FROM claude-man:base``), so it must never chain off base.
+    A tools-layer name (``<overlay>-t-<hex>``, docs/TOOLS.md) is ``FROM claude-man:<overlay>``, so
+    it appends a third step: base → overlay → tools layer (its Dockerfile must already be
+    materialized — ``tools.render.materialize`` — before the build reaches it).
     """
     if overlay in ("base", config.PROXY_IMAGE):
         return [overlay]
+    parent = config.tools_image_overlay(overlay)
+    if parent is not None:
+        return build_chain(parent) + [overlay]
     return ["base", overlay]
 
 

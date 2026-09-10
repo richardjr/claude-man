@@ -79,7 +79,7 @@ uv run claudemanctl project claude myproj                                       
 
 **TUI** (`uv run claudeman`):
 
-1. `n` → **New project**: type the slug, pick the **profile**, **overlay**, **language** (pack tier),
+1. `n` → **New project**: type the slug, pick the **profile**, **overlay**, **language** (pack tier), tick any **tools**,
    and **egress** mode, then confirm. The container is created but **not** started — press `s`
    (opening it with **Enter**/`c` auto-starts it too).
 2. `g` → `a` → **Add repo**: paste the clone URL (optionally branch / subdir); it clones live into
@@ -275,7 +275,16 @@ uv run claudemanctl project env add infra env AWS_SECRET_ACCESS_KEY
 uv run claudemanctl project env add infra env AWS_SESSION_TOKEN     # temporary/STS creds only
 uv run claudemanctl project env add infra env AWS_REGION            # e.g. eu-west-1
 
-# 5. Apply the SSH + env mounts (they're fixed at create), then clone the repo + open.
+# 5. Cluster/db tooling on top of the overlay (docs/TOOLS.md): kubectl + helm + the SSM plugin for
+#    `aws ssm start-session` tunnels, psql, jq, PyYAML. Pinned + checksum-verified; recreate to apply.
+uv run claudemanctl project tools add infra kubectl
+uv run claudemanctl project tools add infra helm
+uv run claudemanctl project tools add infra session-manager-plugin
+uv run claudemanctl project tools add infra postgresql-client
+uv run claudemanctl project tools add infra jq
+uv run claudemanctl project tools add infra python3-yaml
+
+# 6. Apply the SSH + env mounts + tools (all fixed at create), then clone the repo + open.
 uv run claudemanctl project recreate infra
 uv run claudemanctl project repo add infra git@github.com:org/infrastructure.git
 uv run claudemanctl project claude infra
@@ -286,13 +295,17 @@ plan` run with state written to `/workspace`.
 
 **TUI:**
 
-1. `n` **New project**: slug `infra`, overlay **terraform**, profile **work**.
+1. `n` **New project**: slug `infra`, overlay **terraform**, profile **work**; tick the **tools**
+   `kubectl`, `helm`, `session-manager-plugin`, `postgresql-client`, `jq`, `python3-yaml` (or add
+   them later in step 4).
 2. `,` (**Settings**) → `a` **Add key** (`~/.ssh/id_ed25519`).
 3. Select `infra` → `p` (**Project**) → `e` (**Env mounts**) → `a`:
    - Kind = **ssh** (forward the agent), then
    - Kind = **env var** ×4 for `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
      `AWS_SESSION_TOKEN` / `AWS_REGION` (hidden values).
-4. `p` → `r` **Recreate** to apply all mounts.
+4. `p` → `r` **Recreate** to apply the mounts (tools ticked at create are already baked). To change
+   the tools later: `p` → `t` **Tools (image)…** → tick/untick → **Apply** (builds the layer +
+   recreates, which also applies the mounts).
 5. `g`/`a` **Add repo**, then **Enter**/`c` to open.
 
 **Lock it down (optional but recommended for infra).** A locked terraform project must allowlist the

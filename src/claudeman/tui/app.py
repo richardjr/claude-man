@@ -43,6 +43,7 @@ from .screens.model_pin import ModelPinScreen
 from .screens.profile_select import ProfileSelectScreen
 from .screens.profile_switch_confirm import ProfileSwitchConfirmScreen
 from .screens.packs import PacksScreen
+from .screens.tools import ToolsScreen
 from .screens.ports import PortsScreen
 from .screens.pull_confirm import PullConfirmScreen
 from .screens.shutdown import ShutdownScreen
@@ -121,7 +122,7 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Packs, Egress, Overlay, Model, Profile, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
+    # Ports, Packs, Tools, Egress, Overlay, Model, Profile, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
     # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
@@ -160,6 +161,7 @@ class ClaudeManApp(App):
         ("e", "Env mounts", "env_mounts"),
         ("o", "Ports", "ports"),
         ("p", "Packs…", "packs"),
+        ("t", "Tools (image)…", "tools"),
         ("g", "Egress…", "egress"),
         ("i", "Overlay (image)…", "overlay"),
         ("m", "Model…", "model_pin"),
@@ -1071,6 +1073,7 @@ class ClaudeManApp(App):
             "env_mounts": self.action_env_mounts,
             "ports": self.action_ports,
             "packs": self.action_packs,
+            "tools": self.action_tools,
             "egress": self.action_egress,
             "overlay": self.action_overlay,
             "model_pin": self.action_model_pin,
@@ -1146,16 +1149,16 @@ class ClaudeManApp(App):
     def _on_new_project(self, data: NewProject | None) -> None:
         if not data:
             return  # cancelled
-        slug, profile, overlay, egress, language, ssh_auto_trust = data
+        slug, profile, overlay, egress, language, ssh_auto_trust, tools = data
         if not self._reserve(slug, "create"):
             return
-        self._log(f"creating {slug} …")
-        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust)
+        self._log(f"creating {slug} …" + (f" (tools: {', '.join(tools)})" if tools else ""))
+        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust, tools)
 
     @work(thread=True, group="create")
     def _create_project_worker(
         self, slug: str, profile: str | None, overlay: str, egress: str, language: str,
-        ssh_auto_trust: bool = False,
+        ssh_auto_trust: bool = False, tools: tuple[str, ...] = (),
     ) -> None:
         """Run the blocking create (image build + registry write + seed + `docker create`) off the
         UI thread, streaming build progress to the log.
@@ -1170,7 +1173,7 @@ class ClaudeManApp(App):
         try:
             res = lifecycle.create_project(
                 slug, profile=profile, overlay=overlay, egress=egress, language=language or None,
-                ssh_auto_trust=ssh_auto_trust, on_progress=self._thread_log,
+                ssh_auto_trust=ssh_auto_trust, tools=tools, on_progress=self._thread_log,
             )
         except schema.ValidationError as exc:
             res = lifecycle.Result(False, f"invalid project {slug!r}: {exc}")
@@ -1340,6 +1343,39 @@ class ClaudeManApp(App):
             return
         self._log(f"managing curated packs for {slug} (toggles apply immediately — no recreate)")
         self.push_screen(PacksScreen(slug))
+
+    # -- approved tools (image layer) ---------------------------------------
+    def action_tools(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]tools: select a defined project (orphan rows aren't managed)[/]")
+            return
+        current = projects.load(slug).tools
+        self._log(f"managing tools for {slug} (Apply recreates to bake the new image layer)")
+        self.push_screen(ToolsScreen(slug, current), lambda sel: self._on_tools(slug, sel))
+
+    def _on_tools(self, slug: str, selection) -> None:
+        if selection is None:  # closed, or applied an unchanged selection — nothing to recreate
+            return
+        if not self._reserve(slug, "tools"):
+            return
+        self._log(f"setting tools for {slug} to {', '.join(selection) or '(none)'} "
+                  f"(recreating to apply) …")
+        self._tools_worker(slug, selection)
+
+    @work(thread=True, group="create")
+    def _tools_worker(self, slug: str, selection: tuple[str, ...]) -> None:
+        """Persist the selection, then recreate off the UI thread (ensure_created renders the tools
+        layer + builds it via ensure_chain if missing). Streams build progress to the log, like the
+        overlay worker. A registry/validation failure stops before any teardown."""
+        try:
+            res = lifecycle.set_tools(slug, selection)
+            if res.ok:
+                self._thread_log(res.detail)
+                res = lifecycle.recreate(slug, on_progress=self._thread_log)
+        except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
+            res = lifecycle.Result(False, f"tools change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
 
     # -- egress (strict firewall + allowlist) -----------------------------
     def action_egress(self) -> None:

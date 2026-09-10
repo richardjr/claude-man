@@ -24,7 +24,7 @@ PROJECT_TOML = """\
 slug = "landarna"
 profile = "work"
 overlay = "node"
-extra_apt = ["jq"]
+tools = ["jq", "kubectl"]
 
 [project.egress]
 mode = "strict"
@@ -165,6 +165,25 @@ class RegistryTest(unittest.TestCase):
         projects.save(Project(slug="ok"))
         with self.assertRaises(ValidationError):
             projects.set_auth("ok", "apikey")
+
+    def test_tools_roundtrip_terse_and_patch(self) -> None:
+        self.assertEqual(projects.load("landarna").tools, ("jq", "kubectl"))  # from the fixture TOML
+        projects.save(Project(slug="tooled", tools=("helm",)))
+        self.assertEqual(projects.load("tooled").tools, ("helm",))
+        projects.save(Project(slug="bare"))
+        self.assertNotIn("tools", (Path(self.tmp.name) / "projects" / "bare.toml").read_text())
+        # set_tools: comment-preserving scalar patch; empty selection drops the key.
+        path = Path(self.tmp.name) / "projects" / "tooled.toml"
+        path.write_text('[project]\nslug = "tooled"\n# keep me\noverlay = "base"\ntools = ["helm"]\n')
+        p = projects.set_tools("tooled", ("helm", "jq"))
+        self.assertEqual(p.tools, ("helm", "jq"))
+        self.assertIn("# keep me", path.read_text())
+        projects.set_tools("tooled", ())
+        self.assertNotIn("tools", path.read_text())
+        with self.assertRaises(ValidationError):
+            projects.set_tools("tooled", ("dup", "dup"))
+        with self.assertRaises(ValidationError):
+            Project(slug="x", tools=("Bad Name",))
 
     def test_set_packs_patches_and_validates(self) -> None:
         projects.save(Project(slug="packed", packs=("guardrails",)))

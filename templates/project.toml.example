@@ -5,8 +5,11 @@
 [project]
 slug    = "my-project"
 profile = "work"            # optional; omit to inherit the default profile
-overlay = "node"            # image variant: base | python | rust | node
-extra_apt = ["jq"]          # optional: thin per-project apt layer baked at create time
+overlay = "node"            # image variant: base | python | rust | node | python-node | terraform
+# tools = ["jq", "kubectl"]     # optional: approved tools (docs/TOOLS.md — `claudemanctl tools list`)
+#                               # baked as an image layer ON TOP of the overlay (pinned + checksum-
+#                               # verified; content-addressed tag). Recreate to apply. Manage with
+#                               # `project tools add/rm/list` or TUI Project menu -> Tools (image)…
 # claude_version = "2.1.169"  # optional: pin this project's claude to an exact version (overrides the
 #                             # global channel/pin from `config image`). Omit to track the global setting.
 # env_file = "~/projects/my-project.env"   # alternative to [project.env]

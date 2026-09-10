@@ -46,6 +46,8 @@ from .syncback import baseline as syncback_baseline
 from .syncback import detect as syncback_detect
 from .syncback import diff as syncback_diff
 from .syncback import merge as syncback_merge
+from .tools import library as tools_library
+from .tools import render as tools_render
 
 # A progress sink threaded through create/up/recreate so a long, one-time image build surfaces
 # live in the caller (the TUI log pane / the CLI). ``None`` means "no progress wanted".
@@ -266,17 +268,36 @@ def _has_ssh_mount(project: Project) -> bool:
     return any(m.kind == "ssh" for m in project.env_mount)
 
 
+def resolve_image(project: Project) -> tuple[str, str]:
+    """The image NAME a project's container runs on: its overlay, or — with a ``tools`` selection —
+    the content-addressed tools-layer name (docs/TOOLS.md), whose Dockerfile is rendered + written
+    to the state tier here so the build chain can reach it. Returns ``(name, error)``; ``error``
+    is set (and ``name`` empty) when the selection names a tool the registry no longer has — an
+    image must never be built with a selected tool silently missing."""
+    if not project.tools:
+        return project.overlay, ""
+    try:
+        return tools_render.materialize(project.overlay, project.tools), ""
+    except (tools_library.LibraryError, OSError) as exc:
+        return "", (f"{project.slug}: cannot render the tools layer: {exc} — fix the selection "
+                    f"(`claudemanctl project tools rm {project.slug} <name>`)")
+
+
 def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -> Result:
     """Create the hardened container if it doesn't exist (idempotent). Seeds config + clones repos.
 
-    Pre-flight: the project's image (``claude-man:<overlay>``) must exist locally or ``docker create``
-    fails opaquely. ``ensure_chain`` auto-builds it (base first, then the overlay) when missing, so the
-    operator never has to run ``image build`` by hand — progress streams to ``on_progress``.
+    Pre-flight: the project's image (``claude-man:<overlay>``, or its tools-layer image) must exist
+    locally or ``docker create`` fails opaquely. ``ensure_chain`` auto-builds it (base first, then the
+    overlay, then any tools layer) when missing, so the operator never has to run ``image build`` by
+    hand — progress streams to ``on_progress``.
     """
     if runner.exists(project.slug):
         return Result(True, f"{project.container} already exists")
 
-    img = images.ensure_chain(project.overlay, on_line=on_progress)
+    image_name, img_err = resolve_image(project)
+    if img_err:
+        return Result(False, img_err)
+    img = images.ensure_chain(image_name, on_line=on_progress)
     if not img.ok:
         return Result(False, img.detail)
 
@@ -349,7 +370,8 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                        gh_token=gh_token.load(), env_secrets=env_vars, created_iso=_now_iso(),
                        git_env=gitconfig.container_env(), version=version,
                        shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header,
-                       tint=settings.terminal_tint, memory=settings.container_memory)
+                       tint=settings.terminal_tint, memory=settings.container_memory,
+                       image=config.image_tag(image_name))
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
@@ -473,7 +495,12 @@ def _maybe_rebuild_for_update(project: Project, version: str, *, on_progress: Pr
             on_progress(f"[update] {project.slug} is running — not rebuilding "
                         f"(stop it, then start to update to claude {version})")
         return
-    rb = images.rebuild_chain(project.overlay, claude_version=version, on_line=on_progress)
+    image_name, img_err = resolve_image(project)
+    if img_err:
+        if on_progress:
+            on_progress(f"[update] {img_err}; starting on the existing image")
+        return
+    rb = images.rebuild_chain(image_name, claude_version=version, on_line=on_progress)
     if not rb.ok:
         if on_progress:
             on_progress(f"[update] rebuild failed: {rb.detail}; starting on the existing image")
@@ -788,6 +815,33 @@ def set_packs(slug: str, names: tuple[str, ...]) -> Result:
         detail += "; " + rep.detail
     detail += _sync_in(project, on_progress=None)
     return Result(rep.ok, detail)
+
+
+def set_tools(slug: str, names: tuple[str, ...]) -> Result:
+    """Replace a project's approved-tool selection (registry-only; recreate to apply — the tools
+    are baked into the image, so the change lands on the next ``recreate``/``up``, exactly like
+    ports and env-mounts). Every name is checked against the registry FIRST so a typo fails here,
+    not at image build; the detail carries the recreate reminder and, for a LOCKED project, the
+    tools' runtime egress hosts that its allowlist may need (docs/TOOLS.md)."""
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        tools = tools_library.resolve(tuple(names), tools_library.discover()) if names else ()
+    except (tools_library.LibraryError, OSError) as exc:
+        return Result(False, f"tool registry: {exc}")
+    try:
+        project = projects_registry.set_tools(slug, tuple(names))
+    except ValidationError as exc:
+        return Result(False, str(exc))
+    baked = ", ".join(t.name for t in tools) if tools else "(none)"
+    detail = f"{slug}: tools = {baked}; `claudemanctl project recreate {slug}` to apply"
+    if project.egress == "strict":
+        hosts = sorted({h for t in tools for h in t.allowlist} - set(allowlist_mod.BASE_ALLOWLIST)
+                       - set(project.allowlist))
+        if hosts:
+            detail += (f"; locked project — these tools reach {', '.join(hosts)} at runtime: "
+                       f"`project egress` / the Egress… screen to allowlist what you need")
+    return Result(True, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -1125,9 +1179,13 @@ def create_project(
     language: str | None = None,
     ssh_auto_trust: bool = False,
     auth: str | None = None,
+    tools: tuple[str, ...] = (),
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Write (or load) the project definition, then create the container.
+
+    ``tools`` (an approved-tool selection, docs/TOOLS.md) is validated against the registry up front
+    so a typo fails before anything is written or built.
 
     For a NEW project the default pack selection — every ``default = true`` pack in the library's
     ``common/`` + ``<language>/`` tiers — is resolved HERE and written explicitly into the TOML
@@ -1136,6 +1194,11 @@ def create_project(
     if projects_registry.exists(slug):
         project = projects_registry.load(slug)
     else:
+        if tools:
+            try:
+                tools_library.resolve(tuple(tools), tools_library.discover())
+            except (tools_library.LibraryError, OSError) as exc:
+                return Result(False, f"tool registry: {exc}")
         try:
             default_packs = packs_library.defaults_for(language or "")
         except (packs_library.LibraryError, OSError) as exc:  # OSError: an unreadable library
@@ -1151,6 +1214,7 @@ def create_project(
             packs=default_packs,
             ssh_auto_trust=ssh_auto_trust,
             auth=auth or config.DEFAULT_AUTH,
+            tools=tuple(tools),
         )
         try:
             with _slug_lock(slug):  # serialise with concurrent add_repo/remove_repo on this slug

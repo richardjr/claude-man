@@ -1183,3 +1183,84 @@ class LoginModeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolsSelectionTest(unittest.TestCase):
+    """set_tools (registry-only + recreate reminder + locked-egress hint), resolve_image (the
+    tools-layer name + state-tier Dockerfile), and create_project's up-front tool validation."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        os.environ["CLAUDE_MAN_CONFIG_HOME"] = self.cfg.name
+        os.environ["CLAUDE_MAN_STATE_HOME"] = self.state.name
+        projects_registry.save(Project(slug="infra", overlay="terraform"))
+
+    def tearDown(self) -> None:
+        os.environ.pop("CLAUDE_MAN_CONFIG_HOME", None)
+        os.environ.pop("CLAUDE_MAN_STATE_HOME", None)
+        self.cfg.cleanup()
+        self.state.cleanup()
+
+    def test_set_tools_persists_and_reminds(self) -> None:
+        res = lifecycle.set_tools("infra", ("kubectl", "python3-yaml"))
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual(projects_registry.load("infra").tools, ("kubectl", "python3-yaml"))
+        self.assertIn("recreate infra", res.detail)
+        self.assertIn("python3", res.detail)  # the closure (python3 pulled in) is named
+        self.assertNotIn("locked", res.detail)
+
+    def test_set_tools_unknown_name_rejected_before_write(self) -> None:
+        res = lifecycle.set_tools("infra", ("kubectl", "ghost"))
+        self.assertFalse(res.ok)
+        self.assertIn("ghost", res.detail)
+        self.assertEqual(projects_registry.load("infra").tools, ())  # untouched
+
+    def test_set_tools_locked_project_gets_egress_hint(self) -> None:
+        projects_registry.save(Project(slug="infra", overlay="terraform", egress="strict"))
+        res = lifecycle.set_tools("infra", ("kubectl",))
+        self.assertTrue(res.ok, res.detail)
+        self.assertIn("locked project", res.detail)
+        self.assertIn(".amazonaws.com", res.detail)
+
+    def test_set_tools_missing_project(self) -> None:
+        self.assertFalse(lifecycle.set_tools("ghost", ("jq",)).ok)
+
+    def test_resolve_image_plain_overlay(self) -> None:
+        self.assertEqual(lifecycle.resolve_image(Project(slug="p", overlay="node")), ("node", ""))
+
+    def test_resolve_image_renders_tools_layer(self) -> None:
+        name, err = lifecycle.resolve_image(Project(slug="p", overlay="terraform", tools=("jq",)))
+        self.assertEqual(err, "")
+        self.assertEqual(config.tools_image_overlay(name), "terraform")
+        self.assertTrue(config.tools_dockerfile_path(name).is_file())
+        self.assertIn("FROM claude-man:terraform", config.tools_dockerfile_path(name).read_text())
+
+    def test_resolve_image_unknown_tool_is_an_error(self) -> None:
+        name, err = lifecycle.resolve_image(Project(slug="p", overlay="base", tools=("ghost",)))
+        self.assertEqual(name, "")
+        self.assertIn("ghost", err)
+        self.assertIn("project tools rm p", err)
+
+    def test_create_project_validates_tools_first(self) -> None:
+        with mock.patch.object(lifecycle, "ensure_created") as ec:
+            res = lifecycle.create_project("newp", tools=("ghost",))
+        self.assertFalse(res.ok)
+        self.assertIn("ghost", res.detail)
+        ec.assert_not_called()
+        self.assertFalse(projects_registry.exists("newp"))  # nothing written
+        with mock.patch.object(lifecycle, "ensure_created",
+                               return_value=lifecycle.Result(True, "created")):
+            res = lifecycle.create_project("newp", tools=("jq",))
+        self.assertTrue(res.ok)
+        self.assertEqual(projects_registry.load("newp").tools, ("jq",))
+
+    def test_ensure_created_refuses_unrenderable_selection(self) -> None:
+        # An unknown tool must stop BEFORE any image build / docker create.
+        proj = Project(slug="infra", overlay="base", tools=("ghost",))
+        with mock.patch.object(lifecycle.runner, "exists", return_value=False), \
+             mock.patch.object(lifecycle.images, "ensure_chain") as chain:
+            res = lifecycle.ensure_created(proj)
+        self.assertFalse(res.ok)
+        self.assertIn("ghost", res.detail)
+        chain.assert_not_called()

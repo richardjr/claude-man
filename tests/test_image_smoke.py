@@ -86,3 +86,31 @@ class OverlayProbesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolProbesTest(unittest.TestCase):
+    """The approved-tool registry's [[smoke]] probes join the battery for a tools-layer image."""
+
+    def test_tool_probes_follow_the_closure(self) -> None:
+        from claudeman.docker.smoke import _tool_probes
+        probes = _tool_probes(("python3-yaml",))
+        names = [p.name for p in probes]
+        self.assertTrue(any(n.startswith("[python3]") for n in names), names)   # pulled in
+        self.assertTrue(any(n.startswith("[python3-yaml]") for n in names), names)
+        self.assertTrue(all(p.required for p in probes))
+
+    def test_unknown_tool_raises(self) -> None:
+        from claudeman.docker.smoke import _tool_probes
+        from claudeman.tools.library import LibraryError
+        with self.assertRaises(LibraryError):
+            _tool_probes(("ghost",))
+
+    def test_smoke_reports_tools_image_and_build_hint(self) -> None:
+        from unittest import mock
+        from claudeman.docker import smoke as smoke_mod
+        with mock.patch.object(smoke_mod.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(smoke_mod.images, "image_exists", return_value=False):
+            res = smoke_mod.smoke("terraform", image="terraform-t-0123456789ab", tools=("jq",))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.image, "terraform-t-0123456789ab")
+        self.assertIn("image build --project", res.lines[0])

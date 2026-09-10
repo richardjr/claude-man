@@ -425,6 +425,26 @@ a **Model** column surfaces each project's pin so neither mode is ever silent.
 - [~] **9c:** ~~CLI/TUI verbs (`project model …`)~~ DONE (CLI `project model set/clear/show` + the TUI Project… → Model (local)… picker `m`); ~~TUI mode/billing badge~~ DONE (the **Model** column on the projects table + the CLI `project status` MODEL column); ~~`docs/MODELS.md`~~ DONE; gateway image pinned BY DIGEST. **Open:** `ANTHROPIC_DEFAULT_HAIKU_MODEL` match-to-primary (background stays Claude passthrough); egress for a LOCKED hybrid project — chain the sidecar's `api.anthropic.com` access through the squid allowlist + reach the host model server (locked+hybrid is currently refused at `up`)
 - [ ] **9d (optional, deferred):** the terminating-router flavor (console API key ON THE SIDECAR ONLY + transparent LiteLLM router failover Anthropic→local) as an alternative per-project hybrid auth — only if auto-failover ever outweighs the subscription
 
+## Phase 10 — Approved-tool registry (a per-project image layer) ✅
+
+_Landed 2026-09-10 — [`docs/TOOLS.md`](docs/TOOLS.md)._ The fixed overlays were all-or-none; the
+infrastructure project needed `kubectl` + `helm` + the AWS Session Manager plugin + `psql` + `jq` +
+PyYAML + `uv` on top of the terraform overlay. Rather than a separate "custom" overlay (which would
+have to re-encode terraform/packer/awscli), tools are **additive on top of any overlay**: an in-repo
+registry of approved, pinned, sha256-verified entries (`library/tools/<name>/tool.toml`), each with
+its read-only-floor `[env]` redirects + `[[smoke]]` core-op probes; `Project.tools` (replacing the
+never-implemented `extra_apt` stub) is rendered (pure) into ONE Dockerfile `FROM claude-man:<overlay>`
+and built as a content-addressed `claude-man:<overlay>-t-<hex>` image (chain base → overlay → layer;
+recreate-to-apply). The floor is untouched (only the image token of the create argv changes,
+unit-pinned); `image smoke --project` gates every selected tool under `--read-only` as uid 1000
+(verified live on terraform + the 7-tool infra selection: all probes pass).
+
+- [x] **10a:** `tools/library.py` (discovery/validation/`resolve` closure, lint-tested) + `tools/render.py` (Dockerfile + name + state-tier materialize) + `config.tools_image_overlay`/`tools_dockerfile_path`
+- [x] **10b:** schema/registry `tools` (+ `set_tools`), `claude-man.tools` label, `runner.build_create_argv(image=…)`, `images.build_chain` third step, `lifecycle.resolve_image`/`set_tools`/`create_project(tools=…)`, `smoke._tool_probes`
+- [x] **10c:** CLI `tools list [-v]`, `project tools add|rm|list`, `project create --tool`, `image build|smoke --project`; TUI Project… → `t` Tools (image)… (pending-selection checklist, Apply = set_tools + recreate; `tui/toolsview.py` pure model)
+- [x] **10d:** shipped registry: kubectl 1.37.0, helm 3.22.0, session-manager-plugin 1.2.835.0, postgresql-client, jq, python3, python3-yaml, uv 0.12.12
+- [ ] **10e (follow-ups):** `image prune` for superseded `-t-` images; a "selection differs from the running container's `claude-man.tools` label → needs recreate" signal in the projects table; express the fixed overlays as registry presets (`python` = `{python3, uv}` …) so their smoke probes go data-driven
+
 ---
 
 Legend: `[x]` done in scaffold · `[~]` landed except a noted sub-item · `[ ]` not started.

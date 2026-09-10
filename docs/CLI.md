@@ -92,10 +92,12 @@ uv run claudemanctl profile usage           # per-account token usage across all
 ## Managing projects
 
 ```bash
-# Create a project, choosing its account, image overlay, pack language, and egress mode:
+# Create a project, choosing its account, image overlay, extra tools, pack language, and egress mode:
 uv run claudemanctl project create demo --profile work --overlay python --language python --egress open
 #   --profile <name>             account to run under   (default: the default profile)
-#   --overlay base|python|rust|node   toolchain baked into the image (default: base)
+#   --overlay base|python|rust|node|python-node|terraform   toolchain baked into the image (default: base)
+#   --tool <name>                approved tool baked as a layer ON TOP of the overlay (repeatable;
+#                                `claudemanctl tools list` — see Approved tools below)
 #   --language <tier>            curated-pack tier whose defaults apply (see Curated packs below)
 #   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
 
@@ -191,6 +193,22 @@ uv run claudemanctl project packs list demo          # the project's selection
 uv run claudemanctl project packs add demo workflow  # select a pack (applies immediately)
 uv run claudemanctl project packs rm demo workflow   # deselect (files removed from source + binds)
 uv run claudemanctl project packs defaults demo      # re-apply the library defaults (REPLACES the selection)
+```
+
+### Approved tools (a per-project image layer)
+
+A registry of pinned, checksum-verified tools ships in this repo (`library/tools/` —
+[`docs/TOOLS.md`](TOOLS.md)); each entry carries the env redirects + smoke probes it needs under the
+read-only floor. A project **selects** tools and they are baked as an additive image layer on top of
+its overlay (content-addressed `claude-man:<overlay>-t-<hex>`). Recreate to apply.
+
+```bash
+uv run claudemanctl tools list [-v]                          # the registry (-v: env redirects + locked-egress hosts)
+uv run claudemanctl project create infra --overlay terraform --tool kubectl --tool helm
+uv run claudemanctl project tools add infra session-manager-plugin   # validated now; recreate to apply
+uv run claudemanctl project tools rm  infra helm
+uv run claudemanctl project tools list infra                 # the selection + what `requires` pulls in
+uv run claudemanctl project recreate infra                   # builds the layer if missing, recreates on it
 ```
 
 ### Strict egress (lock a project to an allowlist)
@@ -370,6 +388,8 @@ uv run claudemanctl image build python                # an overlay (base|python|
 uv run claudemanctl image build base --claude-version 2.1.160   # pin the claude version
 uv run claudemanctl image build base --dry-run        # print the docker build argv only, don't run
 uv run claudemanctl image smoke base                  # gate an image against the hardened run profile
+uv run claudemanctl image build --project infra       # a project's image: overlay + its selected tools (docs/TOOLS.md)
+uv run claudemanctl image smoke --project infra       # + every selected tool's core-op probes under the floor
 ```
 
 ## Windows (WSL2) notes

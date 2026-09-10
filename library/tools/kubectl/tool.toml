@@ -1,0 +1,40 @@
+# kubectl — the Kubernetes CLI (verify nodes/pods, read logs, `rollout status`, render manifests).
+# Pinned release binary from dl.k8s.io (per-arch sha256 published alongside each binary).
+# To bump: `curl -L https://dl.k8s.io/release/stable.txt`, then the two
+# `https://dl.k8s.io/release/<v>/bin/linux/<arch>/kubectl.sha256` files.
+description = "Kubernetes CLI (kubectl)"
+kind = "release"
+version = "1.37.0"
+install = "binary"
+bin = "kubectl"
+# Runtime egress hint (strict mode): the cluster API endpoint — for EKS that's `.amazonaws.com`.
+allowlist = [".amazonaws.com"]
+
+[release.amd64]
+url = "https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl"
+sha256 = "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f"
+
+[release.arm64]
+url = "https://dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl"
+sha256 = "922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3"
+
+# Read-only-floor redirects (invariant 2): kubectl writes ~/.kube/config (`aws eks update-kubeconfig`,
+# `kubectl config …`) and the discovery/HTTP cache under ~/.kube/cache — both on the read-only HOME.
+# A kubeconfig carries cluster credentials, so it goes on the ephemeral, agent-owned `.cache` tmpfs
+# (the AWS_SHARED_CREDENTIALS_FILE precedent) — never the /workspace checkout. Re-run
+# `aws eks update-kubeconfig` once per container session.
+[env]
+KUBECONFIG = "/home/agent/.cache/kube/config"
+KUBECACHEDIR = "/home/agent/.cache/kube/cache"
+
+[[smoke]]
+name = "kubectl version --client"
+argv = ["kubectl", "version", "--client"]
+expect = "Client Version"
+
+# CORE op under the floor: `kubectl config set-cluster` WRITES the kubeconfig at KUBECONFIG (kubectl
+# mkdir -p's the parent). Without the redirect this is the EROFS on ~/.kube/config.
+[[smoke]]
+name = "kubeconfig writes to the .cache tmpfs (read-only floor)"
+argv = ["sh", "-lc", "kubectl config set-cluster smoke --server=https://127.0.0.1:1 >/dev/null && test -f \"$KUBECONFIG\" && echo ok"]
+expect = "ok"

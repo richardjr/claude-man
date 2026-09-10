@@ -34,6 +34,15 @@ class BuildChainTest(unittest.TestCase):
         # The terraform overlay is an ordinary FROM-base overlay — base-first, no chaining.
         self.assertEqual(images.build_chain("terraform"), ["base", "terraform"])
 
+    def test_tools_layer_chains_off_its_overlay(self) -> None:
+        # A tools-layer name (<overlay>-t-<hex>) is FROM claude-man:<overlay>: base → overlay → layer.
+        self.assertEqual(images.build_chain("terraform-t-0123456789ab"),
+                         ["base", "terraform", "terraform-t-0123456789ab"])
+        self.assertEqual(images.build_chain("base-t-0123456789ab"), ["base", "base-t-0123456789ab"])
+
+    def test_proxy_never_chains(self) -> None:
+        self.assertEqual(images.build_chain(config.PROXY_IMAGE), [config.PROXY_IMAGE])
+
 
 class BuildArgvTest(unittest.TestCase):
     def test_base_argv(self) -> None:
@@ -251,7 +260,7 @@ class CliImageBuildTest(unittest.TestCase):
     @staticmethod
     def _build(overlay: str | None, *, dry_run: bool = False) -> int:
         """Run cmd_image_build with the CLI's stdout (the '+ docker build …' echo) suppressed."""
-        args = SimpleNamespace(overlay=overlay, claude_version="2.1.160", dry_run=dry_run)
+        args = SimpleNamespace(overlay=overlay, claude_version="2.1.160", dry_run=dry_run, project=None)
         with contextlib.redirect_stdout(io.StringIO()):
             return cli.cmd_image_build(args)
 
@@ -290,6 +299,25 @@ class CliImageBuildTest(unittest.TestCase):
         exists.assert_not_called()
         build.assert_called_once()
         self.assertEqual(build.call_args.args[0], "node")
+
+    def test_tools_layer_builds_missing_parents_first(self) -> None:
+        # image build --project: base + overlay are built when missing, then the layer itself.
+        order: list[str] = []
+        args = SimpleNamespace(overlay=None, claude_version="2.1.160", dry_run=False, project="infra")
+        with mock.patch.object(cli, "_project_image",
+                               return_value=(object(), "terraform-t-0123456789ab", "")), \
+             mock.patch.object(images, "image_exists", side_effect=lambda ov: ov == "base"), \
+             mock.patch.object(images, "build_one",
+                               side_effect=lambda ov, **_: order.append(ov) or 0), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_image_build(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(order, ["terraform", "terraform-t-0123456789ab"])  # base present -> skipped
+
+    def test_project_and_overlay_are_exclusive(self) -> None:
+        args = SimpleNamespace(overlay="node", claude_version="2.1.160", dry_run=False, project="infra")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_image_build(args), 2)
 
     def test_base_build_failure_aborts_overlay(self) -> None:
         # If the auto base build fails, the overlay must not be attempted.

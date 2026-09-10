@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from .. import config
 from ..registry import profiles as profiles_registry
 from ..registry.schema import Project
+from ..tools import library as tools_library
 from . import images, runner
 
 # Substrings in any probe's combined output that fail the smoke regardless of exit code.
@@ -47,6 +48,7 @@ class Probe:
 class SmokeResult:
     ok: bool
     overlay: str
+    image: str = ""              # the image NAME probed (the overlay, or a tools-layer name)
     lines: list[str] = field(default_factory=list)
 
 
@@ -170,6 +172,19 @@ def _overlay_probes(overlay: str) -> list[Probe]:
     return []
 
 
+def _tool_probes(tools: tuple[str, ...]) -> list[Probe]:
+    """The approved-tool registry's ``[[smoke]]`` probes for a selection (closure included, library
+    order) — each tool's CORE operation as uid 1000 under the floor, all required (docs/TOOLS.md).
+    Raises ``LibraryError`` on an unknown name (the image couldn't have been built either)."""
+    lib = tools_library.discover()
+    out: list[Probe] = []
+    for tool in tools_library.resolve(tools, lib):
+        for spec in tool.smoke:
+            out.append(Probe(f"[{tool.name}] {spec.name}", list(spec.argv), required=True,
+                             expect=spec.expect, timeout=spec.timeout))
+    return out
+
+
 def classify(probe: Probe, rc: int, out: str) -> tuple[bool, str, str]:
     """Pure verdict for one probe result → (failed, mark, detail). No docker/IO.
 
@@ -207,24 +222,36 @@ def _resolve_token() -> str | None:
     return token or None
 
 
-def smoke(overlay: str) -> SmokeResult:
-    """Create a throwaway hardened container from ``claude-man:<overlay>`` and probe it."""
-    res = SmokeResult(ok=False, overlay=overlay)
+def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = ()) -> SmokeResult:
+    """Create a throwaway hardened container from ``claude-man:<overlay>`` and probe it.
+
+    For a project's tools-layer image pass ``image`` (its ``<overlay>-t-<hex>`` name) + ``tools``
+    (the selection): the battery is then base + overlay + every selected tool's registry probes,
+    run against that image (the CLI's ``image smoke --project`` form)."""
+    name = image or overlay
+    res = SmokeResult(ok=False, overlay=overlay, image=name)
 
     if shutil.which("docker") is None:
         res.lines.append("docker not found on PATH")
         return res
-    image = config.image_tag(overlay)
-    if not images.image_exists(overlay):
-        res.lines.append(f"image {image!r} not built — run `claudemanctl image build {overlay}`")
+    tag = config.image_tag(name)
+    if not images.image_exists(name):
+        hint = ("claudemanctl image build --project <slug>" if image
+                else f"claudemanctl image build {overlay}")
+        res.lines.append(f"image {tag!r} not built — run `{hint}`")
+        return res
+    try:
+        tool_probes = _tool_probes(tools) if tools else []
+    except tools_library.LibraryError as exc:
+        res.lines.append(f"tool registry error: {exc}")
         return res
 
-    slug = f"smoke-{overlay}"
-    project = Project(slug=slug, overlay=overlay)
+    slug = f"smoke-{name}"
+    project = Project(slug=slug, overlay=overlay, tools=tools)
     container = project.container
     token = _resolve_token()
 
-    probes = _base_probes() + _overlay_probes(overlay)
+    probes = _base_probes() + _overlay_probes(overlay) + tool_probes
     if token:
         probes.append(Probe("one-shot claude -p (auth+egress)",
                             ["claude", "-p", "reply with the single word ok"],
@@ -238,7 +265,7 @@ def smoke(overlay: str) -> SmokeResult:
         argv = runner.build_create_argv(
             project, profile_name="smoke", created_iso="smoke",
             claude_config_path=cfg_dir, workspace_path=ws_dir,
-            inject_token=bool(token),
+            inject_token=bool(token), image=tag,
         )
         env = dict(os.environ)
         for key in config.SCRUBBED_ENV_KEYS:

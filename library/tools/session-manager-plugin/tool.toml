@@ -1,0 +1,27 @@
+# AWS Systems Manager Session Manager plugin — `aws ssm start-session` (incl. port-forwarding
+# tunnels, e.g. a db-tunnel script) needs this alongside the AWS CLI; the CLI alone can't do it.
+# Pinned .deb from the AWS download bucket (no published checksum — the sha256 below was computed
+# from the downloaded artefact at pin time; re-verify on bump). Installs to
+# /usr/local/sessionmanagerplugin + a /usr/local/bin symlink (postinst); stateless at runtime.
+# To bump: `curl https://s3.amazonaws.com/session-manager-downloads/plugin/latest/VERSION`, download
+# `…/plugin/<v>/ubuntu_64bit|ubuntu_arm64/session-manager-plugin.deb`, `sha256sum` each.
+description = "AWS Session Manager plugin (aws ssm start-session / port-forward tunnels)"
+kind = "release"
+version = "1.2.835.0"
+install = "deb"
+note = "needs the AWS CLI — pair with the terraform overlay"
+# Runtime egress hint (strict mode): ssm/ssmmessages endpoints live under .amazonaws.com.
+allowlist = [".amazonaws.com"]
+
+[release.amd64]
+url = "https://s3.amazonaws.com/session-manager-downloads/plugin/1.2.835.0/ubuntu_64bit/session-manager-plugin.deb"
+sha256 = "7c6dcad12518571cc7959a713e6a8ae1bdf6ed66fd9bee37dc189e39ca58ae03"
+
+[release.arm64]
+url = "https://s3.amazonaws.com/session-manager-downloads/plugin/1.2.835.0/ubuntu_arm64/session-manager-plugin.deb"
+sha256 = "0add94c4c8b6ca63f26e44fd655d662b0f6455a268b5b9ebebee0f462214e928"
+
+[[smoke]]
+name = "session-manager-plugin --version"
+argv = ["session-manager-plugin", "--version"]
+expect = "1.2.835.0"

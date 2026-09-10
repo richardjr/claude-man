@@ -1,7 +1,7 @@
-"""New-project form (Phase 1; Language field added in Phase 6b).
+"""New-project form (Phase 1; Language field added in Phase 6b; Tools checklist in Phase 10).
 
-A modal form collecting the six fields ``lifecycle.create_project`` accepts today —
-slug, profile, overlay, language, egress, ssh_auto_trust. On submit it dismisses with those values; the app
+A modal form collecting the seven fields ``lifecycle.create_project`` accepts today —
+slug, profile, overlay, language, egress, ssh_auto_trust, tools. On submit it dismisses with those values; the app
 then runs ``lifecycle.create_project`` off the UI thread (it writes the registry TOML, seeds
 ``claude-config/`` and ``docker create``s the hardened container). Repos / env / allowlist
 are a later increment — see ROADMAP.md and the ``[[repos]]`` shape in registry/schema.py.
@@ -13,6 +13,10 @@ Language picks the pack tier whose defaults are applied at create (docs/PACKS.md
 are the library's discovered tiers; choosing an Overlay PRE-FILLS the matching tier as a
 suggestion (e.g. the ``python`` overlay suggests the ``python`` tier) until the operator picks
 a language themselves — the stored value is always the explicit selection.
+
+Tools is a multi-select over the approved-tool registry (docs/TOOLS.md): the ticked entries are
+baked as an image layer on top of the overlay at create (the same ``--tool`` the CLI takes;
+editable later via Project… → Tools (image)…).
 """
 
 from __future__ import annotations
@@ -21,17 +25,19 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select
+from textual.widgets import Button, Input, Label, Select, SelectionList
 
 from ... import config
 from ...packs import library as packs_library
+from ...tools import library as tools_library
 from ...registry import profiles as profiles_registry
 from ...registry import projects
 from ...registry.schema import _SLUG_RE
 
 # What the screen hands back to the app: (slug, profile|None, overlay, egress, language,
-# ssh_auto_trust), or None on cancel. language == "" means common-tier packs only.
-NewProject = tuple[str, "str | None", str, str, str, bool]
+# ssh_auto_trust, tools), or None on cancel. language == "" means common-tier packs only; tools
+# is the approved-tool selection (empty = the plain overlay image).
+NewProject = tuple[str, "str | None", str, str, str, bool, tuple[str, ...]]
 
 _SUGGESTION_CONSUMED = object()  # sentinel: no programmatic language echo pending
 
@@ -42,9 +48,9 @@ _OVERLAY_TIER_HINT = {"python-node": "python"}
 
 
 class NewProjectScreen(ModalScreen["NewProject | None"]):
-    """Collect slug/profile/overlay/egress/language/ssh_auto_trust for a new project.
+    """Collect slug/profile/overlay/egress/language/ssh_auto_trust/tools for a new project.
 
-    Dismisses with ``(slug, profile, overlay, egress, language, ssh_auto_trust)`` on Create (``profile``
+    Dismisses with ``(slug, profile, overlay, egress, language, ssh_auto_trust, tools)`` on Create (``profile``
     is ``None`` when the operator keeps the default), or ``None`` on Cancel/Escape. The app owns
     the actual create call so the blocking ``docker create`` stays off the UI thread.
     """
@@ -60,6 +66,7 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #dialog Label { color: $text-muted; }
     #slug-error { color: $error; height: auto; }
+    #tools { height: auto; max-height: 8; }
     #buttons { height: auto; padding-top: 1; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
@@ -86,6 +93,12 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
         # swallowed rather than mistaken for an operator pick.
         self._language_touched = False
         self._suggested: object = ""  # the initial Select.Changed echo carries ""
+        # The approved-tool registry for the Tools checklist — fail-soft like the pack tiers: a
+        # malformed/unreadable registry loses the checklist, never blocks a create.
+        try:
+            self._tools = tools_library.discover()
+        except (tools_library.LibraryError, OSError):
+            self._tools = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -115,6 +128,12 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
                 [("off (common forges pre-trusted)", False), ("on (accept-new)", True)],
                 value=False, allow_blank=False, id="ssh-auto-trust",
             )
+            if self._tools:
+                yield Label("Tools (image layer on top of the overlay — space to tick; docs/TOOLS.md)")
+                yield SelectionList[str](
+                    *[(f"{t.name}  ·  {t.summary}", t.name) for t in self._tools.values()],
+                    id="tools",
+                )
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Create", variant="success", id="create")
@@ -175,4 +194,9 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
         egress = self.query_one("#egress", Select).value
         language = self.query_one("#language", Select).value
         ssh_auto_trust = bool(self.query_one("#ssh-auto-trust", Select).value)
-        self.dismiss((slug, profile, overlay, egress, language, ssh_auto_trust))
+        tools: tuple[str, ...] = ()
+        if self._tools:
+            # Registry order (not tick order) so the stored selection is stable.
+            ticked = set(self.query_one("#tools", SelectionList).selected)
+            tools = tuple(name for name in self._tools if name in ticked)
+        self.dismiss((slug, profile, overlay, egress, language, ssh_auto_trust, tools))

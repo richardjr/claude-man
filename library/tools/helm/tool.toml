@@ -1,0 +1,50 @@
+# helm — the Kubernetes package manager (lint/template/package charts; v3 line).
+# Pinned release tarball from get.helm.sh (sha256 published as <tarball>.sha256sum).
+# To bump: pick the latest v3.x tag on github.com/helm/helm/releases, then read
+# `https://get.helm.sh/helm-v<v>-linux-<arch>.tar.gz.sha256sum` for each arch.
+description = "Helm v3 — Kubernetes charts (lint, template, package)"
+kind = "release"
+version = "3.22.0"
+install = "tar"
+# Runtime egress hint (strict mode): chart repositories are project-specific — add them to the
+# project's allowlist (e.g. `charts.bitnami.com`, an OCI registry host).
+
+[release.amd64]
+url = "https://get.helm.sh/helm-v3.22.0-linux-amd64.tar.gz"
+sha256 = "1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb"
+members = ["linux-amd64/helm"]
+
+[release.arm64]
+url = "https://get.helm.sh/helm-v3.22.0-linux-arm64.tar.gz"
+sha256 = "f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310"
+members = ["linux-arm64/helm"]
+
+# Read-only-floor redirects (invariant 2): helm resolves its dirs from XDG_CONFIG_HOME / XDG_DATA_HOME /
+# XDG_CACHE_HOME. Only XDG_CACHE_HOME is set in the image, so `helm repo add` would EROFS on
+# ~/.config/helm and plugins on ~/.local/share/helm. Config (repositories.yaml + `helm registry
+# login` creds) -> the ephemeral, agent-owned `.cache` tmpfs (credentials never land in /workspace);
+# data (plugins) + cache (repo indexes, tens of MB — too big for the size-capped tmpfs) -> the
+# disk-backed /workspace bind, mirroring YARN_CACHE_FOLDER / the UV_* dirs.
+[env]
+HELM_CONFIG_HOME = "/home/agent/.cache/helm/config"
+HELM_DATA_HOME = "/workspace/.helm/data"
+HELM_CACHE_HOME = "/workspace/.helm/cache"
+
+[[smoke]]
+name = "helm version"
+argv = ["helm", "version", "--short"]
+expect = "v3."
+
+# CORE op under the floor: scaffold + lint + template a chart in a fresh dir on the writable
+# /workspace bind (network-free). A forbidden EROFS marker here means helm wrote a HOME dotdir.
+[[smoke]]
+name = "helm create + lint + template on /workspace (read-only floor)"
+argv = ["sh", "-lc", "d=\"$(mktemp -d -p /workspace)\" && cd \"$d\" && helm create smoke >/dev/null && helm lint smoke >/dev/null && helm template smoke smoke >/dev/null && echo ok"]
+expect = "ok"
+timeout = 30
+
+# The redirected dirs must be agent-creatable (the EROFS `helm repo add` / plugin install would hit).
+[[smoke]]
+name = "helm config/data/cache dirs writable (read-only floor)"
+argv = ["sh", "-lc", "mkdir -p \"$HELM_CONFIG_HOME\" \"$HELM_DATA_HOME\" \"$HELM_CACHE_HOME\" && echo ok"]
+expect = "ok"

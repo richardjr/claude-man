@@ -1,0 +1,17 @@
+# psql + pg_dump etc. from Debian trixie (postgresql-client 17) — talk to a database through an SSM /
+# ssh tunnel from inside the container.
+description = "PostgreSQL client (psql, pg_dump, pg_restore)"
+kind = "apt"
+packages = ["postgresql-client"]
+
+# Read-only-floor redirects (invariant 2): psql writes ~/.psql_history and reads ~/.pgpass — both on
+# the read-only HOME. History + the password file (a credential) go on the ephemeral, agent-owned
+# `.cache` tmpfs, never the /workspace checkout.
+[env]
+PSQL_HISTORY = "/home/agent/.cache/psql_history"
+PGPASSFILE = "/home/agent/.cache/pgpass"
+
+[[smoke]]
+name = "psql --version"
+argv = ["psql", "--version"]
+expect = "psql (PostgreSQL)"
