@@ -1,0 +1,34 @@
+# uv — the Python package/project manager (the uv-only rule). Pinned release tarball from GitHub
+# (sha256 published as <tarball>.sha256). The overlays pipe astral.sh's install script; this entry
+# pins + verifies instead. Caches, downloaded interpreters, and tool venvs are already redirected
+# to /workspace by the baked UV_* env (runner._BAKED_ENV), so `uv sync` / `uv python install` work
+# under the read-only floor. Doesn't require python3: uv downloads an interpreter on demand.
+# To bump: the latest tag on github.com/astral-sh/uv/releases + its
+# `uv-<triple>.tar.gz.sha256` files.
+description = "uv — Python package + project manager (uv, uvx)"
+kind = "release"
+version = "0.12.12"
+install = "tar"
+# Runtime egress hint (strict mode): PyPI + python-build-standalone downloads.
+allowlist = ["pypi.org", "files.pythonhosted.org", "github.com", "objects.githubusercontent.com"]
+
+[release.amd64]
+url = "https://github.com/astral-sh/uv/releases/download/0.12.12/uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "ab9b309d4586403f024e100abaceb396616e178a553e2500c36087d180f09509"
+members = ["uv-x86_64-unknown-linux-gnu/uv", "uv-x86_64-unknown-linux-gnu/uvx"]
+
+[release.arm64]
+url = "https://github.com/astral-sh/uv/releases/download/0.12.12/uv-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "fe08db50cc1b56cd1da7801065ed1103d27ed3f9571cd122386cfc7faf1b8df5"
+members = ["uv-aarch64-unknown-linux-gnu/uv", "uv-aarch64-unknown-linux-gnu/uvx"]
+
+[[smoke]]
+name = "uv --version"
+argv = ["uv", "--version"]
+expect = "uv 0.12"
+
+# The baked UV_CACHE_DIR redirect must resolve (the EROFS `uv sync` would otherwise hit on ~/.cache).
+[[smoke]]
+name = "uv cache dir on /workspace (read-only floor)"
+argv = ["uv", "cache", "dir"]
+expect = "/workspace/.uv/cache"

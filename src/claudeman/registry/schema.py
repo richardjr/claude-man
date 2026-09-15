@@ -392,7 +392,9 @@ class Project:
     env: dict[str, str] = field(default_factory=dict)
     env_file: str | None = None
     workdir: str = ""                    # where claude/shell/nvim launch (default: /workspace)
-    extra_apt: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()          # approved-tool selection (docs/TOOLS.md): names from the
+    #                                      in-repo registry, baked as an additive image layer on top
+    #                                      of `overlay` (content-addressed tag; recreate to apply)
     repos: tuple[Repo, ...] = ()
     env_mount: tuple[EnvMount, ...] = ()  # ssh / file mounts synced into the container
     ssh_auto_trust: bool = False         # opt-in: StrictHostKeyChecking accept-new for in-container ssh (TOFU)
@@ -431,6 +433,13 @@ class Project:
                 raise ValidationError(f"invalid pack name {name!r}: must match {_SLUG_RE.pattern}")
         if len(set(self.packs)) != len(self.packs):
             raise ValidationError("duplicate pack names in selection")
+        # Tool names: same shape rule + same "shape only, not the live library" reasoning — the
+        # image render (tools.render) is what refuses a name the library no longer has.
+        for name in self.tools:
+            if not _SLUG_RE.match(name):
+                raise ValidationError(f"invalid tool name {name!r}: must match {_SLUG_RE.pattern}")
+        if len(set(self.tools)) != len(self.tools):
+            raise ValidationError("duplicate tool names in selection")
         if self.overlay not in config.OVERLAYS:
             raise ValidationError(
                 f"invalid overlay {self.overlay!r}: one of {config.OVERLAYS}"
@@ -471,6 +480,9 @@ class Project:
 
     @property
     def image(self) -> str:
+        """The OVERLAY image tag. A project with a ``tools`` selection runs on the tools-layer image
+        built from it instead — resolved (library read + render) by ``lifecycle.resolve_image``
+        and handed to the runner explicitly, since this dataclass stays IO-free."""
         return config.image_tag(self.overlay)
 
     @property

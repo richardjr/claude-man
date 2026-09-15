@@ -45,7 +45,7 @@ The Definition and State roots resolve from `$XDG_CONFIG_HOME` / `$XDG_STATE_HOM
 real path logic without touching operator state. See `config.config_home()` / `config.state_home()`.
 
 A project **exists iff** its `projects/<slug>.toml` exists — fully decoupled from whether a
-container is alive. Labels (`claude-man.{slug,profile,overlay,egress,auth,repos,version,created}`)
+container is alive. Labels (`claude-man.{slug,profile,overlay,tools,egress,auth,repos,version,created}`)
 make `docker ps` self-describing, but they are a **projection**: on divergence the registry wins
 and claude-man reconciles by recreating the container, never by editing the registry from labels.
 
@@ -107,8 +107,9 @@ separate from sync-back — nothing crosses the denylist boundary) and counts on
 ## Persistence + container lifecycle
 
 - **Definition:** `projects/<slug>.toml` — slug, profile, overlay (image variant), egress mode,
-  `language` + `packs` (the curated-pack selection — see *Curated packs* below), `[env]` (or
-  `env_file`), `extra_apt`, and a `[[repos]]` array.
+  `language` + `packs` (the curated-pack selection — see *Curated packs* below), `tools` (the
+  approved-tool selection baked on top of the overlay — [`docs/TOOLS.md`](TOOLS.md)), `[env]` (or
+  `env_file`), and a `[[repos]]` array.
 - **State:** `~/.local/state/claude-man/projects/<slug>/` with `workspace/` (the checked-out
   repos → bind `/workspace`) and `claude-config/` (per-project `CLAUDE_CONFIG_DIR` → bind
   `/home/agent/.claude`, `0700`), plus sibling `baseline.json` and `backups/`.
@@ -157,8 +158,12 @@ state writes ride the `/workspace` bind and `CHECKPOINT_DISABLE`/`PACKER_*`-dir/
 files land on the ephemeral `.cache` tmpfs, off the `/workspace` git checkout, so a creds file never
 reaches a repo; the preferred way to pass AWS creds is env vars via a `kind="env"` env-mount. A
 *locked* terraform project must allowlist `registry.terraform.io` + `releases.hashicorp.com`
-plus its own cloud targets, e.g. `.amazonaws.com`). Project-specific lightweight packages come from
-`project.toml`'s `extra_apt = [...]`, baked into a thin per-project layer at create time. Project
+plus its own cloud targets, e.g. `.amazonaws.com`). Project-specific extra tools come from the
+**approved-tool registry** (`library/tools/<name>/tool.toml` — pinned, sha256-verified, each with its
+read-only-floor env redirects + smoke probes): `project.toml`'s `tools = [...]` is rendered
+(`tools/render.py`, pure) into a Dockerfile `FROM claude-man:<overlay>` and built as a
+content-addressed `claude-man:<overlay>-t-<hex>` layer (chain base → overlay → layer; recreate to
+apply; `image smoke --project` gates it) — see [`docs/TOOLS.md`](TOOLS.md). Project
 **env vars are injected at run time** (declared `project.env` as `-e KEY=VAL`; any `env_file` is
 parsed and `ANTHROPIC_*`-scrubbed host-side, then injected pass-through as `-e KEY` name-only with
 the value supplied via the subprocess env — docker is never given `--env-file`, which would bypass
@@ -366,6 +371,31 @@ byte-identical (invariant 2).
   what you see where you land; multi- and single-repo projects behave identically); an explicit
   `[project] workdir` still wins.
 
+## Approved tools (a per-project image layer — Phase 10, implemented)
+
+Full design: [`TOOLS.md`](TOOLS.md). The fixed overlays are all-or-none; a project that needs a
+few more tools (the infra project: kubectl, helm, the SSM plugin, psql, jq, PyYAML, uv on top of
+`terraform`) selects them from an **in-repo registry** (`library/tools/<name>/tool.toml` —
+`tools/library.py`, pure, lint-tested) and they are baked as an **additive layer on top of the
+project's overlay**: `tools/render.py` (pure) renders ONE Dockerfile `FROM claude-man:<overlay>`
+(apt in one `RUN`; each release artefact downloaded + `sha256sum -c`-verified per arch; build-only
+deps purged; the tools' `[env]` floor redirects as overlay-scoped `ENV`; `claude-man.overlay` +
+`claude-man.tools` labels), written to the state tier (`config.tools_dockerfile_path`) and built as
+the **content-addressed** `claude-man:<overlay>-t-<sha256[:12] of the render>` — the tool set, every
+pin and every redirect change the tag, so two projects with one selection share an image and a stale
+image never masquerades as current. `images.build_chain` grows a third step (base → overlay → layer;
+the on-start claude update rebuilds all three); `lifecycle.resolve_image` renders the name (an
+unknown selection entry is a hard error before any build — never a silently-missing tool) and hands
+the tag to `runner.build_create_argv(image=…)`, whose every other token is unchanged (floor
+byte-identical, unit-pinned). `smoke._tool_probes` appends every selected tool's `[[smoke]]`
+core-op probes to the gate (`image smoke --project`). Selection = `Project.tools` (replaced the
+never-implemented `extra_apt` stub), **recreate-to-apply** like ports/env-mounts; `requires` pulls
+dependencies into the layer automatically; a tool's `allowlist` is a locked-egress hint the CLI
+prints on `project tools add`. CLI: `tools list`, `project tools add|rm|list`, `project create
+--tool`, `image build|smoke --project`. TUI: a Tools checklist on the create modal + Project… →
+**Tools (image)…** (`t`, pending-selection checklist, Apply = `set_tools` + recreate;
+`tui/toolsview.py` is the pure model). Superseded `-t-` images are not auto-pruned (follow-up).
+
 ## Network / egress (Phase 4 — implemented)
 
 **Open by default.** Strict mode is per-project, opt-in (`project lock <slug>` / create
@@ -482,7 +512,7 @@ from the squid access log / `project egress-log`). It resets to zero on each rec
 `S` stop-all · `v` View… · `,` settings (ssh keys + git identity; `g` there opens the git-identity
 edit modal) · `q` quit. Lower-frequency verbs live behind the g/p/v submenus
 (`tui/screens/menu.py`): Repos… = add/remove-repo · refresh-git (fetch-ful) · pull-all;
-Project… = env-mounts · ports · packs · egress · recreate · delete; View… = refresh-usage ·
+Project… = env-mounts · ports · packs · tools · egress · overlay · model · profile · auth · recreate · delete; View… = refresh-usage ·
 focus-logs. Add/Remove-repo are modal
 screens (`tui/screens/{add_repo,remove_repo}.py`) whose clone/registry work runs off the UI thread via
 `lifecycle.add_repo`/`remove_repo` (the `_busy` reserve + per-slug `flock` guard concurrent edits).
@@ -490,6 +520,13 @@ Project… → `e` opens an **env-mounts manager** (`tui/screens/env_mounts.py` 
 project's ssh/file mounts with in-screen add (validated against the dest-denylist) / remove / resync —
 the fast registry mutations run inline, `resync` (docker exec) on a thread worker.
 
+Project… → `t` opens the **Tools screen** (`tui/screens/tools.py`): the approved-tool registry as a
+checklist with the project's selection marked (`✓`) and what `requires` pulls in (`+`). Toggles edit a
+PENDING selection (every change is a new image layer, so unlike Packs it does not apply per toggle);
+**Apply** validates against the registry, dismisses the tuple, and the app runs `lifecycle.set_tools`
+then `lifecycle.recreate` off-thread (the overlay/egress worker shape — `ensure_created` renders the
+layer and `ensure_chain` builds it if missing, streamed to the log). The create modal carries the same
+choice as a `SelectionList` (the CLI `--tool` twin).
 Project… → `g` opens the **Egress screen** (`tui/screens/egress.py` + `add_allow.py`): the single place
 to *change* the network policy the always-on Network panel reflects. It shows the mode (OPEN/STRICT) and
 the project's allowlist extras on top of the base set, with: **lock/unlock** (the heavy part — it

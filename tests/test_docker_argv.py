@@ -582,3 +582,21 @@ class ProjectTintTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImageOverrideTest(unittest.TestCase):
+    """The tools-layer image is passed explicitly; only the final image token changes."""
+
+    def test_image_param_replaces_only_the_image_token(self) -> None:
+        from claudeman.docker import runner
+        from claudeman.docker import labels
+        p = Project(slug="p", overlay="terraform", tools=("jq", "kubectl"))
+        base = runner.build_create_argv(p, profile_name="w", created_iso="t")
+        over = runner.build_create_argv(p, profile_name="w", created_iso="t",
+                                        image="claude-man:terraform-t-0123456789ab")
+        self.assertEqual(base[-3], "claude-man:terraform")
+        self.assertEqual(over[-3], "claude-man:terraform-t-0123456789ab")
+        self.assertEqual(base[:-3], over[:-3])  # the hardened floor + everything else identical
+        # the baked selection is a label (a projection of the registry, like overlay/egress)
+        self.assertIn(f"{labels.TOOLS}=jq,kubectl", over)
+

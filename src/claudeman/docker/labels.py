@@ -14,6 +14,7 @@ from ..registry.schema import Project
 SLUG = f"{config.LABEL_PREFIX}.slug"
 PROFILE = f"{config.LABEL_PREFIX}.profile"
 OVERLAY = f"{config.LABEL_PREFIX}.overlay"
+TOOLS = f"{config.LABEL_PREFIX}.tools"       # the approved-tool selection baked into its image (csv)
 EGRESS = f"{config.LABEL_PREFIX}.egress"
 AUTH = f"{config.LABEL_PREFIX}.auth"
 REPOS = f"{config.LABEL_PREFIX}.repos"
@@ -35,6 +36,7 @@ def build(project: Project, *, profile: str, version: str, created_iso: str) -> 
         SLUG: project.slug,
         PROFILE: profile,
         OVERLAY: project.overlay,
+        TOOLS: ",".join(project.tools),
         EGRESS: project.egress,
         AUTH: project.auth,
         REPOS: str(len(project.repos)),

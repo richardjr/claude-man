@@ -1,0 +1,10 @@
+# PyYAML for the system python3 — parse/validate rendered YAML manifests from scripts.
+description = "PyYAML (python3 yaml module)"
+kind = "apt"
+packages = ["python3-yaml"]
+requires = ["python3"]
+
+[[smoke]]
+name = "python3 imports yaml"
+argv = ["python3", "-c", "import yaml; print(yaml.safe_load('a: 1'))"]
+expect = "{'a': 1}"

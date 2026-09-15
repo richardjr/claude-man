@@ -6,7 +6,7 @@ Canonical TOML shape (see templates/project.toml.example)::
     slug = "landarna"
     profile = "work"            # optional; omit to inherit the default profile
     overlay = "node"
-    extra_apt = ["jq"]          # optional
+    tools = ["jq", "kubectl"]   # optional: approved-tool selection baked on top of the overlay
     # env_file = "~/Work/landarna_environment_local"   # alternative to [project.env]
 
     [project.egress]
@@ -110,7 +110,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         env={k: _env_str(v) for k, v in (proj.get("env", {}) or {}).items()},
         env_file=proj.get("env_file"),
         workdir=proj.get("workdir", ""),
-        extra_apt=tuple(proj.get("extra_apt", []) or ()),
+        tools=tuple(proj.get("tools", []) or ()),
         repos=repos,
         env_mount=mounts,
         ssh_auto_trust=bool(proj.get("ssh_auto_trust", False)),
@@ -186,8 +186,8 @@ def save(project: Project) -> Path:
         proj["ssh_auto_trust"] = True
     if project.auth != config.DEFAULT_AUTH:  # opt-in login mode; default token stays absent
         proj["auth"] = project.auth
-    if project.extra_apt:
-        proj["extra_apt"] = list(project.extra_apt)
+    if project.tools:
+        proj["tools"] = list(project.tools)
     if project.env_file:
         proj["env_file"] = project.env_file
 
@@ -506,6 +506,30 @@ def set_packs(slug: str, names: tuple[str, ...]) -> Project:
         proj["packs"] = list(updated.packs)
     elif "packs" in proj:
         del proj["packs"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
+
+
+def set_tools(slug: str, names: tuple[str, ...]) -> Project:
+    """Replace the project's approved-tool selection (comment-preserving scalar patch, atomic write).
+
+    Pure registry edit — validating the names against the library and the recreate-to-apply
+    reminder are the caller's job (``lifecycle.set_tools``). Name SHAPE is validated via the
+    dataclass. An empty selection drops the key (terse template)."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, tools=tuple(names))  # ValidationError on bad/dup names
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if updated.tools:
+        proj["tools"] = list(updated.tools)
+    elif "tools" in proj:
+        del proj["tools"]
     _atomic_write(path, tomlkit.dumps(doc))
     return updated
 

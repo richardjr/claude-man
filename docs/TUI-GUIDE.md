@@ -91,7 +91,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -112,7 +112,7 @@ opens the editor.)
 
 ## 2. Create a project (`n`)
 
-Press `n`. The **New project** form has six fields:
+Press `n`. The **New project** form has seven fields:
 
 - **Slug** — lowercase letters/digits/hyphens, ≤ 64 chars (validated inline; duplicates
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
@@ -129,6 +129,9 @@ Press `n`. The **New project** form has six fields:
   egress](CLI.md#strict-egress-lock-a-project-to-an-allowlist)); it can also be toggled later
   with `claudemanctl project lock|unlock <slug>`.
   Start with `open` unless you've already tuned an allowlist.
+- **Tools (image layer)** — a checklist of the approved-tool registry ([`docs/TOOLS.md`](TOOLS.md));
+  space ticks an entry. Ticked tools are baked as a checksum-verified layer on top of the overlay
+  at create (the CLI's repeatable `--tool`). Change later via Project… → `t` Tools (image)….
 - **SSH auto-trust (TOFU)** — `off` (default) or `on`. `on` sets `StrictHostKeyChecking
   accept-new` so in-container ssh records an *unknown* host's key on first connect instead of
   failing the non-interactive `git`. The common forges (github/gitlab/bitbucket/azure) are
@@ -268,7 +271,7 @@ does **not** apply mount add/removes (only recreate does).
 agent — Settings → `l` does exactly that. On Linux/WSL2, claude-man falls back to starting a
 managed agent if your session has none.
 
-## 7. Other env mounts, published ports, and curated packs
+## 7. Other env mounts, published ports, curated packs, and approved tools
 
 **File mounts and env vars** (`p` → `e`, then `a`):
 
@@ -299,6 +302,16 @@ launch; no recreate). The **State** column flags copies that differ from the lib
 library + backed up; upstream improvements belong in the library), `operator file wins`
 (your own same-named file blocks the pack entry), `not in library` (a selection that
 outlived the library).
+
+**Approved tools** (`p` → `t`): a checklist of the in-repo tool registry
+([`docs/TOOLS.md`](TOOLS.md)) — pinned, checksum-verified tools (kubectl, helm, the AWS
+Session Manager plugin, psql, jq, PyYAML, uv…) baked as an image layer on top of the project's
+overlay. `✓` marks your selection, `+` marks what a selected tool's `requires` pulls in. Unlike
+packs, toggles edit a **pending** selection (every change is a new image layer): **Apply**
+(`a`) saves it and recreates the container — the layer is built if missing, streamed to the
+log pane — while **Close** discards. The same checklist is on the New-project modal so a
+project can start with its tools. Locked (strict) projects: a tool's runtime hosts are a hint
+only — allowlist them in the Egress… screen.
 
 ## 8. Day to day
 
@@ -335,6 +348,11 @@ Project… menu. Each persists the choice and applies it itself — no manual
 - **`i` Overlay (image)…** — switch the project's image variant (base / python / rust / node /
   python-node / terraform). A missing image is built first (streamed to the log pane), then
   the container is recreated on it.
+- **`t` Tools (image)…** — pick approved tools ([`docs/TOOLS.md`](TOOLS.md)) to bake as a layer on
+  top of the overlay: a checklist of the registry (`✓` selected, `+` pulled in by `requires`).
+  Toggles edit a pending selection; **Apply** persists it and recreates (the layer is built if
+  missing, streamed to the log pane); Close discards. Registry-validated before anything is torn
+  down.
 - **`m` Model…** — the project's one model choice ([`docs/MODELS.md`](MODELS.md) for the
   background), in one list: the curated **claude** models (picked → the next `c` launches
   `claude --model <ref>`; registry-only, **no recreate**, allowed on locked projects), the
@@ -395,7 +413,8 @@ and deletions reject.
 | Task | Command |
 |---|---|
 | Renew / verify / seed a profile; SSO/console login flows (a first profile mints in the setup wizard) | `claudemanctl profile renew\|verify\|seed <name>` / `profile add --sso\|--console` |
-| Explicit image build / hardened smoke gate | `claudemanctl image build\|smoke <overlay>` |
+| Explicit image build / hardened smoke gate | `claudemanctl image build\|smoke <overlay>` / `image build\|smoke --project <slug>` (the overlay + its tools) |
+| Browse the whole tool registry with its floor redirects + locked-egress hosts (the Tools… screen shows the same rows) | `claudemanctl tools list -v` |
 | Browse opener | `claudemanctl config opener --command '…'` |
 | Boot splash toggle | `claudemanctl config splash on\|off` |
 | Clone missing repos (fetch-all is `g` → `r` in the TUI) | `claudemanctl project sync-repos <slug>` |

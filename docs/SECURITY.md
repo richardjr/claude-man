@@ -204,6 +204,28 @@ What crosses each way, and what must never cross:
   first). An agent that edits an injected file only triggers curated-wins re-stamping (with a
   backup) — in-container edits cannot propagate into the library or other projects.
 
+### Approved tools (image-layer supply chain — [`TOOLS.md`](TOOLS.md))
+- Extra tools come **only** from the in-repo registry (`library/tools/<name>/tool.toml`) — there is
+  no arbitrary-apt or arbitrary-URL path (the never-implemented `extra_apt` stub was removed rather
+  than wired up). Every release artefact is **version-pinned** with a **per-arch sha256 verified at
+  build** (`sha256sum -c` under `set -eux` — a mismatch or a missing archive member fails the
+  build); apt entries come from the Debian release the base image tracks.
+- The render is a **pure function** of the registry + selection: URLs are validated as plain
+  `https://` with no shell metacharacters before they are quoted into the generated `RUN` line, tar
+  members can't path-escape, and a tool's `[env]` may not touch `HOME`/`PATH`/the claude config /
+  XDG floor keys or any `FORBIDDEN_ENV_NAMES` (invariant 1 — a registry entry can never inject an
+  `ANTHROPIC_*`/token variable).
+- The layer changes **only what is baked on the read-only rootfs**: the hardened run profile is
+  byte-identical (only the final image token of the create argv differs — unit-pinned), and
+  `image smoke --project` exercises every selected tool's core operation as uid 1000 under
+  `--read-only` before the image is trusted. Credential-bearing tool files (kubeconfig, helm
+  registry logins, `.pgpass`) are redirected to the **ephemeral `.cache` tmpfs**, never the
+  `/workspace` checkout, so they can't land in a repo.
+- Images are **content-addressed** (`claude-man:<overlay>-t-<sha256 prefix of the render>`), so a
+  pin bump or a selection change is always a new tag — a stale, un-reverified image is never
+  mistaken for the current one. A running container carries its baked set as the
+  `claude-man.tools` label (a projection, invariant 4).
+
 ### Sync-back safety (defence against exfiltration into host config / the setups git repo)
 - The **denylist is enforced before any read** and **re-asserted at git-staging time** — it refuses
   to stage if `.credentials.json`/`oauthAccount`/`userID` ever slipped through.

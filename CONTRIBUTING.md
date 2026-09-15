@@ -35,6 +35,14 @@ uv run claudemanctl image smoke base   # the hardened-profile gate — run it af
 
 ## Conventions (enforced in review)
 
+- **CLI first, then TUI — both, in the same change.** Behaviour lives once in the backend
+  (`lifecycle.py` + the registry/pure modules); `cli.py` exposes it as `claudemanctl` verbs first
+  (the scriptable, testable contract), then the TUI gets its parity surface — a screen/modal or a
+  field on an existing one, plus a menu row or Settings key — wired to the same lifecycle call
+  off-thread. A feature is not done while it is CLI-only, and the TUI must never grow logic the CLI
+  can't reach (the textual-free `tui/*view.py` view models are the only TUI-side logic). Document
+  both: the verb in `docs/CLI.md`, the key/menu row in `docs/TUI-GUIDE.md`. Full wording in
+  [`CLAUDE.md`](CLAUDE.md) § Conventions.
 - **Tests stay dependency-free**: stdlib `unittest` (plus `tomlkit`, which the TOML-writing
   paths use), no docker, no network, no `textual`.
   Tests isolate state via `CLAUDE_MAN_CONFIG_HOME` / `CLAUDE_MAN_STATE_HOME` tmpdirs and pin the
@@ -55,6 +63,15 @@ uv run claudemanctl image smoke base   # the hardened-profile gate — run it af
   platform; macOS and WSL2 are supported hosts; native Windows is out of scope.
 - Commit messages: short, factual subject ("what changed", not "why"); optional one-paragraph
   body; no marketing language or emojis.
+
+## Adding an approved tool
+
+Tools a project can bake on top of its overlay come from the registry at
+`library/tools/<name>/tool.toml` — pinned versions, per-arch sha256 for release artefacts, the
+read-only-floor `[env]` redirects, and `[[smoke]]` probes of the tool's core operation. The
+authoring steps, the field reference, and the write-path table live in
+[`docs/TOOLS.md`](docs/TOOLS.md); `tests/test_tools_library.py` lints the shipped tree, and
+`claudemanctl image smoke --project <slug>` is the runtime gate every new entry must pass.
 
 ## Adding or editing a curated pack
 

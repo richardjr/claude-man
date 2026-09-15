@@ -70,6 +70,15 @@ GATEWAY_LOCAL_PREFIX = "claude-local-"             # the local model's id in the
 # Buildable image tags: the project overlays + the standalone proxy sidecar (not an overlay of base).
 BUILDABLE_IMAGES = OVERLAYS + (PROXY_IMAGE,)
 
+# Tools layer (docs/TOOLS.md): a project's approved-tool selection is baked as an ADDITIVE image
+# `FROM claude-man:<overlay>`, tagged content-addressed — `claude-man:<overlay>-t-<12 hex>` where the
+# hex is a sha256 prefix of the rendered Dockerfile (so the tool set, every version/checksum pin, and
+# the env redirects all change the tag; two projects with the same selection share one image, and a
+# stale image is never mistaken for a current one). The rendered Dockerfile lives in the STATE tier
+# (`tools_dockerfile_path`), the build context stays the data root.
+TOOLS_IMAGE_SEP = "-t-"
+TOOLS_IMAGE_HASH_LEN = 12
+
 # FALLBACK claude version for image builds — used only when the channel can't be resolved (offline /
 # unreadable config; see lifecycle.resolve_build_version). A bare `image build` and the on-start
 # update check both resolve the configured pin / tracked channel first, so this is never the normal
@@ -611,13 +620,40 @@ def library_packs_dir() -> Path:
     return _data_root() / "library" / "packs"
 
 
+def library_tools_dir() -> Path:
+    """The approved-tool registry (``library/tools/<name>/tool.toml``) — bundled in the wheel under
+    ``claudeman/_data/library`` or read from the checkout. See docs/TOOLS.md."""
+    return _data_root() / "library" / "tools"
+
+
 def image_tag(overlay: str) -> str:
-    """The local docker tag for an overlay (``claude-man:<overlay>``)."""
+    """The local docker tag for an image name (``claude-man:<name>`` — an overlay, the proxy, or a
+    tools-layer name)."""
     return f"{IMAGE_REPO}:{overlay}"
 
 
+def tools_image_overlay(name: str) -> str | None:
+    """The overlay a tools-layer image name (``<overlay>-t-<hex>``) is built FROM, or ``None`` when
+    ``name`` is a plain overlay / the proxy (the pure inverse of ``tools.render.image_name``)."""
+    head, sep, tail = name.rpartition(TOOLS_IMAGE_SEP)
+    if not sep or head not in OVERLAYS or len(tail) != TOOLS_IMAGE_HASH_LEN:
+        return None
+    if any(c not in "0123456789abcdef" for c in tail):
+        return None
+    return head
+
+
+def tools_dockerfile_path(name: str) -> Path:
+    """Where the rendered tools-layer Dockerfile for image ``name`` is written (state tier; content-
+    addressed by the name, so a re-render of the same selection is byte-identical)."""
+    return state_home() / "images" / name / "Dockerfile"
+
+
 def image_dockerfile(overlay: str) -> Path:
-    """Absolute path to the Dockerfile that builds ``claude-man:<overlay>`` (under the data root)."""
+    """Absolute path to the Dockerfile that builds ``claude-man:<overlay>`` (under the data root),
+    or — for a tools-layer image name — its rendered state-tier Dockerfile."""
+    if tools_image_overlay(overlay) is not None:
+        return tools_dockerfile_path(overlay)
     if overlay == "base":
         return _data_root() / "images" / "base" / "Dockerfile"
     if overlay == PROXY_IMAGE:

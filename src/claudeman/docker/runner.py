@@ -262,8 +262,13 @@ def build_create_argv(
     shell_history_host_dir: str | None = None,
     tint: bool = False,
     memory: str = config.DEFAULT_CONTAINER_MEMORY,
+    image: str = "",
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
+
+    ``image`` overrides the image tag (default ``project.image``, the overlay) — the lifecycle
+    passes the resolved tools-layer tag for a project with a ``tools`` selection. Only the final
+    image token changes; the hardened floor is identical either way.
 
     Never includes the token *value* or any scrubbed env key. ``claude_config_path``
     / ``workspace_path`` default to the project's host state dirs. ``file_env`` is the
@@ -337,7 +342,7 @@ def build_create_argv(
     argv += _render_shell_history(shell_history_host_dir)
     argv += ["-w", config.CONTAINER_WORKSPACE]
 
-    argv += [project.image, "sleep", "infinity"]
+    argv += [image or project.image, "sleep", "infinity"]
     return argv
 
 
@@ -412,6 +417,7 @@ def create(
     hybrid_header: str | None = None,
     tint: bool = False,
     memory: str = config.DEFAULT_CONTAINER_MEMORY,
+    image: str = "",
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -435,7 +441,7 @@ def create(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
         file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
         ssh_auth_sock=ssh_sock, git_env=git_env, shell_history_host_dir=shell_history_host_dir,
-        tint=tint, memory=memory,
+        tint=tint, memory=memory, image=image,
     )
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:

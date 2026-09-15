@@ -21,7 +21,8 @@ It exists to solve seven things at once:
 3. **Secure sandbox** — every project runs in its own hardened container (read-only rootfs,
    all capabilities dropped, no-new-privileges, non-root, pid-limited, **hard memory-capped** —
    `16g` by default, `config memory` to change), loadable with project environment variables and
-   extra software via image overlays. Egress is open by default and **lockable** to a strict
+   extra software via image overlays plus a per-project pick from an approved, checksum-pinned
+   tool registry. Egress is open by default and **lockable** to a strict
    per-project allowlist.
 4. **Curated packs** — an in-repo library of guidance templates (focused `CLAUDE.md` fragments +
    skills, bundled as **packs**: guardrails, code-quality, per-language conventions) that
@@ -197,7 +198,7 @@ then `w`.
 
 From the main screen:
 
-- **`n`** creates your first **project** — name it, pick the account profile, an image overlay
+- **`n`** creates your first **project** — name it, pick the account profile, an image overlay, any approved tools,
   (base / python / node / rust / …), a pack language, and the egress mode. The container is
   created and the hardened image built automatically if needed.
 - With the project row selected: **`s`** starts/stops it, **`Enter`** opens a shell inside,
@@ -228,13 +229,14 @@ large `yarn`/`npm` installs in `/workspace` take noticeably longer.
 
 | Doc | What's in it |
 |---|---|
-| [`docs/CLI.md`](docs/CLI.md) | **The full `claudemanctl` reference** (power users / scripting): profiles, projects, repos, env mounts, ports, packs, egress, sync-back, models, images, all config verbs. |
+| [`docs/CLI.md`](docs/CLI.md) | **The full `claudemanctl` reference** (power users / scripting): profiles, projects, repos, env mounts, ports, packs, tools, egress, sync-back, models, images, all config verbs. |
 | [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md) | The detailed TUI walkthrough — every screen and keybinding. |
 | [`docs/SETUP-GUIDES.md`](docs/SETUP-GUIDES.md) | Copy-pasteable per-stack recipes (Node / Python / Rust / polyglot / Terraform+AWS), strict-egress lockdown, hybrid local models. |
 | [`docs/MODELS.md`](docs/MODELS.md) | Local/hybrid models — host Ollama setup, curated presets, the per-project pin. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The full design: stores, lifecycle, hardened run profile, egress, sync-back, TUI internals. |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | The threat model behind the hardening. |
 | [`docs/PACKS.md`](docs/PACKS.md) | The curated-pack system design. |
+| [`docs/TOOLS.md`](docs/TOOLS.md) | The approved-tool registry — pinned, checksum-verified tools baked as a per-project image layer on top of the overlay. |
 | [`CLAUDE.md`](CLAUDE.md) | The load-bearing invariants any contributor (human or Claude) must keep. |
 | [`ROADMAP.md`](ROADMAP.md) | The phase plan and current status. |
 

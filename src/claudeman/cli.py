@@ -269,6 +269,7 @@ def cmd_project_create(args) -> int:
     res = lifecycle.create_project(
         args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
         language=args.language, ssh_auto_trust=args.ssh_auto_trust, auth=args.auth,
+        tools=tuple(args.tool or ()),
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -1390,11 +1391,31 @@ def cmd_config_image(args) -> int:
     return 0
 
 
+def _project_image(slug: str):
+    """``(project, image_name, error)`` for the ``image build|smoke --project`` forms: the project's
+    overlay, or its rendered tools-layer name (the Dockerfile materialized to the state tier)."""
+    from . import lifecycle
+
+    if not projects.exists(slug):
+        return None, "", f"no project {slug!r}"
+    project = projects.load(slug)
+    name, err = lifecycle.resolve_image(project)
+    return project, name, err
+
+
 def cmd_image_build(args) -> int:
     from . import lifecycle
     from .docker import images
 
     overlay = args.overlay or "base"
+    if args.project:
+        if args.overlay:
+            print("give either an image name or --project, not both", file=sys.stderr)
+            return 2
+        _project, overlay, err = _project_image(args.project)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
     # No --claude-version given -> resolve it (global pin, else the tracked channel's latest, else
     # the offline fallback) instead of silently baking a stale hardcoded default.
     version = args.claude_version
@@ -1404,26 +1425,137 @@ def cmd_image_build(args) -> int:
     # A toolchain overlay is `FROM claude-man:base`, so on a clean machine `image build node` needs the
     # base layer first. Build it if missing (never rebuild an existing base) so the single command works.
     # The proxy image is STANDALONE (its own debian base, not FROM claude-man:base), so it skips this.
-    needs_base = overlay not in ("base", config.PROXY_IMAGE)
-    if needs_base and not args.dry_run and not images.image_exists("base"):
-        print(f"base image {config.image_tag('base')} missing — building it first")
-        rc = images.build_one("base", claude_version=version)
-        if rc != 0:
-            return rc
+    # A tools layer is `FROM claude-man:<overlay>`, so its parent overlay is needed too — the chain
+    # minus the requested image itself is what must pre-exist (base for an overlay; base + overlay
+    # for a tools layer).
+    if not args.dry_run:
+        for parent in images.build_chain(overlay)[:-1]:
+            if not images.image_exists(parent):
+                print(f"image {config.image_tag(parent)} missing — building it first")
+                rc = images.build_one(parent, claude_version=version)
+                if rc != 0:
+                    return rc
     return images.build_one(overlay, claude_version=version, dry_run=args.dry_run)
 
 
 def cmd_image_smoke(args) -> int:
     from .docker import smoke as smoke_mod
 
-    result = smoke_mod.smoke(args.overlay)
+    if bool(args.overlay) == bool(args.project):
+        print("give exactly one of: an overlay name, or --project <slug>", file=sys.stderr)
+        return 2
+    if args.project:
+        project, name, err = _project_image(args.project)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        result = smoke_mod.smoke(project.overlay, image=name, tools=project.tools)
+    else:
+        result = smoke_mod.smoke(args.overlay)
     for line in result.lines:
         print(line)
+    tag = config.image_tag(result.image or result.overlay)
     if result.ok:
-        print(f"\nimage {config.image_tag(args.overlay)} PASSED the hardened-profile smoke")
+        print(f"\nimage {tag} PASSED the hardened-profile smoke")
         return 0
-    print(f"\nimage {config.image_tag(args.overlay)} FAILED the smoke", file=sys.stderr)
+    print(f"\nimage {tag} FAILED the smoke", file=sys.stderr)
     return 1
+
+
+# -- tools (the approved-tool registry — docs/TOOLS.md) ---------------------
+def _tools_library():
+    """``(lib, error)`` — a malformed registry is reported, never a traceback."""
+    from .tools import library as tools_library
+    try:
+        return tools_library.discover(), None
+    except tools_library.LibraryError as exc:
+        return {}, f"tool registry error: {exc}"
+
+
+def cmd_tools_list(args) -> int:
+    lib, err = _tools_library()
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    if not lib:
+        print("(no tools in the registry)")
+        return 0
+    print(f"{'TOOL':<24} {'SOURCE':<26} {'REQUIRES':<14} DESCRIPTION")
+    for tool in lib.values():
+        desc = tool.description + (f"  [{tool.note}]" if tool.note else "")
+        print(f"{tool.name:<24} {tool.summary:<26} {','.join(tool.requires) or '-':<14} {desc}")
+    if args.verbose:
+        for tool in lib.values():
+            extras = []
+            if tool.env:
+                extras.append("env: " + ", ".join(f"{k}={v}" for k, v in tool.env.items()))
+            if tool.allowlist:
+                extras.append("egress (locked): " + ", ".join(tool.allowlist))
+            if extras:
+                print(f"\n{tool.name}:\n  " + "\n  ".join(extras))
+    return 0
+
+
+def cmd_project_tools_list(args) -> int:
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    lib, err = _tools_library()
+    if err:
+        print(err, file=sys.stderr)
+    if not project.tools:
+        print(f"(no tools selected — image {project.image}; `project tools add {args.slug} <name>`)")
+        return 0
+    from .tools import library as tools_library
+    try:
+        baked = tools_library.resolve(project.tools, lib) if lib else ()
+    except tools_library.LibraryError as exc:
+        baked = ()
+        print(f"selection cannot be rendered: {exc}", file=sys.stderr)
+    print(f"{'TOOL':<24} {'SOURCE':<26} STATUS")
+    for name in project.tools:
+        tool = lib.get(name)
+        if tool is None:
+            print(f"{name:<24} {'?':<26} NOT IN REGISTRY — `project tools rm {args.slug} {name}`")
+        else:
+            print(f"{name:<24} {tool.summary:<26} selected")
+    for tool in baked:
+        if tool.name not in project.tools:
+            print(f"{tool.name:<24} {tool.summary:<26} pulled in (required by a selected tool)")
+    print(f"\nbaked as an image layer on top of overlay {project.overlay!r}; "
+          f"recreate to apply a changed selection")
+    return 0
+
+
+def cmd_project_tools_add(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    if args.name in project.tools:
+        print(f"{args.name!r} already selected for {args.slug}")
+        return 0
+    res = lifecycle.set_tools(args.slug, project.tools + (args.name,))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_tools_rm(args) -> int:
+    from . import lifecycle
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    if args.name not in project.tools:
+        print(f"{args.name!r} is not selected for {args.slug}")
+        return 0
+    res = lifecycle.set_tools(args.slug, tuple(n for n in project.tools if n != args.name))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
 
 
 # --------------------------------------------------------------------------
@@ -1496,6 +1628,9 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--ssh-auto-trust", action="store_true", dest="ssh_auto_trust",
                     help="auto-trust unknown SSH host keys on first connect (TOFU; accept-new). Default "
                          "off — the common forges are already pre-trusted by the baked known_hosts")
+    pc.add_argument("--tool", action="append", type=_slug_arg, metavar="NAME",
+                    help="select an approved tool (repeatable; see `claudemanctl tools list`) — baked "
+                         "as an image layer on top of the overlay (docs/TOOLS.md)")
     pc.add_argument("--auth", choices=config.AUTH_MODES,
                     help="claude auth mode: token (default — the profile setup-token injected as "
                          "env) or login (opt-in: /login once in-container; enables claude.ai "
@@ -1641,6 +1776,21 @@ def build_parser() -> argparse.ArgumentParser:
     pkd = pkp.add_parser("defaults", help="re-apply the library defaults for the project's language")
     pkd.add_argument("slug", type=_slug_arg)
     pkd.set_defaults(func=cmd_project_packs_defaults)
+    # project tools (list / add / rm) — the approved-tool selection baked into the image (docs/TOOLS.md)
+    ptp = proj.add_parser(
+        "tools", help="approved-tool selection baked on top of the overlay (recreate to apply)"
+    ).add_subparsers(dest="toolscmd", required=True)
+    pta = ptp.add_parser("add", help="select a registry tool (validated now; recreate to apply)")
+    pta.add_argument("slug", type=_slug_arg)
+    pta.add_argument("name", type=_slug_arg)
+    pta.set_defaults(func=cmd_project_tools_add)
+    ptr = ptp.add_parser("rm", help="deselect a tool (recreate to apply)")
+    ptr.add_argument("slug", type=_slug_arg)
+    ptr.add_argument("name", type=_slug_arg)
+    ptr.set_defaults(func=cmd_project_tools_rm)
+    ptl = ptp.add_parser("list", help="show the project's selection (+ what it pulls in)")
+    ptl.add_argument("slug", type=_slug_arg)
+    ptl.set_defaults(func=cmd_project_tools_list)
     # project model (the per-project model pin: a local ollama tag → hybrid mode (Phase 9;
     # recreate to apply), or --claude <ref> → `claude --model` at launch (no recreate))
     pmd = proj.add_parser(
@@ -1682,6 +1832,15 @@ def build_parser() -> argparse.ArgumentParser:
     pkls = pk.add_parser("list", help="list library packs (name, tier, default, contents)")
     pkls.add_argument("--tier", help="filter by tier (common, or a language like node/python)")
     pkls.set_defaults(func=cmd_packs_list)
+
+    # tools (browse the approved-tool registry — per-project selection lives under `project tools`)
+    tl = sub.add_parser("tools", help="the approved-tool registry (docs/TOOLS.md)").add_subparsers(
+        dest="cmd", required=True
+    )
+    tls = tl.add_parser("list", help="list registry tools (name, source/version, requires, description)")
+    tls.add_argument("-v", "--verbose", action="store_true",
+                     help="also show each tool's floor env redirects + locked-egress hosts")
+    tls.set_defaults(func=cmd_tools_list)
 
     # model (local model management — Phase 9; wraps the host Ollama daemon)
     mdl = sub.add_parser("model", help="local model management (host Ollama)").add_subparsers(
@@ -1795,15 +1954,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     # image
     im = sub.add_parser("image", help="container images").add_subparsers(dest="cmd", required=True)
-    ib = im.add_parser("build", help="build base/overlay/proxy image")
+    ib = im.add_parser("build", help="build base/overlay/proxy image, or a project's tools-layer image")
     ib.add_argument("overlay", nargs="?", choices=config.BUILDABLE_IMAGES)
+    ib.add_argument("-p", "--project", type=_slug_arg, metavar="SLUG",
+                    help="build the image a project runs on: its overlay + its selected tools "
+                         "(renders the tools-layer Dockerfile; builds missing parents first)")
     ib.add_argument("--claude-version", default="",
                     help="claude version to bake (default: the configured pin, else the tracked "
                          "channel's latest release)")
     ib.add_argument("--dry-run", action="store_true")
     ib.set_defaults(func=cmd_image_build)
-    ism = im.add_parser("smoke", help="smoke-test a hardened image")
-    ism.add_argument("overlay", choices=config.OVERLAYS)
+    ism = im.add_parser("smoke", help="smoke-test a hardened image (an overlay, or a project's tools image)")
+    ism.add_argument("overlay", nargs="?", choices=config.OVERLAYS)
+    ism.add_argument("-p", "--project", type=_slug_arg, metavar="SLUG",
+                     help="smoke the project's image: base + overlay probes + every selected tool's "
+                          "registry probes (its CORE ops under the read-only floor)")
     ism.set_defaults(func=cmd_image_smoke)
 
     # doctor (single-level: one verb, no sub-verbs)

@@ -1,0 +1,9 @@
+# jq — command-line JSON processor (Debian trixie package).
+description = "jq — JSON processor"
+kind = "apt"
+packages = ["jq"]
+
+[[smoke]]
+name = "jq filters JSON"
+argv = ["sh", "-lc", "printf '{\"a\":1}' | jq .a"]
+expect = "1"
