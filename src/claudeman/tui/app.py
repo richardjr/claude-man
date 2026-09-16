@@ -798,6 +798,9 @@ class ClaudeManApp(App):
             self.notify(f"{verb} failed for {slug}: {exc}", severity="error", timeout=10)
             return
         self._log(f"launching {verb} for {slug} …")
+        if handle.note:  # a degraded launch (status bar fell back to plain) — surfaced, never silent
+            self._log(f"[yellow]{slug}: {escape(handle.note)}[/]")
+            self.notify(f"{slug}: {handle.note}", severity="warning", timeout=12)
         self._watch_spawn_worker(slug, verb, past, handle)
 
     @work(thread=True, group="spawnwatch", exclusive=False)

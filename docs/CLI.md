@@ -375,10 +375,31 @@ In the TUI, Settings (`,`) → `m`. Fixed at container create, so **recreate a p
 uv run claudemanctl config splash off            # disable the TUI boot splash
 uv run claudemanctl config shell-history on      # persist in-container bash history across recreate (default off)
 uv run claudemanctl config terminal-tint on      # per-project OSC-11 background tint on spawned windows (default off)
+uv run claudemanctl config status-bar off        # the per-project status bar on the top row of claude/shell windows (default on)
 uv run claudemanctl config image --channel stable --check on   # claude release channel / pin / update check
 uv run claudemanctl config ssh add ~/.ssh/id_ed25519           # keys claude-man auto-loads into the host agent
 uv run claudemanctl config ssh load
 ```
+
+## Status bar
+
+Every `project claude` / `project shell` window opens under a **per-project status bar on the top
+row** of the terminal (issue #37): the project slug in its palette colour, then profile · auth ·
+image · model · egress, and the git branch of the current directory + a clock on the right. It is
+drawn *inside* the terminal (a baked tmux session), so it shows on decoration-less tiling desktops
+where the window title and background tint never do. Default **on**:
+
+```bash
+uv run claudemanctl config status-bar            # show
+uv run claudemanctl config status-bar off        # plain launch (the pre-#37 behaviour)
+```
+
+Launch-time — applies to the next window, no recreate. The image must bake the launcher: after
+upgrading run `image build base`, then any `up`/`recreate` (or `image build --project <slug>`)
+rebuilds the project's now-stale overlay chain on it automatically. Until then a window opens
+plainly and says so (a stderr line here, a toast in the TUI). Closing a claude
+window leaves claude running in its session; the next `project claude` **re-attaches** to it
+(`Ctrl-b d` detaches by hand). `nvim` windows never get the bar. In the TUI: Settings (`,`) → `s`.
 
 ## Building images
 
@@ -391,6 +412,14 @@ uv run claudemanctl image smoke base                  # gate an image against th
 uv run claudemanctl image build --project infra       # a project's image: overlay + its selected tools (docs/TOOLS.md)
 uv run claudemanctl image smoke --project infra       # + every selected tool's core-op probes under the floor
 ```
+
+Images chain `base → <overlay> → <overlay>-t-<hash>` (the per-project tools layer). A layer is
+`FROM` its parent's tag at build time, so rebuilding a parent does **not** update an existing child.
+claude-man detects that: a layer created *before* its parent is **stale**, and both `image build
+--project` and the `up`/`create`/`recreate` pre-flight rebuild it (and everything below it) on the
+current parent. So after `image build base`, the next start of each project rebuilds its overlay
+chain once — no manual per-overlay rebuild. A cache-hit base rebuild keeps its original timestamp,
+so an unchanged base never triggers rebuilds.
 
 ## Windows (WSL2) notes
 

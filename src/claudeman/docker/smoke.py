@@ -126,6 +126,17 @@ def _base_probes() -> list[Probe]:
         Probe("dev CLIs present (eza/zoxide/fzf/bat)",
               ["sh", "-lc", "command -v eza && command -v zoxide && command -v fzf && command -v bat"],
               required=True, expect="/usr/local/bin/bat"),
+        # Status bar (issue #37): the baked tmux launcher + conf must start a server under the read-only
+        # floor (its socket is the only write, on the /tmp tmpfs), pin the bar to the TOP row, and the
+        # `tmux-256color` terminfo the panes see must exist. `-L` isolates the smoke server; the pane
+        # runs a one-shot so the server exits on its own (kill-server is belt-and-braces).
+        Probe("status bar (tmux conf + terminfo, read-only)",
+              ["sh", "-lc",
+               "command -v claude-man-bar && infocmp tmux-256color >/dev/null && "
+               "tmux -L smoke -f /etc/claude-man/tmux.conf new-session -d -s smoke 'sleep 5' && "
+               "tmux -L smoke display -p 'bar=#{status-position}'; rc=$?; "
+               "tmux -L smoke kill-server 2>/dev/null; exit $rc"],
+              required=True, expect="bar=top", timeout=20),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]

@@ -43,12 +43,13 @@ ARG MARKSMAN_VERSION=2026-02-08
 # Shell dev environment (Phase 8a — see images/bash/ + docs/DEVENV.md): starship (git-aware prompt),
 # fzf (Ctrl-R history), eza (ls), zoxide (smart cd), bat (pager/man), bash-completion — all from
 # Trixie. Debian ships bat's binary as `batcat`; symlink a `bat` onto PATH so the alias + MANPAGER
-# work. These only affect the interactive shell; the hardened runtime floor is unchanged (invariant 2).
+# work. tmux hosts the per-project status bar (issue #37, below). These only affect the interactive
+# shell; the hardened runtime floor is unchanged (invariant 2).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl git ripgrep nodejs npm openssh-client corkscrew \
-        bash-completion starship fzf eza zoxide bat; \
+        bash-completion starship fzf eza zoxide bat tmux; \
     ln -s /usr/bin/batcat /usr/local/bin/bat; \
     rm -rf /var/lib/apt/lists/*
 
@@ -208,6 +209,14 @@ COPY --chown=agent:agent images/bash/starship.toml /home/agent/.config/starship.
 # container by the rc and re-shown via `hints`. On PATH, root-owned + read-only like every other tool.
 COPY images/bash/motd /usr/local/bin/claude-man-motd
 RUN chmod 0755 /usr/local/bin/claude-man-motd
+# The per-project status bar (issue #37): tmux (apt, above) + a read-only conf loaded ONLY via the
+# baked `claude-man-bar` launcher the host runs `claude`/shell windows through when `config status-bar`
+# is on (default). Identity is drawn on the terminal's top row, so it shows on decoration-less desktops
+# where the window title/tint never do. tmux's only write is its socket on the /tmp tmpfs — floor
+# byte-identical. See images/bash/tmux.conf + docs/DEVENV.md "Status bar".
+COPY images/bash/tmux.conf /etc/claude-man/tmux.conf
+COPY images/bash/claude-man-bar /usr/local/bin/claude-man-bar
+RUN chmod 0644 /etc/claude-man/tmux.conf && chmod 0755 /usr/local/bin/claude-man-bar
 
 # Baked environment (also set explicitly at run time by docker/runner.py).
 # XDG_STATE_HOME points at the writable .cache tmpfs so claude's version-lock dir

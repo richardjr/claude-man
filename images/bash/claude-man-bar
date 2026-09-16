@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# claude-man-bar — run a program under the per-project tmux status bar (issue #37, docs/DEVENV.md).
+#
+#   claude-man-bar <session> <program> [args…]
+#
+# Exec'd by the host launcher (tui/terminals.py) in place of the bare program when `config status-bar`
+# is on: `docker exec -it -e CLAUDE_MAN_BAR_{STYLE,LEFT,RIGHT}=… <container> claude-man-bar claude claude …`.
+# Session "claude" is attach-or-create (`-A`): closing the window leaves claude running, and the next
+# `project claude` / `c` re-attaches instead of being refused (the invariant-6 guard still refuses a
+# claude running OUTSIDE this session). Any other session name gets a unique per-window session so two
+# shells never mirror each other. The pane runs ONLY the program — when it exits the session ends and
+# the host-side keep-open shell (if any) takes over, exactly like the plain launch.
+set -u
+
+usage() { echo "usage: claude-man-bar <session> <program> [args...]" >&2; exit 64; }
+[ $# -ge 2 ] || usage
+session="$1"; shift
+conf=/etc/claude-man/tmux.conf
+
+# tmux drives the OUTER terminal through terminfo. `docker exec -t` forwards the host TERM, and an
+# emulator's private entry (xterm-ghostty, xterm-kitty…) may not exist in the image — fall back to
+# xterm-256color (RGB is forced via terminal-features in the conf, so nothing visible is lost).
+if ! infocmp "${TERM:-}" >/dev/null 2>&1; then
+  export TERM=xterm-256color
+fi
+# UTF-8, both ways. The container sets no locale, and a tmux CLIENT in a non-UTF-8 locale assumes the
+# outer terminal can't show wide characters: it prints `_` for them and downgrades box/block glyphs to
+# ACS line drawing (the motd wordmark, starship's ↑/↓, the bar's ⎇ all mangled). `-u` forces the client
+# to UTF-8; the LANG fallback (C.UTF-8 ships in the image) does the same for the pane's programs.
+if [ -z "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" ]; then
+  export LANG=C.UTF-8
+fi
+: "${CLAUDE_MAN_BAR_STYLE:=}" "${CLAUDE_MAN_BAR_LEFT:=}" "${CLAUDE_MAN_BAR_RIGHT:=}"
+export CLAUDE_MAN_BAR_STYLE CLAUDE_MAN_BAR_LEFT CLAUDE_MAN_BAR_RIGHT
+
+# The pane command as ONE bash-quoted string (tmux hands it to `default-shell -c`; bash's %q quoting
+# round-trips every argv element, e.g. a `--model 'claude-sonnet-5[1m]'` ref).
+cmd="$(printf '%q ' "$@")"
+
+if [ "$session" = claude ]; then
+  # Re-apply the bar values AFTER attach so a re-attached window reflects the registry NOW (the conf
+  # expanded them once, when the server first started — possibly for an older launch).
+  exec tmux -u -f "$conf" new-session -A -s claude -c "$PWD" "$cmd" \; \
+    set -g status-style "$CLAUDE_MAN_BAR_STYLE" \; \
+    set -g status-left "$CLAUDE_MAN_BAR_LEFT" \; \
+    set -g status-right "$CLAUDE_MAN_BAR_RIGHT"
+fi
+exec tmux -u -f "$conf" new-session -s "$session-$$" -c "$PWD" "$cmd"

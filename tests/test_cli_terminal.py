@@ -7,6 +7,8 @@ the docker/lifecycle/terminal calls are monkeypatched, so nothing shells out.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -35,12 +37,18 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         self._patch(projects, "exists", lambda slug: True)
         self._patch(projects, "load", lambda slug: f"project:{slug}")
         self._patch(lifecycle, "up", self._fake_up_ok)
-        self._patch(terminals, "spawn_shell", lambda slug: self.calls.append(f"shell:{slug}"))
-        self._patch(terminals, "spawn_claude", lambda slug: self.calls.append(f"claude:{slug}"))
-        self._patch(terminals, "spawn_nvim", lambda slug: self.calls.append(f"nvim:{slug}"))
+        # Each spawn stub records the call and returns a real SpawnHandle shape (the helper reads
+        # `.note` off it — the status-bar fallback notice, issue #37).
+        self._patch(terminals, "spawn_shell", lambda slug: self._spawned(f"shell:{slug}"))
+        self._patch(terminals, "spawn_claude", lambda slug: self._spawned(f"claude:{slug}"))
+        self._patch(terminals, "spawn_nvim", lambda slug: self._spawned(f"nvim:{slug}"))
         # The post-spawn watch (issue #31) runs after every successful spawn; default it to OK.
         self._patch(terminals, "watch_spawn",
                     lambda handle, **kw: terminals.SpawnOutcome(True, "running", None))
+
+    def _spawned(self, call: str, note: str = "") -> terminals.SpawnHandle:
+        self.calls.append(call)
+        return terminals.SpawnHandle(object(), object(), note)
 
     def _patch(self, module, name, value) -> None:
         original = getattr(module, name)
@@ -125,6 +133,18 @@ class OpenTerminalOrderingTest(unittest.TestCase):
         rc = cli.cmd_project_shell(_Args("demo"))
         self.assertEqual(rc, 1)
         self.assertEqual(self.calls, ["shell:demo"])  # it did spawn — the watch caught the failure
+
+    # -- degraded launch notice (issue #37): a plain fallback is reported on stderr, rc stays 0 --
+    def test_spawn_note_is_printed_to_stderr(self) -> None:
+        self._patch(runner, "is_running", lambda slug: True)
+        self._patch(terminals, "spawn_claude",
+                    lambda slug: self._spawned(f"claude:{slug}", terminals.BAR_UNAVAILABLE_NOTE))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli.cmd_project_claude(_Args("demo"))
+        self.assertEqual(rc, 0)
+        self.assertIn("status bar off for this window", err.getvalue())
+        self.assertIn("demo:", err.getvalue())
 
 
 if __name__ == "__main__":

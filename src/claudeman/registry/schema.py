@@ -534,6 +534,12 @@ class Settings:
     # this adds a per-project background hue). Off by default — a background change is opt-in, and some
     # terminals (macOS Terminal.app) ignore OSC 11. Injected at container create -> recreate to apply.
     terminal_tint: bool = False
+    # Per-project STATUS BAR on the top row of spawned claude/shell windows (issue #37): the launcher
+    # runs them under the baked tmux `claude-man-bar` so the project identity (slug in its palette
+    # colour + profile/auth/image/model/egress + git branch) is drawn INSIDE the terminal — visible on
+    # decoration-less desktops where the title/tint never are. ON by default; launch-time (no
+    # recreate); a stale image without the launcher falls back to the plain launch.
+    terminal_status_bar: bool = True
     opener_command: tuple[str, ...] = ()    # custom 'open this path' argv (path appended); () -> auto
     ui_splash: bool = True               # show the TUI boot splash (any key skips; `config splash off`)
     # In-container shell history: OFF -> ephemeral on the .cache tmpfs (resets on recreate); ON ->

@@ -48,6 +48,12 @@ user_email = ""
 # apply — the tint env is stamped at container create). The terminal EMULATOR itself is chosen via
 # `claudemanctl config terminal` (the program/command keys, omitted here — auto-detected by default).
 tint = false
+# Per-project STATUS BAR on the top row of every claude/shell window (issue #37): the project in its
+# palette colour + profile/auth/image/model/egress + git branch, drawn INSIDE the terminal by a baked
+# tmux session — visible on decoration-less desktops where the title/tint never are. ON by default;
+# `claudemanctl config status-bar off` for the plain launch. Launch-time (no recreate); the image
+# must be built with the launcher (`image build base`) — a stale image opens plainly.
+status_bar = true
 
 [container]
 # Hard memory cap for EVERY project container — a docker size string (16g, 8192m, 1.5g; units
