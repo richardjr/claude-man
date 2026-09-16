@@ -133,6 +133,53 @@ for the default path stays byte-identical; a separate test covers the opt-in bin
 it takes effect on `recreate` (surfaced in the `Result`). Stores **no secret** — it is a plain bool
 in `config.toml`.
 
+### Status bar — config option, default ON (issue #37)
+
+The per-project identity cue on a spawned window used to be entirely the emulator's/compositor's to
+show: the launcher `--title`, the OSC-0 title the rc re-asserts, and the opt-in OSC-11 tint. A
+decoration-less tiling desktop (Hyprland/Omarchy) shows none of them, so the identity is now drawn
+**inside the terminal's cell grid**: `claude`/shell windows run under a baked **tmux** session whose
+status bar is pinned to the **top row** — slug chip in `config.project_name_color` on a
+`config.project_tint` background (the same bucket as the TUI row and the tint), then
+profile · auth · image · model · egress, and the pane cwd's git branch + a clock on the right.
+
+- **Why tmux, not a wrapper:** a "reserve the top line" pty proxy has to re-parse and offset every
+  absolute cursor move a full-screen renderer (claude's Ink) emits — a VT parser + virtual screen,
+  i.e. tmux. Baked from Trixie apt.
+- **Pieces:** `images/bash/tmux.conf` → `/etc/claude-man/tmux.conf` (top bar, `escape-time 0`,
+  focus events, `extended-keys` so shift+enter reaches claude, `allow-passthrough`, mouse scrollback,
+  `c` unbound — no new-window affordance, invariant 6) loaded ONLY via `-f` by
+  `images/bash/claude-man-bar` → `/usr/local/bin/claude-man-bar` (`claude-man-bar <session>
+  <program…>`). The host launcher (`tui/terminals.py`) execs it instead of the bare program with the
+  three bar strings — rendered by the pure `statusbar.py`, every operator value `##`-escaped so no
+  registry string can smuggle a `#()` shell into the bar — as **exec-time env**
+  (`CLAUDE_MAN_BAR_{STYLE,LEFT,RIGHT}`). The conf expands them at server start; the launcher
+  re-applies them on attach so a re-attached window shows the registry NOW.
+- **Sessions:** `claude` is attach-or-create (`new-session -A`) — closing the window leaves claude
+  running and the next launch re-attaches (the invariant-6 guard refuses only a claude running
+  OUTSIDE that session); shells get a unique `shell-<pid>` session each so two never mirror. The pane
+  runs only the program, so when it exits the session ends and the host keep-open shell takes over
+  exactly as before. `nvim` stays plain (its own statusline; tmux/nvim key overlap).
+- **Floor:** tmux's only write is its socket under the `/tmp` tmpfs; the conf is read-only; no runner
+  change — the hardened floor is byte-identical (invariant 2). The image-smoke gate starts a server
+  under `--read-only` and checks the `tmux-256color` terminfo the panes see. The launcher falls back
+  to `TERM=xterm-256color` when the host's forwarded TERM (`xterm-ghostty`…) has no terminfo in the
+  image — tmux drives the outer terminal through terminfo (RGB is forced via `terminal-features`).
+  It also runs the client with `-u` and exports `LANG=C.UTF-8` when the container has no locale:
+  a tmux client in a non-UTF-8 locale prints `_` for wide characters and downgrades block glyphs to
+  ACS line drawing on the way OUT to the terminal (the pane content is fine — the motd wordmark,
+  starship's ↑/↓ and the bar's ⎇ were mangled in the first live test).
+- **Config surface:** `[terminal] status_bar = true` (`set_status_bar` in `registry/settings.py`),
+  `config status-bar on|off`, Settings `s`. Launch-time (no recreate). A stale image without the
+  launcher is probed per launch (`terminals.bar_available`, fail-closed → the plain launch) and
+  **reported** (`SpawnHandle.note` → a CLI stderr line / a TUI toast), never silent.
+- **Stale overlays after a base rebuild:** an overlay is `FROM claude-man:base` at ITS build time, so
+  `image build base` alone leaves every existing overlay (and tools layer) on the old base — exactly
+  how the first landarna test showed "no difference". `images.ensure_chain` (the up/create/recreate
+  pre-flight) and `image build --project` now rebuild any layer whose `.Created` predates its
+  parent's (`layer_stale`), cascading down the chain, so the next start after a base rebuild
+  brings each project's image up to date on its own.
+
 ### Banner / MOTD on shell open (ask: "explain the dev environment setup")
 
 A baked `motd` printed by the rc on interactive shell open, explaining the environment: the `n`

@@ -240,6 +240,8 @@ def _open_terminal(slug: str, program: str) -> int:
     except (RuntimeError, OSError) as exc:
         print(f"failed to open {label} for {slug!r}: {exc}", file=sys.stderr)
         return 1
+    if handle.note:  # e.g. the status bar fell back to a plain launch (stale image) — never silent
+        print(f"{slug}: {handle.note}", file=sys.stderr)
     # Brief post-spawn watch (≤~1.5 s): a launcher that starts and then fails — e.g. a broken
     # custom template — must exit non-zero here, not report success (issue #31).
     outcome = terminals.watch_spawn(handle)
@@ -1144,6 +1146,8 @@ def cmd_config_show(args) -> int:
           f"on-start update check {'on' if s.image_update_check else 'off'}")
     print(f"terminal: {_terminal_summary(s)}")
     print(f"terminal tint: {'on' if s.terminal_tint else 'off'} (recreate to apply)")
+    print(f"status bar: {'on' if s.terminal_status_bar else 'off'} (top row of claude/shell windows; "
+          "applies at the next launch)")
     print(f"opener: {' '.join(s.opener_command) if s.opener_command else '(auto)'}")
     print(f"tui splash: {'on' if s.ui_splash else 'off'}")
     print(f"shell history: {'persistent' if s.shell_persist_history else 'ephemeral'} "
@@ -1321,6 +1325,18 @@ def cmd_config_terminal_tint(args) -> int:
     return 0
 
 
+def cmd_config_status_bar(args) -> int:
+    from .registry import settings as settings_registry
+
+    if args.state is None:
+        print(f"status bar: {'on' if settings_registry.load().terminal_status_bar else 'off'}")
+        return 0
+    s = settings_registry.set_status_bar(args.state == "on")
+    print(f"status bar: {'on' if s.terminal_status_bar else 'off'} — applies to the next claude/shell "
+          "window (no recreate; needs an image built with the bar launcher — `image build base`)")
+    return 0
+
+
 def cmd_config_memory(args) -> int:
     from .registry import schema
     from .registry import settings as settings_registry
@@ -1427,14 +1443,22 @@ def cmd_image_build(args) -> int:
     # The proxy image is STANDALONE (its own debian base, not FROM claude-man:base), so it skips this.
     # A tools layer is `FROM claude-man:<overlay>`, so its parent overlay is needed too — the chain
     # minus the requested image itself is what must pre-exist (base for an overlay; base + overlay
-    # for a tools layer).
+    # for a tools layer). A parent that exists but was built BEFORE ITS OWN parent (a base rebuilt
+    # since — images.layer_stale) is rebuilt too, otherwise the requested image would ride an
+    # overlay still linked to the old base (the issue #37 landarna case).
     if not args.dry_run:
-        for parent in images.build_chain(overlay)[:-1]:
+        chain = images.build_chain(overlay)
+        for i, parent in enumerate(chain[:-1]):
             if not images.image_exists(parent):
                 print(f"image {config.image_tag(parent)} missing — building it first")
-                rc = images.build_one(parent, claude_version=version)
-                if rc != 0:
-                    return rc
+            elif i > 0 and images.layer_stale(parent, chain[i - 1]):
+                print(f"image {config.image_tag(parent)} was built before its parent "
+                      f"{config.image_tag(chain[i - 1])} — rebuilding it first")
+            else:
+                continue
+            rc = images.build_one(parent, claude_version=version)
+            if rc != 0:
+                return rc
     return images.build_one(overlay, claude_version=version, dry_run=args.dry_run)
 
 
@@ -1922,6 +1946,12 @@ def build_parser() -> argparse.ArgumentParser:
                               "projects are distinguishable (default off; recreate to apply)")
     ctt.add_argument("state", nargs="?", choices=("on", "off"))
     ctt.set_defaults(func=cmd_config_terminal_tint)
+    csb = cfg.add_parser("status-bar",
+                         help="per-project status bar on the top row of spawned claude/shell windows "
+                              "(project in its colour + profile/auth/image/model/egress + git branch; "
+                              "default on; applies at the next launch)")
+    csb.add_argument("state", nargs="?", choices=("on", "off"))
+    csb.set_defaults(func=cmd_config_status_bar)
     cmem = cfg.add_parser("memory",
                           help="hard per-container memory cap (--memory/--memory-swap, always applied; "
                                f"default {config.DEFAULT_CONTAINER_MEMORY}, min 1g; recreate to apply)")

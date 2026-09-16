@@ -10,8 +10,15 @@ so the build command can be unit-tested without a daemon (same pattern as ``runn
 
 Two distinct verbs, deliberately:
   * ``build_one``   — always (re)builds exactly one overlay. The explicit ``image build`` semantics.
-  * ``ensure_chain``— builds only the *missing* images in the base→overlay chain. The pre-flight
-    used by the lifecycle, so an existing image is never needlessly rebuilt.
+  * ``ensure_chain``— builds only the *missing* or *stale* images in the base→overlay chain. The
+    pre-flight used by the lifecycle, so an up-to-date image is never needlessly rebuilt.
+
+Staleness (issue #37 follow-up): a child image is ``FROM`` its parent's tag, so a parent rebuilt
+AFTER the child (a base rebuild that added a baked tool) leaves the child on the OLD parent layers —
+``docker build`` never re-links an existing child. Detected by comparing ``.Created`` timestamps
+along the chain (``layer_stale``: child created before its parent → rebuild the child, which then
+cascades to ITS child). A fully cache-hit rebuild keeps the parent's original ``Created``, so an
+unchanged base never falsely stales its overlays.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from .. import config
 from . import labels
@@ -115,6 +123,62 @@ def image_claude_version(overlay: str) -> str | None:
     return v if v and v != "<no value>" else None
 
 
+def image_created(overlay: str) -> str | None:
+    """The ``.Created`` timestamp of ``claude-man:<overlay>`` (RFC 3339, as docker prints it), or
+    ``None`` if the image / docker is absent. Never raises."""
+    if shutil.which("docker") is None:
+        return None
+    try:
+        cp = subprocess.run(
+            ["docker", "image", "inspect", config.image_tag(overlay), "--format", "{{.Created}}"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return None
+    if cp.returncode != 0:
+        return None
+    v = cp.stdout.strip()
+    return v or None
+
+
+def parse_created(value: str | None) -> datetime | None:
+    """Pure: parse docker's ``.Created`` (``2026-09-16T14:12:16.123456789Z``) — nanosecond fractions
+    are truncated to the microseconds ``fromisoformat`` accepts. ``None`` on anything unparseable."""
+    if not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if "." in s:
+        head, _, rest = s.partition(".")
+        digits = ""
+        i = 0
+        while i < len(rest) and rest[i].isdigit():
+            digits += rest[i]
+            i += 1
+        s = f"{head}.{(digits[:6] or '0')}{rest[i:]}"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def is_stale(child_created: str | None, parent_created: str | None) -> bool:
+    """Pure: True iff both timestamps parse and the child was created BEFORE its parent — i.e. the
+    child's ``FROM`` captured an older parent image. Unknown timestamps are never stale (fail-open:
+    a missing/unreadable value must not trigger a surprise rebuild)."""
+    child, parent = parse_created(child_created), parse_created(parent_created)
+    if child is None or parent is None:
+        return False
+    return child < parent
+
+
+def layer_stale(child: str, parent: str) -> bool:
+    """True iff ``claude-man:<child>`` predates ``claude-man:<parent>`` (its ``FROM``). Daemon-touching
+    wrapper over the pure ``is_stale``; False when either image is absent."""
+    return is_stale(image_created(child), image_created(parent))
+
+
 def build_one(
     overlay: str,
     *,
@@ -151,11 +215,15 @@ def ensure_chain(
     claude_version: str = config.DEFAULT_CLAUDE_VERSION,
     on_line: ProgressFn | None = None,
 ) -> BuildResult:
-    """Build any *missing* image in the base→``overlay`` chain; leave existing ones untouched.
+    """Build any *missing* or *stale* image in the base→``overlay`` chain; leave current ones untouched.
 
     This is the lifecycle pre-flight: it makes the project's image exist before ``docker create`` so
-    the operator never has to run ``image build`` by hand. Already-present images are skipped (no
-    needless rebuild). Returns ``ok=False`` with a clear detail when docker is absent or a build fails.
+    the operator never has to run ``image build`` by hand. Present, up-to-date images are skipped (no
+    needless rebuild); a layer created BEFORE its parent (``layer_stale`` — the parent was rebuilt
+    since, e.g. `image build base` after a base change) is rebuilt so the chain actually rides the
+    new parent, and that cascades (a rebuilt overlay is newer than its tools layer, which is then
+    rebuilt on the next iteration). Returns ``ok=False`` with a clear detail when docker is absent or
+    a build fails.
     """
     if shutil.which("docker") is None:
         return BuildResult(False, detail="docker not found on PATH — cannot build images")
@@ -164,12 +232,19 @@ def ensure_chain(
     # ``_BUILD_LOCK``). A waiting thread re-checks ``image_exists`` after the holder finishes and
     # skips the now-present layer.
     with _BUILD_LOCK:
+        parent: str | None = None
         for ov in build_chain(overlay):
             if image_exists(ov):
-                continue
-            if on_line:
+                if parent is None or not layer_stale(ov, parent):
+                    parent = ov
+                    continue
+                if on_line:
+                    on_line(f"image {config.image_tag(ov)} was built before its parent "
+                            f"{config.image_tag(parent)} — rebuilding it on the current parent …")
+            elif on_line:
                 on_line(f"image {config.image_tag(ov)} not built — building it now "
                         f"(one-time, may take a minute) …")
+            parent = ov
             rc = build_one(ov, claude_version=claude_version, on_line=on_line)
             if rc != 0:
                 return BuildResult(

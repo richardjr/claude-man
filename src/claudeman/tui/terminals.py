@@ -43,8 +43,8 @@ import tomllib
 from dataclasses import dataclass
 from typing import IO, NamedTuple
 
-from .. import config, hostplatform
-from ..registry import projects
+from .. import config, hostplatform, statusbar
+from ..registry import profiles, projects
 from ..registry import settings as settings_registry
 from ..registry.schema import ValidationError, validate_slug
 
@@ -84,12 +84,27 @@ def _window_osc(slug: str, tint_hex: str | None) -> str:
 
 
 def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str,
-                tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
+                tint_hex: str | None = None, args: tuple[str, ...] = (),
+                bar: statusbar.BarSpec | None = None) -> list[str]:
     # Defence-in-depth for the f-string below (SEC-6's terminal half): the CLI boundary already
     # rejects malformed slugs, but no slug may reach a shell string unvalidated from ANY caller.
     validate_slug(slug)
     container = config.container_name(slug)
     wd = ["-w", workdir] if workdir else []
+    if bar is not None and program in ("claude", "bash"):
+        # Status bar (issue #37): exec the baked tmux launcher instead of the bare program, with the
+        # rendered bar strings as EXEC-time env (never argv to tmux — the conf/launcher read them from
+        # the environment). Both programs take the keep-open wrapper shape so the printf stamps the
+        # OUTER window's title/tint — tmux swallows the in-pane bashrc's OSC. Only claude keeps the
+        # window open after exit (a shell exiting closes it, as before). tmux's socket is the only
+        # write, on the /tmp tmpfs — no runner change, floor byte-identical (invariant 2).
+        session = statusbar.CLAUDE_SESSION if program == "claude" else statusbar.SHELL_SESSION
+        env = " ".join(f"-e {shlex.quote(f'{k}={v}')}" for k, v in bar.env().items())
+        wdq = f"-w {shlex.quote(workdir)} " if workdir else ""
+        prog = shlex.join([statusbar.LAUNCHER, session, program, *args])
+        tail = "; exec bash" if (keep_open and program == "claude") else ""
+        return ["bash", "-lc",
+                f"{_window_osc(slug, tint_hex)}docker exec -it {env} {wdq}{container} {prog}{tail}"]
     if keep_open and program != "bash":
         # keep the window open after `claude` exits by dropping into a shell. Stamp the window title
         # (+ optional tint) FIRST — this exec bypasses the bashrc that names/tints shells, so without
@@ -281,10 +296,11 @@ def resolve_spec(platform: str | None = None) -> TerminalSpec:
 
 
 def build_argv(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
-               tint_hex: str | None = None, args: tuple[str, ...] = ()) -> list[str]:
+               tint_hex: str | None = None, args: tuple[str, ...] = (),
+               bar: statusbar.BarSpec | None = None) -> list[str]:
     spec = resolve_spec()
     inner = _inner_exec(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=tint_hex,
-                        args=args)
+                        args=args, bar=bar)
     return render_spec(spec, cls=window_class(slug), title=window_title(slug), inner=inner)
 
 
@@ -342,10 +358,14 @@ def classify_spawn(returncode: int | None, stderr_tail: str = "") -> SpawnOutcom
 
 
 class SpawnHandle(NamedTuple):
-    """A spawned launcher plus its stderr capture; hand it to ``watch_spawn`` (which closes it)."""
+    """A spawned launcher plus its stderr capture; hand it to ``watch_spawn`` (which closes it).
+    ``note`` is a non-fatal operator notice about HOW the window was launched (e.g. the status bar
+    fell back to a plain launch because the image lacks the launcher) — callers surface it so a
+    degraded launch is never silent."""
 
     proc: subprocess.Popen
     stderr_file: IO[bytes]
+    note: str = ""
 
 
 def _stderr_tail(f: IO[bytes], *, max_bytes: int = 2048, max_lines: int = 6) -> str:
@@ -378,14 +398,100 @@ def watch_spawn(handle: SpawnHandle, *, timeout: float = SPAWN_PROBE_S) -> Spawn
     return classify_spawn(rc, tail)
 
 
+# ---------------------------------------------------------------------------
+# Status bar (issue #37) — the per-project tmux bar on the top row of claude/shell windows.
+# ---------------------------------------------------------------------------
+def _bar_enabled() -> bool:
+    return _safe_settings().terminal_status_bar
+
+
+def build_bar_probe_argv(slug: str) -> list[str]:
+    """Pure: argv probing the container for the baked ``claude-man-bar`` launcher (rc 0 = present)."""
+    validate_slug(slug)
+    return ["docker", "exec", config.container_name(slug), "sh", "-c",
+            f"command -v {statusbar.LAUNCHER}"]
+
+
+def bar_available(slug: str) -> bool:
+    """True if the container's image bakes the bar launcher. Fails CLOSED (False -> the plain launch,
+    which always works) — an image built before issue #37 must not break opening a window."""
+    try:
+        cp = subprocess.run(build_bar_probe_argv(slug), capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
+
+
+def build_claude_session_probe_argv(slug: str) -> list[str]:
+    """Pure: argv asking the container's tmux whether the ``claude`` bar session exists (rc 0 = yes)."""
+    validate_slug(slug)
+    return ["docker", "exec", config.container_name(slug), "tmux", "has-session", "-t",
+            f"={statusbar.CLAUDE_SESSION}"]
+
+
+def claude_session_exists(slug: str) -> bool:
+    """True if a ``claude`` tmux bar session is live in the container (so a new claude window can
+    RE-ATTACH to it — the invariant-6 amendment). Fails CLOSED (False -> the guard refuses, the
+    pre-#37 behaviour)."""
+    try:
+        cp = subprocess.run(build_claude_session_probe_argv(slug), capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
+
+
+def bar_spec(slug: str, program: str) -> statusbar.BarSpec:
+    """The rendered bar for ``slug``'s ``program`` window, read fresh from the registry at LAUNCH (so
+    a model/profile/auth change shows on the next window — no recreate). Fails OPEN to a slug-only
+    bar for an unknown/malformed project (corrupt TOML raises ``TOMLDecodeError``, not
+    ``ValidationError`` — both count) — a registry hiccup must not block opening a window."""
+    session = statusbar.CLAUDE_SESSION if program == "claude" else statusbar.SHELL_SESSION
+    try:
+        project = projects.load(slug)
+    except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError, OSError):
+        return statusbar.render(slug, session=session)
+    profile = project.profile or ""
+    if not profile:
+        try:
+            default = profiles.default_profile()
+        except (ValidationError, tomllib.TOMLDecodeError, OSError):
+            default = None
+        profile = default.name if default is not None else ""
+    return statusbar.render(slug, profile=profile, auth=project.auth, overlay=project.overlay,
+                            model=project.claude_model or project.model, egress=project.egress,
+                            session=session)
+
+
+BAR_UNAVAILABLE_NOTE = (
+    f"status bar off for this window: the container's image lacks `{statusbar.LAUNCHER}` — rebuild "
+    "it (`claudemanctl image build --project <slug>`, or `image build base` then any up/recreate, "
+    "which rebuilds stale overlays) and recreate the project"
+)
+
+
+def _bar_for(slug: str, program: str) -> tuple[statusbar.BarSpec | None, str]:
+    """The bar to launch ``program`` under (None = the plain launch) plus an operator note.
+
+    Plain silently when the setting is off or the program has its own status line (nvim); plain
+    WITH ``BAR_UNAVAILABLE_NOTE`` when the bar was wanted but the image lacks the launcher (probed —
+    fail-open to the launch that always works, but never silently: the operator would otherwise
+    see "no difference" and not know why)."""
+    if program not in ("claude", "bash") or not _bar_enabled():
+        return None, ""
+    if not bar_available(slug):
+        return None, BAR_UNAVAILABLE_NOTE
+    return bar_spec(slug, program), ""
+
+
 def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
           args: tuple[str, ...] = ()) -> SpawnHandle:
     """Launch a detached terminal window. ``program`` is typically 'bash' or 'claude'.
 
     Returns a ``SpawnHandle``; every caller must pass it to ``watch_spawn`` so a launcher that
     starts and then fails is surfaced (and the stderr capture is closed)."""
+    bar, note = _bar_for(slug, program)
     argv = build_argv(slug, program, keep_open=keep_open, workdir=workdir, tint_hex=_tint_hex(slug),
-                      args=args)
+                      args=args, bar=bar)
     stderr_file = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(
@@ -397,7 +503,7 @@ def spawn(slug: str, program: str, *, keep_open: bool = True, workdir: str = "",
     except BaseException:
         stderr_file.close()
         raise
-    return SpawnHandle(proc, stderr_file)
+    return SpawnHandle(proc, stderr_file, note)
 
 
 def spawn_shell(slug: str) -> SpawnHandle:
@@ -452,7 +558,10 @@ def claude_model_args(slug: str) -> tuple[str, ...]:
 
 
 def spawn_claude(slug: str) -> SpawnHandle:
-    if claude_already_running(slug):
+    # Invariant-6 amendment (issue #37): a claude running INSIDE the bar's tmux session is re-attached
+    # (the launcher's `new-session -A`) rather than refused — closing the window never killed it. A
+    # claude running anywhere else is still a second-claude race, and is refused as before.
+    if claude_already_running(slug) and not (_bar_enabled() and claude_session_exists(slug)):
         raise RuntimeError(
             f"claude is already running in {slug!r} — one claude per container (a second races "
             f"on .claude.json/session writes). Use the existing window, or open a shell instead."

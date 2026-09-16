@@ -172,6 +172,22 @@ class SettingsStoreTest(unittest.TestCase):
         settings_registry.set_terminal_tint(False)
         self.assertFalse(settings_registry.load().terminal_tint)
 
+    def test_status_bar_defaults_on(self) -> None:
+        self.assertTrue(settings_registry.load().terminal_status_bar)
+
+    def test_status_bar_roundtrip(self) -> None:
+        settings_registry.set_status_bar(False)
+        self.assertFalse(settings_registry.load().terminal_status_bar)
+        settings_registry.set_status_bar(True)
+        self.assertTrue(settings_registry.load().terminal_status_bar)
+
+    def test_status_bar_off_preserves_tint_and_program(self) -> None:
+        settings_registry.set_terminal(program="kitty")
+        settings_registry.set_terminal_tint(True)
+        s = settings_registry.set_status_bar(False)
+        self.assertEqual(s.terminal_program, "kitty")
+        self.assertTrue(s.terminal_tint)
+
     def test_terminal_tint_coexists_with_terminal_program(self) -> None:
         settings_registry.set_terminal(program="kitty")
         settings_registry.set_terminal_tint(True)

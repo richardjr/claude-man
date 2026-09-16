@@ -36,8 +36,10 @@ It exists to solve seven things at once:
    (not just the agent) work in: a starship git-aware prompt, prefix + fuzzy (`Ctrl-R`) history
    search, the `n` neovim shortcut (file tree on open), and `eza`/`zoxide`/`fzf`/`bat` — plus a
    baked neovim with LSP/treesitter. A shell-open banner sums up the keys; bash history is
-   ephemeral by default and persistable with the opt-in `config shell-history`. All baked
-   read-only — the hardened floor is unchanged.
+   ephemeral by default and persistable with the opt-in `config shell-history`. Every claude/shell
+   window carries a **per-project status bar on its top row** (slug in the project's colour +
+   profile/auth/image/model/egress + git branch — visible even on decoration-less tiling desktops;
+   `config status-bar off` for a plain launch). All baked read-only — the hardened floor is unchanged.
 7. **Hybrid local models** — pin a self-hosted model (via host **[Ollama](https://ollama.com)**) to a
    project and it joins Claude Code's `/model` picker **alongside** your claude.ai subscription,
    switchable mid-session. A per-project **LiteLLM gateway sidecar** fronts both legs on one endpoint:

@@ -101,7 +101,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `n` | New project |
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
 | `v` | View… → `u` Refresh usage · `l` Logs (live `docker logs -f`, escape/q to close) |
-| `,` | Settings (ssh keys · git identity · GH token · terminal · setup wizard `w`) |
+| `,` | Settings (ssh keys · git identity · GH token · terminal · status bar `s` · memory `m` · setup wizard `w`) |
 | `m` | Models — install / update / remove / inspect local Ollama models (the Phase 9 management screen, section 8) |
 | `q` | Quit immediately — containers keep running |
 
@@ -193,9 +193,22 @@ Terminal.app; WSL2 picks up Windows Terminal); change it in Settings (`,` → `e
 a display problem) is surfaced with its exit code and stderr as a toast + log line instead of
 failing silently.
 
-**One `claude` per container.** A second `c` on the same project is refused while a claude is
-already running (two would race on `.claude.json`). A second *shell* is always fine — but
-don't launch `claude` by hand from that shell; the guard can't see a future one.
+**The status bar.** Every claude/shell window opens with a one-row **per-project status bar on
+the top line** of the terminal: the project slug in its palette colour (the same hue as its row in
+the projects table), then profile · auth · image · model · egress, with the git branch of the
+current directory and a clock on the right. It is drawn inside the terminal by a baked tmux
+session, so it is visible on tiling desktops with no window decorations, where the window title
+and the optional background tint never show. Default on; toggle it in Settings (`,` → `s`) —
+applies to the next window, no recreate. The image needs to be built with the launcher: after
+`image build base`, the next start/recreate of a project rebuilds its overlay on the new base
+automatically; until then the window opens plainly and a toast says why. While the bar is on: the mouse wheel scrolls history, hold **Shift** to
+select text with the mouse, and `Ctrl-b d` detaches the window without stopping what's in it.
+
+**One `claude` per container.** A second `c` on the same project **re-attaches** to the running
+claude when it lives in the status-bar session — closing a window never kills it. A claude running
+anywhere else in the container (launched by hand from a shell) is refused (two would race on
+`.claude.json`). A second *shell* is always fine — but don't launch `claude` by hand from that
+shell; the guard can't see a future one.
 
 **Hand the agent a file — the scratch dir.** Every running container has
 **`/workspace/scratch/`**, a known drop-zone for moving files in and out. The quickest way in:

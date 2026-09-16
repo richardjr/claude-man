@@ -74,6 +74,7 @@ def _parse(data: dict) -> Settings:
         terminal_program=program,
         terminal_command=command,
         terminal_tint=bool(terminal.get("tint", False)),
+        terminal_status_bar=bool(terminal.get("status_bar", True)),
         opener_command=_argv_list(opener, "command", "opener.command"),
         ui_splash=bool(ui.get("splash", True)),
         shell_persist_history=bool(shell.get("persist_history", False)),
@@ -115,6 +116,7 @@ def save(settings: Settings) -> Path:
     terminal["program"] = settings.terminal_program
     terminal["command"] = list(settings.terminal_command)
     terminal["tint"] = bool(settings.terminal_tint)
+    terminal["status_bar"] = bool(settings.terminal_status_bar)
     doc["terminal"] = terminal
     opener = tomlkit.table()
     opener["command"] = list(settings.opener_command)
@@ -196,6 +198,14 @@ def set_terminal_tint(enabled: bool) -> Settings:
     """Enable/disable the per-project OSC-11 background tint on spawned shell/claude windows. Injected
     at container create, so a change takes effect on the next ``recreate``."""
     updated = dataclasses.replace(load(), terminal_tint=bool(enabled))
+    save(updated)
+    return updated
+
+
+def set_status_bar(enabled: bool) -> Settings:
+    """Enable/disable the per-project tmux status bar on spawned claude/shell windows (issue #37).
+    Read at launch by ``tui/terminals.spawn``, so it applies to the NEXT window — no recreate."""
+    updated = dataclasses.replace(load(), terminal_status_bar=bool(enabled))
     save(updated)
     return updated
 

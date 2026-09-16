@@ -358,3 +358,102 @@ class SpawnClassifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatusBarLaunchTest(_IsolatedConfig):
+    """Issue #37: with a BarSpec the claude/bash launch execs the baked tmux launcher with the bar
+    strings as EXEC-time env; without one the argv is byte-identical to the pre-feature shape."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from claudeman import statusbar
+        self.bar = statusbar.render("demo", profile="work", session="claude")
+
+    def test_no_bar_is_byte_identical(self) -> None:
+        for prog in ("claude", "bash", "nvim"):
+            self.assertEqual(
+                terminals._inner_exec("demo", prog, keep_open=True, workdir="/workspace"),
+                terminals._inner_exec("demo", prog, keep_open=True, workdir="/workspace", bar=None),
+            )
+
+    def test_claude_execs_launcher_with_env_and_keeps_open(self) -> None:
+        argv = terminals._inner_exec("demo", "claude", keep_open=True, workdir="/workspace",
+                                     args=("--model", "claude-sonnet-5[1m]"), bar=self.bar)
+        self.assertEqual(argv[:2], ["bash", "-lc"])
+        cmd = argv[-1]
+        self.assertIn(r"printf '\033]0;claude:demo\007'", cmd)  # outer window still titled
+        self.assertIn("-e 'CLAUDE_MAN_BAR_STYLE=", cmd)
+        self.assertIn("-e 'CLAUDE_MAN_BAR_LEFT=", cmd)
+        self.assertIn("-e 'CLAUDE_MAN_BAR_RIGHT=", cmd)
+        self.assertIn("-w /workspace claude-man-demo claude-man-bar claude claude --model "
+                      "'claude-sonnet-5[1m]'; exec bash", cmd)
+        self.assertLess(cmd.index("-e 'CLAUDE_MAN_BAR"), cmd.index("claude-man-demo"))  # env before the container
+
+    def test_bash_execs_launcher_with_shell_session_no_keep_open(self) -> None:
+        cmd = terminals._inner_exec("demo", "bash", keep_open=True, workdir="", bar=self.bar)[-1]
+        self.assertIn("claude-man-demo claude-man-bar shell bash", cmd)
+        self.assertNotIn("exec bash", cmd)            # a shell exiting closes the window, as before
+        self.assertIn(r"printf '\033]0;claude:demo\007'", cmd)  # tmux swallows the in-pane OSC
+
+    def test_nvim_never_gets_a_bar(self) -> None:
+        self.assertEqual(
+            terminals._inner_exec("demo", "nvim", keep_open=True, workdir="", bar=self.bar),
+            terminals._inner_exec("demo", "nvim", keep_open=True, workdir=""),
+        )
+
+    def test_bar_env_values_are_shell_quoted(self) -> None:
+        from claudeman import statusbar
+        bar = statusbar.render("demo", model="x'y$(id)", session="claude")
+        cmd = terminals._inner_exec("demo", "claude", keep_open=True, workdir="", bar=bar)[-1]
+        import shlex
+        # Round-trip through the shell parser: the model text arrives as ONE env argv element.
+        tokens = shlex.split(cmd.split("; ", 1)[1].split("; exec bash")[0])
+        left = next(t for t in tokens if t.startswith("CLAUDE_MAN_BAR_LEFT="))
+        self.assertIn("x'y$(id)", left)
+
+    def test_probe_argvs_are_explicit_and_slug_validated(self) -> None:
+        self.assertEqual(terminals.build_bar_probe_argv("demo"),
+                         ["docker", "exec", "claude-man-demo", "sh", "-c", "command -v claude-man-bar"])
+        self.assertEqual(terminals.build_claude_session_probe_argv("demo"),
+                         ["docker", "exec", "claude-man-demo", "tmux", "has-session", "-t", "=claude"])
+        for fn in (terminals.build_bar_probe_argv, terminals.build_claude_session_probe_argv):
+            with self.assertRaises(ValidationError):
+                fn("demo; id")
+
+    def test_bar_spec_fails_open_to_slug_only(self) -> None:
+        spec = terminals.bar_spec("nosuch", "claude")   # no registry entry
+        self.assertIn(" nosuch ", spec.left)
+        self.assertIn("default", spec.left)
+
+    def test_bar_for_honours_setting_program_and_probe(self) -> None:
+        with mock.patch.object(terminals, "bar_available", lambda slug: True):
+            self.assertIsNotNone(terminals._bar_for("demo", "claude")[0])  # default ON
+            self.assertIsNotNone(terminals._bar_for("demo", "bash")[0])
+            self.assertEqual(terminals._bar_for("demo", "nvim"), (None, ""))  # silently plain
+            settings_registry.set_status_bar(False)
+            self.assertEqual(terminals._bar_for("demo", "claude"), (None, ""))  # off: silent
+            settings_registry.set_status_bar(True)
+        with mock.patch.object(terminals, "bar_available", lambda slug: False):
+            bar, note = terminals._bar_for("demo", "claude")   # stale image -> plain, WITH a notice
+            self.assertIsNone(bar)
+            self.assertEqual(note, terminals.BAR_UNAVAILABLE_NOTE)
+            self.assertIn("image build", note)
+
+    def test_spawn_handle_carries_the_note(self) -> None:
+        self.assertEqual(terminals.SpawnHandle(object(), object()).note, "")   # default: nothing to say
+        h = terminals.SpawnHandle(object(), object(), "why")
+        self.assertEqual(h.note, "why")
+
+    def test_spawn_claude_reattaches_only_to_a_bar_session(self) -> None:
+        calls: list[tuple] = []
+        with mock.patch.object(terminals, "claude_already_running", lambda slug: True), \
+             mock.patch.object(terminals, "spawn", lambda *a, **k: calls.append((a, k)) or "handle"):
+            with mock.patch.object(terminals, "claude_session_exists", lambda slug: False):
+                with self.assertRaises(RuntimeError):      # a claude OUTSIDE the bar -> refused
+                    terminals.spawn_claude("demo")
+            with mock.patch.object(terminals, "claude_session_exists", lambda slug: True):
+                self.assertEqual(terminals.spawn_claude("demo"), "handle")   # re-attach
+                settings_registry.set_status_bar(False)
+                with self.assertRaises(RuntimeError):      # bar off -> the pre-#37 guard
+                    terminals.spawn_claude("demo")
+        self.assertEqual(len(calls), 1)

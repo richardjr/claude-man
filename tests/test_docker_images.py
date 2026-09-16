@@ -149,15 +149,73 @@ class DockerMissingTest(unittest.TestCase):
         self.assertTrue(any("docker not found" in line for line in lines))
 
 
+class StalenessTest(unittest.TestCase):
+    """A child built BEFORE its parent (a base rebuilt since) is stale — pure timestamp compare."""
+
+    def test_parse_created_handles_docker_nanoseconds_and_z(self) -> None:
+        dt = images.parse_created("2026-09-16T14:12:16.123456789Z")
+        self.assertIsNotNone(dt)
+        self.assertEqual((dt.year, dt.hour, dt.microsecond), (2026, 14, 123456))
+        self.assertIsNotNone(images.parse_created("2026-09-16T14:12:16Z"))
+        self.assertIsNotNone(images.parse_created("2026-09-16T14:12:16.5+01:00"))
+        for bad in (None, "", "yesterday", "2026-99-99T00:00:00Z"):
+            self.assertIsNone(images.parse_created(bad), bad)
+
+    def test_is_stale_only_when_child_predates_parent(self) -> None:
+        older, newer = "2026-09-16T09:51:45Z", "2026-09-16T15:12:16Z"
+        self.assertTrue(images.is_stale(older, newer))     # overlay built before the new base
+        self.assertFalse(images.is_stale(newer, older))    # overlay built after -> current
+        self.assertFalse(images.is_stale(newer, newer))    # cache-hit rebuild: same instant
+        self.assertFalse(images.is_stale(None, newer))     # unknown never stales (fail-open)
+        self.assertFalse(images.is_stale(older, "garbage"))
+
+    def test_layer_stale_false_when_an_image_is_absent(self) -> None:
+        with mock.patch.object(images, "image_created", return_value=None):
+            self.assertFalse(images.layer_stale("node", "base"))
+
+
 class EnsureChainSkipsExistingTest(unittest.TestCase):
     def test_present_images_are_not_rebuilt(self) -> None:
-        # docker present, both images already built -> nothing built, ok.
+        # docker present, both images already built + current -> nothing built, ok.
         with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
              mock.patch.object(images, "image_exists", return_value=True), \
+             mock.patch.object(images, "layer_stale", return_value=False), \
              mock.patch.object(images, "build_one") as build:
             res = images.ensure_chain("node")
         self.assertTrue(res.ok)
         self.assertEqual(res.built, [])
+        build.assert_not_called()
+
+    def test_stale_child_is_rebuilt_and_cascades(self) -> None:
+        # base current, overlay built before base (stale), tools layer built before the OLD overlay:
+        # the overlay is rebuilt, and — now newer than its tools layer — the layer follows.
+        created = {"base": "2026-09-16T15:00:00Z", "node": "2026-09-16T09:00:00Z",
+                   "node-t-0123456789ab": "2026-09-16T09:30:00Z"}
+        order: list[str] = []
+
+        def build(ov, **_):
+            order.append(ov)
+            created[ov] = "2026-09-16T16:00:00Z" if ov == "node" else "2026-09-16T16:30:00Z"
+            return 0
+
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images, "image_exists", return_value=True), \
+             mock.patch.object(images, "image_created", side_effect=created.get), \
+             mock.patch.object(images, "build_one", side_effect=build):
+            res = images.ensure_chain("node-t-0123456789ab")
+        self.assertTrue(res.ok)
+        self.assertEqual(order, ["node", "node-t-0123456789ab"])   # base untouched
+        self.assertEqual(res.built, ["node", "node-t-0123456789ab"])
+
+    def test_current_chain_after_cache_hit_base_rebuild_is_left_alone(self) -> None:
+        # A cache-hit base rebuild keeps the ORIGINAL Created, so nothing downstream looks stale.
+        created = {"base": "2026-09-16T09:00:00Z", "node": "2026-09-16T09:30:00Z"}
+        with mock.patch.object(images.shutil, "which", return_value="/usr/bin/docker"), \
+             mock.patch.object(images, "image_exists", return_value=True), \
+             mock.patch.object(images, "image_created", side_effect=created.get), \
+             mock.patch.object(images, "build_one") as build:
+            res = images.ensure_chain("node")
+        self.assertTrue(res.ok)
         build.assert_not_called()
 
     def test_missing_images_built_base_first(self) -> None:
@@ -276,6 +334,7 @@ class CliImageBuildTest(unittest.TestCase):
     def test_overlay_skips_base_when_present(self) -> None:
         order: list[str] = []
         with mock.patch.object(images, "image_exists", return_value=True), \
+             mock.patch.object(images, "layer_stale", return_value=False), \
              mock.patch.object(images, "build_one",
                                side_effect=lambda ov, **_: order.append(ov) or 0):
             self._build("node")
@@ -307,12 +366,30 @@ class CliImageBuildTest(unittest.TestCase):
         with mock.patch.object(cli, "_project_image",
                                return_value=(object(), "terraform-t-0123456789ab", "")), \
              mock.patch.object(images, "image_exists", side_effect=lambda ov: ov == "base"), \
+             mock.patch.object(images, "layer_stale", return_value=False), \
              mock.patch.object(images, "build_one",
                                side_effect=lambda ov, **_: order.append(ov) or 0), \
              contextlib.redirect_stdout(io.StringIO()):
             rc = cli.cmd_image_build(args)
         self.assertEqual(rc, 0)
         self.assertEqual(order, ["terraform", "terraform-t-0123456789ab"])  # base present -> skipped
+
+    def test_tools_layer_rebuilds_a_stale_parent_overlay(self) -> None:
+        # The issue #37 landarna case: base rebuilt, overlay present but OLDER than base -> the
+        # overlay is rebuilt first, then the layer (base itself is never touched).
+        order: list[str] = []
+        args = SimpleNamespace(overlay=None, claude_version="2.1.160", dry_run=False, project="infra")
+        with mock.patch.object(cli, "_project_image",
+                               return_value=(object(), "terraform-t-0123456789ab", "")), \
+             mock.patch.object(images, "image_exists", return_value=True), \
+             mock.patch.object(images, "layer_stale",
+                               side_effect=lambda child, parent: (child, parent) == ("terraform", "base")), \
+             mock.patch.object(images, "build_one",
+                               side_effect=lambda ov, **_: order.append(ov) or 0), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_image_build(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(order, ["terraform", "terraform-t-0123456789ab"])
 
     def test_project_and_overlay_are_exclusive(self) -> None:
         args = SimpleNamespace(overlay="node", claude_version="2.1.160", dry_run=False, project="infra")

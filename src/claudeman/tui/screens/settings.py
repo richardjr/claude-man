@@ -3,8 +3,8 @@
 The "general features" surface. First section: the ssh keys claude-man auto-loads into the host agent.
 Lists each configured key with its live agent status (loaded / not loaded / missing), and manages them:
 add (via ``AddKeyScreen`` — adding also ``ssh-add``s it now), remove (config only), and load-all.
-Below it, one line per global preference (git identity, GH token, terminal, container memory cap)
-each with its edit hotkey.
+Below it, one line per global preference (git identity, GH token, terminal, status bar, container
+memory cap) each with its edit hotkey.
 
 Mirrors ``EnvMountsScreen``: a ModalScreen with its own hotkeys + a status Label, and the slow,
 shell-touching work (``ssh-add`` / ``ssh-keygen``) on a thread worker so the UI never blocks (and a
@@ -45,6 +45,7 @@ class SettingsScreen(ModalScreen[None]):
         Binding("t", "gh_token", "GH token"),
         Binding("e", "terminal", "Terminal"),
         Binding("m", "memory", "Memory"),
+        Binding("s", "status_bar", "Status bar"),
         Binding("w", "wizard", "Setup wizard"),
         Binding("escape", "close", "Close"),
     ]
@@ -71,8 +72,9 @@ class SettingsScreen(ModalScreen[None]):
             yield Label("", id="gh-token", classes="panel-title")
             yield Label("", id="terminal", classes="panel-title")
             yield Label("", id="memory", classes="panel-title")
+            yield Label("", id="status-bar", classes="panel-title")
             yield Label("a Add · x Remove · l Load all · g Git · t GH token · e Terminal · m Memory "
-                        "· w Wizard · esc Close", id="settings-status")
+                        "· s Status bar · w Wizard · esc Close", id="settings-status")
             with ItemGrid(id="buttons", min_column_width=16):
                 yield Button("Add", variant="success", id="add")
                 yield Button("Remove", variant="error", id="remove")
@@ -81,6 +83,7 @@ class SettingsScreen(ModalScreen[None]):
                 yield Button("GH", id="ghtoken")
                 yield Button("Terminal", id="term")
                 yield Button("Memory", id="memory-btn")
+                yield Button("Status bar", id="status-bar-btn")
                 yield Button("Wizard", id="wizard")
                 yield Button("Close", id="close")
 
@@ -90,12 +93,20 @@ class SettingsScreen(ModalScreen[None]):
         self._render_gh_token()
         self._render_terminal()
         self._render_memory()
+        self._render_status_bar()
         self._refresh_status()
 
     def _render_memory(self) -> None:
         s = settings_registry.load()
         self.query_one("#memory", Label).update(
             f"Container memory: {s.container_memory} hard cap, no swap · m to change (recreate to apply)"
+        )
+
+    def _render_status_bar(self) -> None:
+        s = settings_registry.load()
+        self.query_one("#status-bar", Label).update(
+            f"Status bar (top row of claude/shell windows): {'on' if s.terminal_status_bar else 'off'}"
+            " · s to toggle (applies at the next launch)"
         )
 
     def _render_terminal(self) -> None:
@@ -289,6 +300,16 @@ class SettingsScreen(ModalScreen[None]):
         self._render_memory()
         self._status(lifecycle.Result(
             True, f"container memory cap saved: {s.container_memory} — recreate a project to apply"
+        ))
+
+    @on(Button.Pressed, "#status-bar-btn")
+    def action_status_bar(self) -> None:
+        """Toggle the per-project tmux status bar (issue #37) — launch-time, so no recreate reminder."""
+        s = settings_registry.set_status_bar(not settings_registry.load().terminal_status_bar)
+        self._render_status_bar()
+        self._status(lifecycle.Result(
+            True, f"status bar {'on' if s.terminal_status_bar else 'off'} — applies to the next "
+                  "claude/shell window"
         ))
 
     @on(Button.Pressed, "#wizard")
