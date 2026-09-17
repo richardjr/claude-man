@@ -1,0 +1,49 @@
+# k9s — the terminal UI for Kubernetes (browse pods/logs/events, exec, port-forward) on top of the
+# same kubeconfig kubectl uses. Pinned release tarball from GitHub (sha256 from the release's
+# published checksums.sha256). Talks to the cluster via client-go, so it works without kubectl —
+# `requires` it anyway for the KUBECONFIG redirect + the `aws eks update-kubeconfig` flow that
+# produces the kubeconfig in the first place (EKS auth also needs `aws` on PATH: select aws-cli, or
+# run on the terraform overlay).
+# To bump: the latest tag on github.com/derailed/k9s/releases + its `checksums.sha256`
+# (`k9s_Linux_amd64.tar.gz` / `k9s_Linux_arm64.tar.gz` rows).
+description = "k9s — Kubernetes terminal UI"
+kind = "release"
+version = "0.51.0"
+install = "tar"
+requires = ["kubectl"]
+# Runtime egress hint (strict mode): the cluster API endpoint — for EKS that's `.amazonaws.com`.
+allowlist = [".amazonaws.com"]
+
+[release.amd64]
+url = "https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz"
+sha256 = "c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+members = ["k9s"]
+
+[release.arm64]
+url = "https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_arm64.tar.gz"
+sha256 = "3ee05c82e5f9198928a4e86133608ba6a2c10a2244d6a7789e820f78319d640c"
+members = ["k9s"]
+
+# Read-only-floor redirects (invariant 2): k9s keeps config.yaml + skins/plugins/aliases + the
+# per-cluster context configs (`clusters/`) + screen dumps + benchmarks under its config dir —
+# $XDG_CONFIG_HOME/k9s (~/.config, read-only) unless K9S_CONFIG_DIR is set, and with it set EVERY
+# one of those lands under it (internal/config/files.go `initK9sEnvLocs`), so the XDG data dir is
+# never touched. Context configs can carry cluster names/namespaces (nothing secret, but session
+# state), so it goes on the ephemeral, agent-owned `.cache` tmpfs. With K9S_CONFIG_DIR set, logs go
+# to a per-user dir under /tmp (`InitLogLoc` → `UserTmpDir`; the writable /tmp tmpfs — no redirect
+# needed; K9S_LOGS_DIR would override).
+[env]
+K9S_CONFIG_DIR = "/home/agent/.cache/k9s"
+
+[[smoke]]
+name = "k9s version"
+argv = ["k9s", "version", "--short"]
+expect = "Version"
+
+# CORE op under the floor: `k9s info` runs the config-dir bootstrap (mkdir -p of the config dir and
+# its skins/clusters subdirs at K9S_CONFIG_DIR) before printing where it loads from — without the
+# redirect this is the EROFS on ~/.config/k9s. Network-free (no cluster contact).
+[[smoke]]
+name = "k9s config dir bootstraps on the .cache tmpfs (read-only floor)"
+argv = ["sh", "-lc", "k9s info >/dev/null && test -d \"$K9S_CONFIG_DIR\" && echo ok"]
+expect = "ok"

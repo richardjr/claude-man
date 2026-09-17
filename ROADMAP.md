@@ -442,7 +442,7 @@ unit-pinned); `image smoke --project` gates every selected tool under `--read-on
 - [x] **10a:** `tools/library.py` (discovery/validation/`resolve` closure, lint-tested) + `tools/render.py` (Dockerfile + name + state-tier materialize) + `config.tools_image_overlay`/`tools_dockerfile_path`
 - [x] **10b:** schema/registry `tools` (+ `set_tools`), `claude-man.tools` label, `runner.build_create_argv(image=…)`, `images.build_chain` third step, `lifecycle.resolve_image`/`set_tools`/`create_project(tools=…)`, `smoke._tool_probes`
 - [x] **10c:** CLI `tools list [-v]`, `project tools add|rm|list`, `project create --tool`, `image build|smoke --project`; TUI Project… → `t` Tools (image)… (pending-selection checklist, Apply = set_tools + recreate; `tui/toolsview.py` pure model)
-- [x] **10d:** shipped registry: kubectl 1.37.0, helm 3.22.0, session-manager-plugin 1.2.835.0, postgresql-client, jq, python3, python3-yaml, uv 0.12.12
+- [x] **10d:** shipped registry: kubectl 1.37.0, helm 3.22.0, session-manager-plugin 1.2.835.0, postgresql-client, jq, python3, python3-yaml, uv 0.12.12; 2026-09-17: + aws-cli 2.36.47 (the v2 bundle via the new `install = "bundle"` kind — a zip's self-contained tree under `/opt/<name>` + symlinked bins; smoke-verified on base) + k9s 0.51.0 (requires kubectl; `K9S_CONFIG_DIR` → the .cache tmpfs)
 - [ ] **10e (follow-ups):** `image prune` for superseded `-t-` images; a "selection differs from the running container's `claude-man.tools` label → needs recreate" signal in the projects table; express the fixed overlays as registry presets (`python` = `{python3, uv}` …) so their smoke probes go data-driven
 
 ---

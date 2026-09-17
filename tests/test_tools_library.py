@@ -59,6 +59,22 @@ url = "https://get.helm.sh/helm-arm64.tar.gz"
 sha256 = "{SHA}"
 members = ["linux-arm64/helm"]
 '''
+BUNDLE_TOOL = f'''description = "aws"
+kind = "release"
+version = "2.36.47"
+install = "bundle"
+tree = "aws/dist"
+bins = ["aws", "aws_completer"]
+build_deps = ["unzip"]
+[release.amd64]
+url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.36.47.zip"
+sha256 = "{SHA}"
+[release.arm64]
+url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.47.zip"
+sha256 = "{SHA}"
+[env]
+AWS_CONFIG_FILE = "/home/agent/.cache/aws/config"
+'''
 
 
 def _mk(root: Path, name: str, text: str) -> None:
@@ -102,6 +118,32 @@ class DiscoverTest(unittest.TestCase):
             with self.assertRaises(library.LibraryError, msg=msg) as ctx:
                 library.discover(Path(t))
             self.assertIn(msg, str(ctx.exception))
+
+    def test_parses_bundle(self) -> None:
+        _mk(self.root, "aws-cli", BUNDLE_TOOL)
+        a = library.discover(self.root)["aws-cli"]
+        self.assertEqual((a.kind, a.install, a.version), ("release", "bundle", "2.36.47"))
+        self.assertEqual(a.tree, "aws/dist")
+        self.assertEqual(a.bins, ("aws", "aws_completer"))
+        self.assertEqual(a.build_deps, ("unzip",))
+        self.assertEqual(a.release["amd64"].members, ())
+        self.assertEqual(a.summary, "release 2.36.47")
+
+    def test_bundle_validation(self) -> None:
+        self._bad("x", BUNDLE_TOOL.replace('tree = "aws/dist"\n', ""), "needs a valid archive `tree`")
+        self._bad("x", BUNDLE_TOOL.replace('tree = "aws/dist"', 'tree = "../etc"'), "needs a valid archive `tree`")
+        self._bad("x", BUNDLE_TOOL.replace('tree = "aws/dist"', 'tree = "/aws/dist"'), "needs a valid archive `tree`")
+        self._bad("x", BUNDLE_TOOL.replace('bins = ["aws", "aws_completer"]\n', ""),
+                  "needs `bins`")
+        self._bad("x", BUNDLE_TOOL.replace('"aws_completer"', '"../../bin/sh"'), "bad bundle bin")
+        self._bad("x", BUNDLE_TOOL.replace('"aws_completer"', '"$(id)"'), "bad bundle bin")
+        # a bundle is a zip: the builder needs unzip, purged after (build_deps)
+        self._bad("x", BUNDLE_TOOL.replace('build_deps = ["unzip"]\n', ""), 'build_deps = ["unzip"]')
+        # tree/bins are bundle-only; members are tar-only
+        self._bad("x", BIN_TOOL.replace('bin = "kubectl"\n', 'bin = "kubectl"\ntree = "a"\n'),
+                  "only valid for install")
+        self._bad("x", BUNDLE_TOOL.replace("sha256 = ", 'members = ["a"]\nsha256 = '), "only valid for install")
+        self._bad("x", _apt('tree = "a"\n'), "only valid for kind")
 
     def test_validation_rejects_malformed_entries(self) -> None:
         self._bad("Bad Name", APT_TOOL, "invalid tool name")
@@ -180,27 +222,37 @@ class RenderTest(unittest.TestCase):
         _mk(self.root, "helm", TAR_TOOL)
         _mk(self.root, "ssm", BIN_TOOL.replace('install = "binary"\nbin = "kubectl"\n', 'install = "deb"\n')
             .replace('description = "kubectl"', 'description = "ssm"'))
+        _mk(self.root, "aws-cli", BUNDLE_TOOL)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     def test_dockerfile_shape(self) -> None:
-        name, text, tools = render.plan("terraform", ("kubectl", "helm", "jq", "ssm"), root=self.root)
-        self.assertEqual([t.name for t in tools], ["helm", "jq", "kubectl", "ssm"])
+        name, text, tools = render.plan("terraform", ("kubectl", "helm", "jq", "ssm", "aws-cli"),
+                                        root=self.root)
+        self.assertEqual([t.name for t in tools], ["aws-cli", "helm", "jq", "kubectl", "ssm"])
         self.assertTrue(text.startswith("# claude-man tools layer"))
         self.assertIn("FROM claude-man:terraform\n", text)
-        self.assertIn('ENV KUBECONFIG="/home/agent/.cache/kube/config"', text)
+        self.assertIn('    KUBECONFIG="/home/agent/.cache/kube/config"', text)
         # apt packages + build-only deps in ONE install, deps purged at the end.
         self.assertIn("apt-get install -y --no-install-recommends jq unzip;", text)
         self.assertIn("apt-get purge -y unzip;", text)
         # every release artefact is sha256-verified before install; arch-aware.
-        self.assertEqual(text.count("sha256sum -c -"), 3)
+        self.assertEqual(text.count("sha256sum -c -"), 4)
         self.assertIn('arch="$(dpkg --print-architecture)"', text)
         self.assertIn("install -m 0755 /tmp/claude-man-tool-kubectl.dl /usr/local/bin/kubectl", text)
         self.assertIn("members='linux-amd64/helm'", text)
         self.assertIn('install -m 0755 "/tmp/claude-man-tool-helm.x/$m"', text)
         self.assertIn("apt-get install -y --no-install-recommends /tmp/claude-man-tool-ssm.deb", text)
-        self.assertIn('LABEL claude-man.overlay="terraform" claude-man.tools="helm,jq,kubectl,ssm"', text)
+        # bundle: unzip the verified zip, the tree lands whole under /opt/<name>, bins symlinked by basename
+        self.assertIn("unzip -q /tmp/claude-man-tool-aws-cli.dl -d /tmp/claude-man-tool-aws-cli.x", text)
+        self.assertIn('cp -a "/tmp/claude-man-tool-aws-cli.x/aws/dist" /opt/aws-cli', text)
+        # bins are TREE-relative: a missing one fails the build (test -x) instead of dangling
+        self.assertIn('test -x "/opt/aws-cli/aws"; ln -sfn "/opt/aws-cli/aws" "/usr/local/bin/aws"', text)
+        self.assertIn('ln -sfn "/opt/aws-cli/aws_completer" "/usr/local/bin/aws_completer"', text)
+        self.assertIn('ENV AWS_CONFIG_FILE="/home/agent/.cache/aws/config" \\', text)
+        self.assertIn('LABEL claude-man.overlay="terraform" claude-man.tools="aws-cli,helm,jq,kubectl,ssm"',
+                      text)
         self.assertTrue(text.rstrip().endswith("USER agent"))
         # content-addressed name: overlay + sep + 12 hex of the text
         self.assertTrue(name.startswith("terraform" + config.TOOLS_IMAGE_SEP))
@@ -279,6 +331,19 @@ class ShippedLibraryLintTest(unittest.TestCase):
         self.assertIn("KUBECONFIG", lib["kubectl"].env)
         self.assertIn("HELM_CONFIG_HOME", lib["helm"].env)
         self.assertEqual(lib["python3-yaml"].requires, ("python3",))
+        # aws-cli: the bundle kind; its config/creds redirects match the terraform overlay's ENV values
+        # (the two coexist on that overlay — merged_env would flag a mismatch only across tools, so pin
+        # the overlay parity here).
+        aws = lib["aws-cli"]
+        self.assertEqual(aws.install, "bundle")
+        self.assertEqual(aws.env, {"AWS_CONFIG_FILE": "/home/agent/.cache/aws/config",
+                                   "AWS_SHARED_CREDENTIALS_FILE": "/home/agent/.cache/aws/credentials"})
+        overlay = (Path(__file__).resolve().parents[1] / "images/overlays/terraform.Dockerfile").read_text()
+        for key, value in aws.env.items():
+            self.assertIn(f"{key}={value}", overlay)
+        # k9s rides kubectl's KUBECONFIG redirect and keeps its own state off the read-only ~/.config
+        self.assertEqual(lib["k9s"].requires, ("kubectl",))
+        self.assertIn("K9S_CONFIG_DIR", lib["k9s"].env)
 
 
 if __name__ == "__main__":

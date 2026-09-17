@@ -6,7 +6,10 @@ directory carrying a ``tool.toml`` that says HOW it is installed under the harde
 * ``kind = "apt"`` — Debian (trixie) packages, or
 * ``kind = "release"`` — a pinned upstream artefact per arch (``[release.amd64]`` /
   ``[release.arm64]``: ``url`` + ``sha256``, verified at build) placed as a bare ``binary``, a
-  ``tar`` (listed ``members`` installed to ``/usr/local/bin`` by basename) or a ``deb``;
+  ``tar`` (listed ``members`` installed to ``/usr/local/bin`` by basename), a ``deb``, or a
+  ``bundle`` (a zip carrying one self-contained directory ``tree`` — an embedded-runtime
+  distribution like the AWS CLI v2's ``aws/dist`` — installed whole to ``/opt/<name>`` with its
+  ``bins`` symlinked into ``/usr/local/bin``; needs ``unzip`` in ``build_deps``);
 
 plus the "custom config" a tool needs to actually WORK under ``--read-only`` (invariant 2):
 ``[env]`` redirects (image ENV, so a HOME-dotdir write lands on a writable surface), ``[[smoke]]``
@@ -29,7 +32,7 @@ from .. import config
 
 TOOL_META = "tool.toml"
 KINDS = ("apt", "release")
-INSTALLS = ("binary", "tar", "deb")
+INSTALLS = ("binary", "tar", "deb", "bundle")
 ARCHES = ("amd64", "arm64")   # dpkg --print-architecture names; both are always required
 
 # Same shape as project slugs — tool names become registry entries + image-name components.
@@ -75,6 +78,8 @@ class Tool:
     version: str = ""                     # release: the pinned upstream version
     install: str = ""                     # release: INSTALLS
     bin: str = ""                         # release/binary: the installed name under /usr/local/bin
+    tree: str = ""                        # release/bundle: the archive dir installed whole to /opt/<name>
+    bins: tuple[str, ...] = ()            # release/bundle: tree-relative executables symlinked into /usr/local/bin
     release: dict[str, ReleaseArch] = field(default_factory=dict)  # release: per-ARCHES artefact
     build_deps: tuple[str, ...] = ()      # apt packages needed only at build (purged after)
     requires: tuple[str, ...] = ()        # other tools pulled into the layer automatically
@@ -156,11 +161,11 @@ def _load_tool(tool_dir: Path) -> Tool:
             raise LibraryError(f"{name}: requires itself")
     allowlist = _str_list(meta, "allowlist", name)
 
-    version, install, bin_name, release = "", "", "", {}
+    version, install, bin_name, tree, bins, release = "", "", "", "", (), {}
     if kind == "apt":
         if not packages:
             raise LibraryError(f"{name}: an apt tool must list packages")
-        for key in ("version", "install", "bin", "release"):
+        for key in ("version", "install", "bin", "tree", "bins", "release"):
             if key in meta:
                 raise LibraryError(f"{name}: {key!r} is only valid for kind = \"release\"")
     else:
@@ -178,6 +183,20 @@ def _load_tool(tool_dir: Path) -> Tool:
                 raise LibraryError(f"{name}: install = \"binary\" needs a valid `bin` name")
         elif bin_name:
             raise LibraryError(f"{name}: `bin` is only valid for install = \"binary\"")
+        tree = str(meta.get("tree", "") or "")
+        bins = _str_list(meta, "bins", name)
+        if install == "bundle":
+            if not _is_safe_member(tree):
+                raise LibraryError(f"{name}: install = \"bundle\" needs a valid archive `tree` dir")
+            if not bins:
+                raise LibraryError(f"{name}: install = \"bundle\" needs `bins` (tree-relative executables)")
+            for b in bins:
+                if not _is_safe_member(b):
+                    raise LibraryError(f"{name}: bad bundle bin {b!r}")
+            if "unzip" not in build_deps:
+                raise LibraryError(f"{name}: install = \"bundle\" (a zip) needs build_deps = [\"unzip\"]")
+        elif tree or bins:
+            raise LibraryError(f"{name}: `tree`/`bins` are only valid for install = \"bundle\"")
         release = _parse_release(name, meta.get("release"), install)
 
     env: dict[str, str] = {}
@@ -205,10 +224,18 @@ def _load_tool(tool_dir: Path) -> Tool:
                                timeout=timeout))
 
     return Tool(name=name, description=description, kind=kind, path=tool_dir, packages=packages,
-                version=version, install=install, bin=bin_name, release=release,
+                version=version, install=install, bin=bin_name, tree=tree, bins=bins, release=release,
                 build_deps=build_deps, requires=requires,
                 note=str(meta.get("note", "") or "").strip(), allowlist=allowlist, env=env,
                 smoke=tuple(smoke))
+
+
+def _is_safe_member(m: str) -> bool:
+    """An archive-relative path that can't escape and is shell-safe (quoted into a generated
+    ``RUN``): non-empty, relative, no ``..`` component, no metacharacters, a bin-shaped last part."""
+    parts = m.split("/")
+    return bool(m) and not m.startswith("/") and ".." not in parts \
+        and not any(c in m for c in " '\"\\$`\n") and bool(_BIN_RE.match(parts[-1]))
 
 
 def _parse_release(name: str, raw, install: str) -> dict[str, ReleaseArch]:
@@ -231,9 +258,7 @@ def _parse_release(name: str, raw, install: str) -> dict[str, ReleaseArch]:
             if not members:
                 raise LibraryError(f"{name}: release.{arch} needs `members` for install = \"tar\"")
             for m in members:
-                parts = m.split("/")
-                if (not m or m.startswith("/") or ".." in parts or any(c in m for c in " '\"\\$`\n")
-                        or not _BIN_RE.match(parts[-1])):
+                if not _is_safe_member(m):
                     raise LibraryError(f"{name}: release.{arch}: bad tar member {m!r}")
         elif members:
             raise LibraryError(f"{name}: release.{arch}: `members` is only valid for install = \"tar\"")
