@@ -148,7 +148,8 @@ profile · auth · image · model · egress, and the pane cwd's git branch + a c
   i.e. tmux. Baked from Trixie apt.
 - **Pieces:** `images/bash/tmux.conf` → `/etc/claude-man/tmux.conf` (top bar, `escape-time 0`,
   focus events, `extended-keys` so shift+enter reaches claude, `allow-passthrough`, mouse scrollback,
-  `c` unbound — no new-window affordance, invariant 6) loaded ONLY via `-f` by
+  keyboard scrollback on **Shift+PgUp / Alt+PgUp** (below), `c` unbound — no new-window affordance,
+  invariant 6) loaded ONLY via `-f` by
   `images/bash/claude-man-bar` → `/usr/local/bin/claude-man-bar` (`claude-man-bar <session>
   <program…>`). The host launcher (`tui/terminals.py`) execs it instead of the bare program with the
   three bar strings — rendered by the pure `statusbar.py`, every operator value `##`-escaped so no
@@ -160,6 +161,18 @@ profile · auth · image · model · egress, and the pane cwd's git branch + a c
   OUTSIDE that session); shells get a unique `shell-<pid>` session each so two never mirror. The pane
   runs only the program, so when it exits the session ends and the host keep-open shell takes over
   exactly as before. `nvim` stays plain (its own statusline; tmux/nvim key overlap).
+- **Scrollback:** tmux keeps the pane's history itself and draws the pane on the emulator's
+  *alternate* screen, so the terminal's own Shift+PgUp scrolls an empty outer buffer once the bar is
+  on. The conf reproduces it: **Shift+PgUp** enters tmux copy mode one page up (no prefix),
+  Shift+PgUp/PgDn keep paging, and paging past the bottom exits back to the live pane (`copy-mode
+  -e`) — no `q`. **Alt+PgUp/PgDn** is the same binding for emulators that consume Shift+PgUp
+  themselves instead of forwarding it: ghostty binds `shift+page_up=scroll_page_up` unconditionally
+  (verified in its 1.3.1 source — it scrolls even on the alternate screen, where there is nothing to
+  scroll), so under ghostty use Alt+PgUp, or add `keybind = shift+page_up=unbind` (and `page_down`)
+  to the host ghostty config to hand Shift+PgUp to tmux — at the cost of the host's own Shift+PgUp
+  scrollback in plain windows. alacritty (`~Alt` mode) and kitty forward it as-is. The mouse wheel
+  scrolls regardless. Plain PgUp/PgDn stay the pane's (claude, nvim, less). Bound in both copy-mode
+  key tables since `mode-keys` follows `$EDITOR`.
 - **Floor:** tmux's only write is its socket under the `/tmp` tmpfs; the conf is read-only; no runner
   change — the hardened floor is byte-identical (invariant 2). The image-smoke gate starts a server
   under `--read-only` and checks the `tmux-256color` terminfo the panes see. The launcher falls back
