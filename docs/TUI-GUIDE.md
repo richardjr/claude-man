@@ -201,7 +201,9 @@ session, so it is visible on tiling desktops with no window decorations, where t
 and the optional background tint never show. Default on; toggle it in Settings (`,` → `s`) —
 applies to the next window, no recreate. The image needs to be built with the launcher: after
 `image build base`, the next start/recreate of a project rebuilds its overlay on the new base
-automatically; until then the window opens plainly and a toast says why. While the bar is on: the mouse wheel scrolls history, hold **Shift** to
+automatically; until then the window opens plainly and a toast says why. While the bar is on: the
+mouse wheel scrolls history, as does **Shift+PgUp** (or **Alt+PgUp** under ghostty, which keeps
+Shift+PgUp for itself) — Shift/Alt+PgDn pages back and drops out at the bottom; hold **Shift** to
 select text with the mouse, and `Ctrl-b d` detaches the window without stopping what's in it.
 
 **One `claude` per container.** A second `c` on the same project **re-attaches** to the running
