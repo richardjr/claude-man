@@ -78,6 +78,7 @@ def _release_run(tool: library.Tool) -> str:
     sha256, install by kind, clean up. ``set -eux`` + ``sha256sum -c`` make a checksum mismatch or a
     missing archive member a hard build failure."""
     dl = f"{_TMP}-{tool.name}" + (".deb" if tool.install == "deb" else ".dl")
+    x = f"{_TMP}-{tool.name}.x"
     arms = []
     for arch in library.ARCHES:
         rel = tool.release[arch]
@@ -97,11 +98,22 @@ def _release_run(tool: library.Tool) -> str:
     if tool.install == "binary":
         lines.append(f"    install -m 0755 {dl} /usr/local/bin/{tool.bin}; \\\n")
     elif tool.install == "tar":
-        x = f"{_TMP}-{tool.name}.x"
         lines += [f"    mkdir -p {x}; \\\n",
                   f"    tar -xzf {dl} -C {x}; \\\n",
                   '    for m in $members; do '
                   f'install -m 0755 "{x}/$m" "/usr/local/bin/$(basename "$m")"; done; \\\n',
+                  f"    rm -rf {x}; \\\n"]
+    elif tool.install == "bundle":
+        # The self-contained tree lands whole under /opt (its executables find their sibling libs /
+        # embedded runtime relative to their real path), symlinked into /usr/local/bin by basename —
+        # the same layout the AWS CLI's own `install` script produces, minus the script.
+        opt = f"/opt/{tool.name}"
+        lines += [f"    mkdir -p {x}; \\\n",
+                  f"    unzip -q {dl} -d {x}; \\\n",
+                  f"    rm -rf {opt}; \\\n",
+                  f'    cp -a "{x}/{tool.tree}" {opt}; \\\n',
+                  *(f'    test -x "{opt}/{b}"; ln -sfn "{opt}/{b}" "/usr/local/bin/{b.rsplit("/", 1)[-1]}"; \\\n'
+                    for b in tool.bins),
                   f"    rm -rf {x}; \\\n"]
     else:  # deb — apt resolves its Depends; lists fetched + cleaned within the same layer
         lines += ["    apt-get update; \\\n",

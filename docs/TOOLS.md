@@ -47,8 +47,10 @@ packages = ["postgresql-client"]
 
 # kind = "release": a pinned upstream artefact per arch, sha256-verified at build
 version = "1.37.0"
-install = "binary"                            # "binary" (bin = …) | "tar" (members = […]) | "deb"
+install = "binary"                            # "binary" (bin = …) | "tar" (members = […]) | "deb" | "bundle" (tree + bins)
 bin = "kubectl"
+# tree = "aws/dist"                           # bundle: a zip's self-contained dir, installed whole to /opt/<name>
+# bins = ["aws", "aws_completer"]             # bundle: TREE-relative executables symlinked into /usr/local/bin (build fails if missing)
 [release.amd64]
 url = "https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl"
 sha256 = "…64 hex…"
@@ -58,8 +60,8 @@ url = "…"
 sha256 = "…"
 
 requires = ["python3"]     # other registry tools pulled into the layer automatically
-build_deps = ["unzip"]     # apt packages needed only at build (purged after)
-note = "needs the AWS CLI — pair with the terraform overlay"   # free-text caveat shown in listings
+build_deps = ["unzip"]     # apt packages needed only at build (purged after; required for a bundle)
+note = "needs the AWS CLI — select aws-cli, or run on the terraform overlay"   # free-text caveat shown in listings
 allowlist = [".amazonaws.com"]   # runtime hosts a LOCKED project should allowlist (hint only)
 
 [env]                      # image ENV — the read-only-floor redirects (overlay-scoped, like the
@@ -74,7 +76,8 @@ timeout = 15
 
 Validation (`tools/library.py`, lint-tested against the shipped tree): names are slug-shaped;
 both arches are required; URLs are plain https with no shell metacharacters (they are quoted into
-a generated `RUN`); sha256 is 64 hex; tar members can't escape (`..`/absolute); `[env]` can't touch
+a generated `RUN`); sha256 is 64 hex; tar members and a bundle's `tree`/`bins` can't escape (`..`/absolute) and carry
+no shell metacharacters; a bundle must list `unzip` in `build_deps`; `[env]` can't touch
 `HOME`/`PATH`/`USER`/the claude config/XDG floor keys or any `FORBIDDEN_ENV_NAMES` (invariant 1);
 `requires` must resolve and be acyclic; two selected tools setting one env key differently is an
 error (a silent last-wins would break a floor redirect).
@@ -87,6 +90,8 @@ error (a silent last-wins would break a floor redirect).
 | helm | `~/.config/helm` (repos + `registry login` creds), `~/.local/share/helm` (plugins), `~/.cache/helm` (repo indexes, tens of MB) | `HELM_CONFIG_HOME` → tmpfs; `HELM_DATA_HOME`, `HELM_CACHE_HOME` → `/workspace/.helm` (disk-backed, like the yarn/uv caches) |
 | psql | `~/.psql_history`, `~/.pgpass` | `PSQL_HISTORY`, `PGPASSFILE` → tmpfs |
 | session-manager-plugin | nothing (stateless) | — |
+| aws-cli | `~/.aws/config`, `~/.aws/credentials` (credentials) | `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` → tmpfs — the terraform overlay's exact values, so the two coexist; env-var creds via a `kind="env"` env-mount preferred. No redirect exists for the STS role cache / SSO cache (`~/.aws/cli`, `~/.aws/sso`), so `aws sso login` / role-caching are unsupported |
+| k9s | `~/.config/k9s` (config, skins, per-context configs, screen dumps, benchmarks) | `K9S_CONFIG_DIR` → tmpfs (with it set, k9s puts every one of those under it; logs go to the `/tmp` tmpfs). Rides kubectl's `KUBECONFIG` via `requires` |
 | uv | caches, interpreters, tool venvs | already redirected by the baked `UV_*` env |
 | jq, python3, python3-yaml | nothing | — |
 
@@ -129,7 +134,12 @@ sidecar, so build URLs need no allowlist.
 1. `library/tools/<name>/tool.toml` — pin the version, resolve the per-arch sha256 from the
    vendor's published checksum (or compute it from the downloaded artefact and say so in the
    header comment), write the `[env]` redirects, and at least one `[[smoke]]` probe that exercises
-   a real write path.
+   a real write path. Pick the install kind by the artefact's shape: a bare executable → `binary`;
+   a tarball of executables → `tar`; a Debian package → `deb`; a zip carrying a self-contained
+   directory (an embedded runtime + its libs, like the AWS CLI v2 bundle) → `bundle` — the tree
+   lands whole under `/opt/<name>` and its `bins` are symlinked into `/usr/local/bin`, so the
+   executables still find their sibling files (never `tar`/`unzip` single members out of such a
+   tree).
 2. `uv run python -m unittest tests.test_tools_library` — the lint.
 3. Build + smoke it on a project (or a throwaway selection) and confirm no `EROFS`/`Permission
    denied` marker — the smoke fails any probe whose output carries one.

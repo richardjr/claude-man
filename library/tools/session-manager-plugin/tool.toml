@@ -9,7 +9,7 @@ description = "AWS Session Manager plugin (aws ssm start-session / port-forward 
 kind = "release"
 version = "1.2.835.0"
 install = "deb"
-note = "needs the AWS CLI — pair with the terraform overlay"
+note = "needs the AWS CLI — select aws-cli, or run on the terraform overlay"
 # Runtime egress hint (strict mode): ssm/ssmmessages endpoints live under .amazonaws.com.
 allowlist = [".amazonaws.com"]
 

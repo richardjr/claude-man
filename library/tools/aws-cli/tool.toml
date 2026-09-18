@@ -1,0 +1,51 @@
+# AWS CLI v2 — ad-hoc AWS ops (`aws eks update-kubeconfig`, ECR login, S3/EC2/RDS/SSM) on ANY
+# overlay. The pinned self-contained bundle from awscli.amazonaws.com (its own embedded Python — no
+# system Python dep), the same artefact the terraform overlay bakes; the `install = "bundle"` kind
+# puts its `aws/dist` tree whole under /opt/aws-cli with `aws`/`aws_completer` symlinked into
+# /usr/local/bin — the layout the bundle's own `install` script produces, minus the script. AWS
+# publishes only a GPG .sig (no checksum file): the sha256s below were computed from the downloaded
+# artefacts at pin time — re-verify on bump.
+# To bump: the latest tag on github.com/aws/aws-cli (v2 line), download
+# `https://awscli.amazonaws.com/awscli-exe-linux-<x86_64|aarch64>-<v>.zip`, `sha256sum` each.
+description = "AWS CLI v2 (aws) — self-contained bundle"
+kind = "release"
+version = "2.36.47"
+install = "bundle"
+tree = "aws/dist"
+bins = ["aws", "aws_completer"]
+build_deps = ["unzip"]
+note = "already baked in the terraform overlay — selecting it there just pins this version"
+# Runtime egress hint (strict mode): every AWS service endpoint lives under .amazonaws.com.
+allowlist = [".amazonaws.com"]
+
+[release.amd64]
+url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.36.47.zip"
+sha256 = "44ab93f1c6e90e0a34dfe5da6b798d99f2f6b41825e97022b3d409d93a65c615"
+
+[release.arm64]
+url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.47.zip"
+sha256 = "118ef53b6f5c652471fd299af01c058901c1a53db69c6b71a7bf3ebd93590969"
+
+# Read-only-floor redirects (invariant 2): the CLI's config + credentials default to ~/.aws on the
+# read-only HOME. Both go on the ephemeral, agent-owned `.cache` tmpfs (so `aws configure` doesn't
+# EROFS) — deliberately OFF the /workspace checkout so a credentials file never lands in a repo.
+# Identical values to the terraform overlay's, so the two coexist. PREFERRED: env-var creds via a
+# `kind="env"` env-mount (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN / AWS_REGION)
+# — no file write at all. The STS assume-role cache (~/.aws/cli/cache) and SSO cache
+# (~/.aws/sso/cache) have no redirect env and EROFS under the floor: role-caching / `aws sso login`
+# are unsupported in-container — pass already-resolved credentials instead.
+[env]
+AWS_CONFIG_FILE = "/home/agent/.cache/aws/config"
+AWS_SHARED_CREDENTIALS_FILE = "/home/agent/.cache/aws/credentials"
+
+[[smoke]]
+name = "aws --version"
+argv = ["aws", "--version"]
+expect = "aws-cli/2."
+
+# CORE op under the floor: `aws configure set` WRITES the config file at AWS_CONFIG_FILE (the CLI
+# mkdir -p's the parent). Without the redirect this is the EROFS on ~/.aws/config.
+[[smoke]]
+name = "aws configure writes to the .cache tmpfs (read-only floor)"
+argv = ["sh", "-lc", "aws configure set region eu-west-1 && test -f \"$AWS_CONFIG_FILE\" && echo ok"]
+expect = "ok"
