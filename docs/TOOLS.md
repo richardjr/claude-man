@@ -78,7 +78,8 @@ Validation (`tools/library.py`, lint-tested against the shipped tree): names are
 both arches are required; URLs are plain https with no shell metacharacters (they are quoted into
 a generated `RUN`); sha256 is 64 hex; tar members and a bundle's `tree`/`bins` can't escape (`..`/absolute) and carry
 no shell metacharacters; a bundle must list `unzip` in `build_deps`; `[env]` can't touch
-`HOME`/`PATH`/`USER`/the claude config/XDG floor keys or any `FORBIDDEN_ENV_NAMES` (invariant 1);
+`HOME`/`PATH`/`USER`/the claude config/XDG floor keys or any `FORBIDDEN_ENV_NAMES` (invariant 1),
+and its values are single-line strings (empty is allowed — set-but-empty, e.g. `AWS_PAGER = ""`);
 `requires` must resolve and be acyclic; two selected tools setting one env key differently is an
 error (a silent last-wins would break a floor redirect).
 
@@ -90,7 +91,7 @@ error (a silent last-wins would break a floor redirect).
 | helm | `~/.config/helm` (repos + `registry login` creds), `~/.local/share/helm` (plugins), `~/.cache/helm` (repo indexes, tens of MB) | `HELM_CONFIG_HOME` → tmpfs; `HELM_DATA_HOME`, `HELM_CACHE_HOME` → `/workspace/.helm` (disk-backed, like the yarn/uv caches) |
 | psql | `~/.psql_history`, `~/.pgpass` | `PSQL_HISTORY`, `PGPASSFILE` → tmpfs |
 | session-manager-plugin | nothing (stateless) | — |
-| aws-cli | `~/.aws/config`, `~/.aws/credentials` (credentials) | `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` → tmpfs — the terraform overlay's exact values, so the two coexist; env-var creds via a `kind="env"` env-mount preferred. No redirect exists for the STS role cache / SSO cache (`~/.aws/cli`, `~/.aws/sso`), so `aws sso login` / role-caching are unsupported |
+| aws-cli | `~/.aws/config`, `~/.aws/credentials` (credentials) | `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` → tmpfs — the terraform overlay's exact values, so the two coexist; env-var creds via a `kind="env"` env-mount preferred. No redirect exists for the STS role cache / SSO cache (`~/.aws/cli`, `~/.aws/sso`), so `aws sso login` / role-caching are unsupported. Plus `AWS_PAGER=""` (issue #41): on a TTY the CLI pages through `less`, which the image doesn't ship — empty disables the pager (pipe to `bat` for long output) |
 | k9s | `~/.config/k9s` (config, skins, per-context configs, screen dumps, benchmarks) | `K9S_CONFIG_DIR` → tmpfs (with it set, k9s puts every one of those under it; logs go to the `/tmp` tmpfs). Rides kubectl's `KUBECONFIG` via `requires` |
 | uv | caches, interpreters, tool venvs | already redirected by the baked `UV_*` env |
 | jq, python3, python3-yaml | nothing | — |

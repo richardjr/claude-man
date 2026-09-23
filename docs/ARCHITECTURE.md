@@ -154,7 +154,8 @@ package managers in one image, for a node project that also needs python/pip; pr
 in a `.venv` under `/workspace`, not the read-only rootfs), and `terraform` (the infra
 toolchain — pinned `terraform` + `packer` + the AWS CLI v2 for the `infrastructure/` repo; working
 state writes ride the `/workspace` bind and `CHECKPOINT_DISABLE`/`PACKER_*`-dir/`AWS_CONFIG_FILE` +
-`AWS_SHARED_CREDENTIALS_FILE` redirects keep tool writes off the read-only HOME — the AWS config/creds
+`AWS_SHARED_CREDENTIALS_FILE` redirects keep tool writes off the read-only HOME (plus `AWS_PAGER=""`,
+since the image ships no `less` for the CLI's TTY pager — issue #41) — the AWS config/creds
 files land on the ephemeral `.cache` tmpfs, off the `/workspace` git checkout, so a creds file never
 reaches a repo; the preferred way to pass AWS creds is env vars via a `kind="env"` env-mount. A
 *locked* terraform project must allowlist `registry.terraform.io` + `releases.hashicorp.com`
