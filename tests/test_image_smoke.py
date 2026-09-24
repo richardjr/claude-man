@@ -59,6 +59,18 @@ class BaseProbesTest(unittest.TestCase):
         self.assertTrue(any("LSP servers" in n for n in names), names)
         self.assertTrue(any("treesitter" in n for n in names), names)
 
+    def test_tmpdir_and_tmux_socket_gated(self) -> None:
+        # issue #42: TMPDIR must land on the /workspace bind and the status bar's tmux socket must
+        # stay on the /tmp tmpfs (TMUX_TMPDIR) — both required probes, so a regression fails the gate.
+        from claudeman.docker.smoke import _base_probes
+        probes = {p.name: p for p in _base_probes()}
+        tmp = probes["TMPDIR on the /workspace bind"]
+        self.assertTrue(tmp.required)
+        self.assertIn("/workspace/*", " ".join(tmp.argv))
+        bar = next(p for n, p in probes.items() if n.startswith("status bar"))
+        self.assertTrue(bar.required)
+        self.assertIn("sock=/tmp/tmux-", bar.expect)
+
 
 class OverlayProbesTest(unittest.TestCase):
     """Overlay-specific probes must exercise the overlay's tools' CORE ops under the floor."""

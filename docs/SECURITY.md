@@ -30,7 +30,9 @@ What crosses each way, and what must never cross:
 
 ### Container hardening (defence against a compromised agent/project)
 - `--read-only` rootfs; only `/workspace`, `/home/agent/.claude` (persistent binds), and
-  `/tmp` + `/home/agent/.cache` (tmpfs) are writable. Plus, only when the operator configures them:
+  `/tmp` + `/home/agent/.cache` (tmpfs) are writable (the container's `TMPDIR` is redirected onto
+  `/workspace/.tmp` — an env redirect onto an existing surface, not a new one; issue #42). Plus, only
+  when the operator configures them:
   a `0700` `/home/agent/.ssh` tmpfs (projects with an `ssh` env-mount), the opt-in persistent
   shell-history bind (`config shell-history on`), and any `file` env-mount added with `--rw` — all
   rendered **additively**, never as changes to the hardening flags, so the default floor is

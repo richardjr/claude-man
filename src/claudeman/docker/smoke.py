@@ -69,6 +69,15 @@ def _base_probes() -> list[Probe]:
         # and node/corepack mkdir ~/.cache/node) — a root:root 755 tmpfs fails this with EACCES.
         Probe("writable .cache tmpfs", ["sh", "-lc", "mkdir -p /home/agent/.cache/node && echo ok"],
               required=True, expect="ok"),
+        # TMPDIR (issue #42) must point INTO the /workspace bind (not the 512m /tmp tmpfs a heavy
+        # `yarn install` overflows) and a temp file must actually land there. The smoke workspace is a
+        # bare tempdir (lifecycle isn't involved), so the probe creates the dir the way `up` does.
+        Probe("TMPDIR on the /workspace bind",
+              ["sh", "-lc",
+               f'case "$TMPDIR" in {config.CONTAINER_WORKSPACE}/*) ;; *) echo "TMPDIR=$TMPDIR"; exit 1;; esac; '
+               'mkdir -p "$TMPDIR" && f="$(mktemp)" && case "$f" in "$TMPDIR"/*) rm -f "$f"; echo ok;; '
+               '*) echo "mktemp=$f"; exit 1;; esac'],
+              required=True, expect="ok"),
         # gh must be installed + runnable as the agent (Debian has no `gh` package — it's the upstream .deb).
         Probe("gh present", ["gh", "--version"], required=True, expect="gh version"),
         # The curated forge host keys (issue #4, fix B) must be baked as OpenSSH's global known_hosts,
@@ -127,16 +136,18 @@ def _base_probes() -> list[Probe]:
               ["sh", "-lc", "command -v eza && command -v zoxide && command -v fzf && command -v bat"],
               required=True, expect="/usr/local/bin/bat"),
         # Status bar (issue #37): the baked tmux launcher + conf must start a server under the read-only
-        # floor (its socket is the only write, on the /tmp tmpfs), pin the bar to the TOP row, and the
-        # `tmux-256color` terminfo the panes see must exist. `-L` isolates the smoke server; the pane
-        # runs a one-shot so the server exits on its own (kill-server is belt-and-braces).
+        # floor (its socket is the only write, on the /tmp tmpfs — TMUX_TMPDIR pins it there now that
+        # TMPDIR points at the /workspace bind, issue #42; a socket on a virtiofs bind is unreliable),
+        # pin the bar to the TOP row, and the `tmux-256color` terminfo the panes see must exist. `-L`
+        # isolates the smoke server; the pane runs a one-shot so the server exits on its own
+        # (kill-server is belt-and-braces).
         Probe("status bar (tmux conf + terminfo, read-only)",
               ["sh", "-lc",
                "command -v claude-man-bar && infocmp tmux-256color >/dev/null && "
                "tmux -L smoke -f /etc/claude-man/tmux.conf new-session -d -s smoke 'sleep 5' && "
-               "tmux -L smoke display -p 'bar=#{status-position}'; rc=$?; "
+               "tmux -L smoke display -p 'bar=#{status-position} sock=#{socket_path}'; rc=$?; "
                "tmux -L smoke kill-server 2>/dev/null; exit $rc"],
-              required=True, expect="bar=top", timeout=20),
+              required=True, expect=f"bar=top sock={config.CONTAINER_TMUX_TMPDIR}/tmux-", timeout=20),
         # claude doctor surfaces config/runtime write-path errors; best-effort (may want network).
         Probe("claude doctor", ["claude", "doctor"], required=False, timeout=20),
     ]

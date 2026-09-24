@@ -352,14 +352,17 @@ def add_repo(slug: str, url: str, *, branch: str = "main", dir: str = "") -> Pro
     project = load(slug)  # FileNotFoundError if undefined — let it propagate
     new = Repo(url=url.strip(), branch=(branch or "main"), dir=(dir or "").strip())
     resolved = new.resolved_dir()
-    # A repo dir at (or under) the scratch dir would be WIPED on every container start/stop — refuse
-    # at the add boundary (not in schema.Repo, which re-fires on load and would lock an operator out
-    # of a project for a since-cloned repo literally named "scratch"). Clear, recoverable via dir=.
-    if resolved == config.SCRATCH_DIRNAME or resolved.startswith(config.SCRATCH_DIRNAME + "/"):
-        raise ValidationError(
-            f"repo dir {resolved!r} would live under /workspace/{config.SCRATCH_DIRNAME}/, the "
-            f"ephemeral scratch dir wiped on every start/stop — pass an explicit dir="
-        )
+    # A repo dir at (or under) the scratch dir or the per-session TMPDIR would be WIPED on every
+    # container start/stop — refuse at the add boundary (not in schema.Repo, which re-fires on load
+    # and would lock an operator out of a project for a since-cloned repo literally named "scratch").
+    # Clear, recoverable via dir=.
+    for dirname, what in ((config.SCRATCH_DIRNAME, "ephemeral scratch dir"),
+                          (config.TMP_DIRNAME, "per-session temp dir (TMPDIR)")):
+        if resolved == dirname or resolved.startswith(dirname + "/"):
+            raise ValidationError(
+                f"repo dir {resolved!r} would live under /workspace/{dirname}/, the {what} wiped "
+                f"on every start/stop — pass an explicit dir="
+            )
     for existing in project.repos:
         if existing.url == new.url:
             raise ValidationError(f"repo {new.url!r} is already in project {slug!r}")

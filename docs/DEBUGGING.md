@@ -217,6 +217,42 @@ enable docker.service` starts the daemon at boot (a resident daemon in exchange)
 cache shrinks the buildkit step but here only ~750 MB of it was reclaimable without also removing
 unused images.
 
+## `yarn install` fails with `ENOSPC` while the disk is nearly empty (Sep 2026, issue #42)
+
+### Symptom
+
+A fresh Yarn Berry install on a heavy frontend project dies in the Fetch step:
+
+```
+YN0001: │ Error: ENOSPC: no space left on device, write
+    at ZipFS.saveAndClose ([worker eval]:…)
+    at convertToZipWorker ([worker eval]:…)
+```
+
+`df` inside the container shows `/workspace` with hundreds of GB free and the yarn cache
+(`YARN_CACHE_FOLDER=/workspace/.yarn-cache`) filling normally. The only full-looking thing is
+`tmpfs 512M /tmp` — and it is empty again by the time you look, because yarn cleans its temp files up
+on failure.
+
+### Root cause
+
+`TMPDIR` is unset in a container (on every host OS — the container inherits nothing from the host's
+environment), so Node's `os.tmpdir()` falls back to `/tmp`, which the hardened floor mounts as a
+**512m tmpfs**. Yarn converts each fetched tarball to a zip in a worker under `os.tmpdir()`
+(`xfs.mktempPromise` in `@yarnpkg/fslib`) and runs several conversions in parallel; a few large
+packages (AG Grid Enterprise, mapbox-gl, …) in flight together exceed 512m. The package CACHE was
+already redirected onto the bind; the temp dir the conversion writes THROUGH was the gap.
+
+### Fix
+
+The runner injects `TMPDIR=/workspace/.tmp` (a wiped-each-session subdir of the disk-backed bind that
+`lifecycle` creates before start) and `TMUX_TMPDIR=/tmp` (the status bar's tmux socket stays on the
+tmpfs — a unix socket on a Docker Desktop virtiofs bind is unreliable). `project recreate <slug>` to
+apply on an existing container. Verify in-container: `echo $TMPDIR` → `/workspace/.tmp`;
+`node -p 'os.tmpdir()'` → the same; `tmux display -p '#{socket_path}'` → under `/tmp/`. The
+`image smoke` gate checks all of this. A raised tmpfs size was rejected as the fix: "large enough"
+depends on the project, and tmpfs pages count against the container's memory cap.
+
 ## Locked project (strict egress) troubleshooting
 
 Strict egress (invariant 3) is the most failure-prone subsystem: a locked project routes ALL traffic

@@ -160,7 +160,8 @@ mount: every container gets **`/workspace/scratch/`**, a known drop-zone backed 
 `~/.local/state/claude-man/projects/<slug>/workspace/scratch/` on the host (open it from the TUI's
 Browse action, `b`). Drop files in while the container runs and tell the agent to "check the data" —
 an injected `CLAUDE.md` note points it at `/workspace/scratch/`. It is **wiped on every start and
-stop**, so it never persists; keep durable work in a repo under `/workspace/`.
+stop**, so it never persists; keep durable work in a repo under `/workspace/`. (Its sibling
+`/workspace/.tmp/` is the container's `TMPDIR` — also wiped each session, not a drop-zone; issue #42.)
 
 Projects launch `claude`/shell at **`/workspace`** (`docker exec -w`) — the uniform anchor where the
 workspace `CLAUDE.md` (and any pack-injected guidance) lives; set `[project] workdir = "<subdir>"` in

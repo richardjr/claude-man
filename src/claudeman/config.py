@@ -103,6 +103,20 @@ CONTAINER_WORKSPACE = "/workspace"
 # note points the agent here for "provided files" (scratch.py).
 SCRATCH_DIRNAME = "scratch"
 CONTAINER_SCRATCH = CONTAINER_WORKSPACE + "/" + SCRATCH_DIRNAME
+# Per-session temp dir — the container's TMPDIR (issue #42). Every process that asks for the system
+# temp dir (Node's os.tmpdir(), python tempfile, mktemp, …) defaults to /tmp, which the hardened floor
+# mounts as a 512m tmpfs. Yarn Berry zip-converts each fetched tarball in a worker under os.tmpdir()
+# (xfs.mktempPromise) and a heavy install converting several large packages in parallel overflows it
+# with a misleading ENOSPC while /workspace has hundreds of GB free — on every host OS, since TMPDIR
+# is simply unset in the container. Point TMPDIR at a SUBDIR of the disk-backed /workspace bind (the
+# YARN_CACHE_FOLDER / uv-dir redirect philosophy: no new writable surface, floor byte-identical).
+# lifecycle wipes + recreates it on every start/stop exactly like the scratch dir, so temp residue
+# never accumulates across sessions. tmux is pinned BACK onto the /tmp tmpfs via TMUX_TMPDIR (it
+# derives its socket dir from TMPDIR otherwise, and a unix socket on a Docker Desktop virtiofs bind
+# is unreliable — the status bar must keep working; docs/DEVENV.md).
+TMP_DIRNAME = ".tmp"
+CONTAINER_TMP = CONTAINER_WORKSPACE + "/" + TMP_DIRNAME       # TMPDIR
+CONTAINER_TMUX_TMPDIR = "/tmp"                                 # TMUX_TMPDIR (socket stays on the tmpfs)
 # Optional persistent shell-history bind (opt-in via `config shell-history on`): a per-project
 # state-tier dir bound here read-write so $HISTFILE survives recreate. Dedicated path (NOT under the
 # read-only ~/.local/bin claude install, NOT the XDG_STATE tmpfs) — the ONLY writable surface beyond
@@ -421,6 +435,15 @@ def scratch_dir(slug: str) -> Path:
     unchanged. ``lifecycle`` wipes + recreates it on every container start/stop, so anything dropped
     here is ephemeral; durable work belongs in a repo under workspace/."""
     return workspace_dir(slug) / SCRATCH_DIRNAME
+
+
+def tmp_dir(slug: str) -> Path:
+    """Per-session temp dir inside the /workspace bind (== CONTAINER_TMP, the container's TMPDIR).
+
+    Like ``scratch_dir`` a subdir of the existing workspace bind — NOT a new mount, so the hardened
+    floor (invariant 2) is unchanged. ``lifecycle`` wipes + recreates it on every container start/stop
+    (issue #42: temp lands on the disk-backed bind, not the 512m /tmp tmpfs)."""
+    return workspace_dir(slug) / TMP_DIRNAME
 
 
 def claude_config_dir(slug: str) -> Path:

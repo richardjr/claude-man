@@ -1,10 +1,17 @@
-"""Per-session scratch / data-transfer directory (``/workspace/scratch``).
+"""Per-session scratch / data-transfer directory (``/workspace/scratch``) + the per-session temp
+dir (``/workspace/.tmp``, the container's ``TMPDIR`` — issue #42).
 
-A known drop-zone for moving files in and out of a container. It is a SUBDIR of the existing
-``/workspace`` bind — not a new mount — so the hardened floor is untouched (invariant 2). The
-lifecycle WIPES it on every container start and stop (``clear``), so it never persists across
-sessions: stage inputs there while the container runs, collect outputs before stop, but keep nothing
-durable in it.
+The scratch dir is a known drop-zone for moving files in and out of a container. It is a SUBDIR of
+the existing ``/workspace`` bind — not a new mount — so the hardened floor is untouched
+(invariant 2). The lifecycle WIPES it on every container start and stop (``clear``), so it never
+persists across sessions: stage inputs there while the container runs, collect outputs before stop,
+but keep nothing durable in it.
+
+The temp dir is the same shape (a wiped-each-session subdir of the bind, ``clear_tmp``) with a
+different job: the runner points every in-container process's ``TMPDIR`` at it so temp files land on
+the disk-backed bind instead of the 512m ``/tmp`` tmpfs (a heavy ``yarn install`` zip-converting
+packages in parallel overflowed the tmpfs with a misleading ENOSPC). It must EXIST before start —
+nothing that honours ``TMPDIR`` creates it — which is why the lifecycle recreates it here host-side.
 
 ``ensure_note`` patches a small claude-man-owned managed block into ``/workspace/CLAUDE.md`` telling
 the agent to look here for "provided files" — so when the operator drops a file in and says "check
@@ -16,6 +23,7 @@ block. Pure stdlib (no docker/textual), so the CLI and lifecycle import it freel
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 from . import claudemd, config
 from .checkout.repos import is_within
@@ -56,19 +64,30 @@ def clear(slug: str) -> str:
     must not block a container start or make a stop look failed. Foreign-owned files (a uid mismatch
     between host and the container's uid 1000) can survive the wipe; that residue is noted, not fatal.
     """
-    ws = config.workspace_dir(slug)
-    d = config.scratch_dir(slug)
+    return _clear_dir(config.scratch_dir(slug), config.workspace_dir(slug), label="scratch")
+
+
+def clear_tmp(slug: str) -> str:
+    """Wipe + recreate the per-session temp dir (the container's ``TMPDIR``, issue #42) — the same
+    start/stop hook as ``clear``, same best-effort/containment contract. On start this is what makes
+    the dir EXIST for the processes the runner points at it; on stop it drops the session's temp
+    residue so it never accumulates on the persistent bind."""
+    return _clear_dir(config.tmp_dir(slug), config.workspace_dir(slug), label="tmpdir")
+
+
+def _clear_dir(d: Path, ws: Path, *, label: str) -> str:
+    """The shared wipe+recreate for a per-session subdir ``d`` of the workspace bind ``ws``."""
     if not is_within(d, ws):  # defence — only ever operate inside the workspace bind
-        return f"scratch: refused to clear {d} (escapes {ws})"
+        return f"{label}: refused to clear {d} (escapes {ws})"
     try:
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)  # best-effort: tolerate a foreign-owned leftover
         d.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return f"scratch: clear failed ({exc})"
+        return f"{label}: clear failed ({exc})"
     try:
         if any(d.iterdir()):
-            return "scratch: some files could not be removed (foreign-owned?)"
+            return f"{label}: some files could not be removed (foreign-owned?)"
     except OSError:
         pass
     return ""
