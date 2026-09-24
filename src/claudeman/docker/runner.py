@@ -91,6 +91,19 @@ _BAKED_ENV = {
     "UV_PYTHON_BIN_DIR": config.CONTAINER_UV_BIN,         # `uv python install` exe links (else ~/.local/bin EROFS)
     "UV_TOOL_DIR": config.CONTAINER_UV_TOOLS,             # `uv tool` venvs
     "UV_TOOL_BIN_DIR": config.CONTAINER_UV_BIN,           # `uv tool` exe links
+    # The system temp dir (issue #42): Node's os.tmpdir() / python tempfile / mktemp default to /tmp,
+    # the 512m tmpfs in _HARDENING. Yarn Berry zip-converts every fetched tarball under os.tmpdir()
+    # and a heavy install (several large packages converting in parallel) overflows it — ENOSPC with
+    # hundreds of GB free on /workspace, on ANY host OS (TMPDIR is simply unset in a container).
+    # Redirect TMPDIR onto a subdir of the disk-backed /workspace bind, the YARN_CACHE_FOLDER / uv
+    # philosophy: no new writable surface, floor byte-identical (the /tmp tmpfs line is unchanged).
+    # lifecycle creates + wipes the dir on every start/stop like the scratch dir. tmux derives its
+    # socket dir from TMPDIR, so pin it BACK onto the /tmp tmpfs via TMUX_TMPDIR — a unix socket on a
+    # Docker Desktop virtiofs bind is unreliable, and the status bar (issue #37) must keep working.
+    # Runner-injected only (like pip/uv): every claude-man container + `image smoke` go through this
+    # argv, and a bare `docker run` without the /workspace bind has no dir for TMPDIR to point at.
+    "TMPDIR": config.CONTAINER_TMP,
+    "TMUX_TMPDIR": config.CONTAINER_TMUX_TMPDIR,
     "USE_BUILTIN_RIPGREP": "0",
     "DISABLE_AUTOUPDATER": "1",
 }

@@ -61,6 +61,16 @@ may land in minor versions until 1.0).
   present, canonicalised, floor byte-identical beside it) and `test_settings`.
 
 ### Fixed
+- **`yarn install` `ENOSPC` on heavy Node projects** (issue #42): the container's `TMPDIR` was unset,
+  so Node's `os.tmpdir()` fell back to `/tmp` — the floor's 512m tmpfs — and Yarn Berry's parallel
+  per-package zip conversion overflowed it with a misleading "no space left on device" while
+  `/workspace` had hundreds of GB free (any host OS, not just the macOS it was reported on). The
+  runner now injects `TMPDIR=/workspace/.tmp`, a wiped-each-session subdir of the disk-backed bind
+  that the lifecycle (re)creates on every start/stop like the scratch dir (`scratch.clear_tmp`), with
+  `TMUX_TMPDIR=/tmp` pinning the status bar's tmux socket back onto the tmpfs (unix sockets on a
+  Docker Desktop virtiofs bind are unreliable). Env redirects only — the `/tmp` tmpfs and the
+  hardened floor are byte-identical (unit-pinned); `image smoke` gates both the redirect and the
+  socket path; a repo dir under `.tmp/` is refused at `project repo add`. Recreate to apply.
 - **AWS CLI failing on every command in an interactive shell** (issue #41): `aws: [ERROR]: An error
   occurred (Pager): Unable to redirect output to pager … No such file or directory: 'less'`. On a
   TTY the CLI pipes output through a pager that defaults to `less`, which the images don't ship.

@@ -190,6 +190,7 @@ docker create --name claude-man-<slug> \
   -e HOME=/home/agent -e CLAUDE_CONFIG_DIR=/home/agent/.claude \
   -e XDG_CACHE_HOME=/home/agent/.cache -e XDG_STATE_HOME=/home/agent/.cache/state \
   -e GIT_CONFIG_GLOBAL=/home/agent/.cache/gitconfig -e GH_CONFIG_DIR=/home/agent/.cache/gh \
+  -e TMPDIR=/workspace/.tmp -e TMUX_TMPDIR=/tmp   (issue #42 — temp on the bind; tmux socket stays on /tmp) \
   -e USE_BUILTIN_RIPGREP=0 -e DISABLE_AUTOUPDATER=1 \
   -e CLAUDE_CODE_OAUTH_TOKEN=<profile token>  (ANTHROPIC_API_KEY/AUTH_TOKEN omitted; the whole
                                                line omitted under `auth = "login"`) \
@@ -228,6 +229,23 @@ stop. `scratch.ensure_note` stamps a small claude-man-owned managed block into `
 on start (via the shared `claudemd.patch_block`, in place — it coexists with the packs block and
 preserves operator content) telling the agent to look there for "provided files". A repo whose dir
 would land under `scratch/` is refused at `project repo add` (it would be wiped).
+
+**The per-session temp dir (`/workspace/.tmp`, the container's `TMPDIR` — issue #42).** The same
+shape as the scratch dir (a wiped-each-session subdir of the bind, `scratch.clear_tmp` on every start
+and stop, the same `project repo add` refusal) with a different job. Nothing sets `TMPDIR` in a
+container, so Node's `os.tmpdir()`, python's `tempfile`, `mktemp` and friends fall back to `/tmp` —
+the **512m tmpfs** in the floor. Yarn Berry zip-converts each fetched tarball under `os.tmpdir()`
+(`xfs.mktempPromise`) in parallel workers, so a heavy install (AG Grid Enterprise + mapbox-gl + …)
+overflowed it with a misleading `ENOSPC` while `/workspace` had hundreds of GB free — on every host
+OS, not just the Docker Desktop macOS it was reported on. The runner injects `TMPDIR=/workspace/.tmp`
+(a `_BAKED_ENV` redirect like `YARN_CACHE_FOLDER` — no new writable surface, the `/tmp` tmpfs line
+is untouched, floor byte-identical, unit-pinned) and the lifecycle (re)creates the dir before start
+(nothing that honours `TMPDIR` creates it). tmux derives its socket dir from `TMPDIR`, and a unix
+socket on a virtiofs bind is unreliable, so `TMUX_TMPDIR=/tmp` pins the status bar's socket back onto
+the tmpfs; `image smoke` gates both (a `mktemp` must land under `/workspace`, the tmux
+`socket_path` must stay under `/tmp`). Trade-off: on macOS the bind (virtiofs) is slower than tmpfs
+for the zip conversion — correctness over speed, and the dir is wiped each session so temp residue
+never accumulates on the persistent bind.
 
 **The `.cache` tmpfs must be agent-owned.** Docker special-cases `/tmp` to sticky world-writable
 (`1777`), so it's writable for free — but a *named* tmpfs like `/home/agent/.cache` defaults to

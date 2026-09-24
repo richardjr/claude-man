@@ -194,8 +194,10 @@ uv run claudemanctl project claude web
 **TUI:** `n` New project (overlay **node**, language **node**) → `g`/`a` Add repo → **Enter**/`c` to
 open. For a private repo, set up [SSH](#ssh--private-git-agent-forwarded) first.
 
-> `yarn install` / `pnpm i` work under the read-only floor — the package caches are redirected onto
-> the `/workspace` bind. Run them in the repo dir inside the container.
+> `yarn install` / `pnpm i` work under the read-only floor — the package caches AND the container's
+> `TMPDIR` (`/workspace/.tmp`, wiped each session) are redirected onto the `/workspace` bind, so a
+> heavy install's parallel zip conversion never overflows the 512m `/tmp` tmpfs (the misleading
+> `ENOSPC: no space left on device` of issue #42). Run them in the repo dir inside the container.
 
 ## Guide: Python service
 

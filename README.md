@@ -105,6 +105,7 @@ full threat model and [`CLAUDE.md`](CLAUDE.md) for the load-bearing invariants.
   profiles/<name>/seed/         allowlisted ~/.claude assets new projects inherit
   projects/<slug>/workspace/    the checked-out repos  ->  bind /workspace
   projects/<slug>/workspace/scratch/  data drop-zone -> /workspace/scratch (wiped on start+stop)
+  projects/<slug>/workspace/.tmp/     the container's TMPDIR -> /workspace/.tmp (wiped on start+stop)
   projects/<slug>/claude-config/ per-project CLAUDE_CONFIG_DIR  ->  bind /home/agent/.claude
   projects/<slug>/packs-manifest.json  which files the pack system manages (ours/theirs boundary)
   sync-audit/                   git repo: per-session commit of accepted sync-back

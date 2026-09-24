@@ -678,11 +678,13 @@ def _sync_out(slug: str, *, on_progress: ProgressFn | None) -> str:
 
 
 def _scratch_prepare(project: Project, *, on_progress: ProgressFn | None) -> str:
-    """Wipe the scratch dir + (re)stamp its CLAUDE.md note for the start path → a ``'; <note>'``
-    suffix (or ''). Never raises — a scratch fault must not block a container start."""
+    """Wipe the scratch dir + (re)stamp its CLAUDE.md note, and (re)create the per-session temp dir
+    the runner's ``TMPDIR`` points at (issue #42 — it must exist before start), for the start path →
+    a ``'; <note>'`` suffix (or ''). Never raises — a scratch fault must not block a container start."""
     notes: list[str] = []
     try:
-        for note in (scratch.clear(project.slug), scratch.ensure_note(project)):
+        for note in (scratch.clear(project.slug), scratch.clear_tmp(project.slug),
+                     scratch.ensure_note(project)):
             if note:
                 notes.append(note)
                 if on_progress:
@@ -695,13 +697,13 @@ def _scratch_prepare(project: Project, *, on_progress: ProgressFn | None) -> str
 
 
 def _scratch_clear(slug: str) -> str:
-    """Wipe the scratch dir on stop → a ``'; <note>'`` suffix (or ''). Never raises (a fault mustn't
-    make a stop look failed)."""
+    """Wipe the scratch dir + the per-session temp dir on stop → a ``'; <note>'`` suffix (or '').
+    Never raises (a fault mustn't make a stop look failed)."""
     try:
-        note = scratch.clear(slug)
+        notes = [n for n in (scratch.clear(slug), scratch.clear_tmp(slug)) if n]
     except Exception as exc:  # noqa: BLE001 - a scratch-clear fault must not fail the stop
         return f"; scratch error: {exc}"
-    return ("; " + note) if note else ""
+    return ("; " + "; ".join(notes)) if notes else ""
 
 
 def sync(slug: str, *, direction: str, on_progress: ProgressFn | None = None) -> Result:

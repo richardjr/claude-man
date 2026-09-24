@@ -72,6 +72,21 @@ class HardenedArgvTest(unittest.TestCase):
         # Berry vars above but honours YARN_CACHE_FOLDER.
         self.assertIn("YARN_CACHE_FOLDER=/workspace/.yarn-cache", joined)
 
+    def test_tmpdir_redirected_to_workspace_bind_tmux_pinned_to_tmp(self) -> None:
+        # issue #42: Node's os.tmpdir() (Yarn Berry's per-package zip conversion) / python tempfile /
+        # mktemp default to /tmp — the 512m tmpfs — and a heavy `yarn install` overflows it with a
+        # misleading ENOSPC. TMPDIR -> a subdir of the disk-backed /workspace bind; the /tmp tmpfs
+        # line itself is untouched (no floor change, just a redirect like YARN_CACHE_FOLDER).
+        joined = " ".join(self.argv)
+        self.assertIn("TMPDIR=/workspace/.tmp", joined)
+        self.assertIn("--tmpfs /tmp:rw,exec,nosuid,size=512m", joined)
+        # tmux derives its socket dir from TMPDIR; a unix socket on a Docker Desktop virtiofs bind is
+        # unreliable, so the status bar's tmux must be pinned BACK onto the /tmp tmpfs.
+        self.assertIn("TMUX_TMPDIR=/tmp", joined)
+        # TMPDIR is NOT a new writable surface: no extra -v/--tmpfs for it.
+        self.assertNotIn("/workspace/.tmp:", joined)
+        self.assertEqual(sum(1 for a in self.argv if a == "--tmpfs"), 2)
+
     def test_git_identity_env_rendered_as_values(self) -> None:
         argv = runner.build_create_argv(
             _project(), profile_name="work", created_iso="t",

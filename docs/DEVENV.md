@@ -173,8 +173,11 @@ profile · auth · image · model · egress, and the pane cwd's git branch + a c
   scrollback in plain windows. alacritty (`~Alt` mode) and kitty forward it as-is. The mouse wheel
   scrolls regardless. Plain PgUp/PgDn stay the pane's (claude, nvim, less). Bound in both copy-mode
   key tables since `mode-keys` follows `$EDITOR`.
-- **Floor:** tmux's only write is its socket under the `/tmp` tmpfs; the conf is read-only; no runner
-  change — the hardened floor is byte-identical (invariant 2). The image-smoke gate starts a server
+- **Floor:** tmux's only write is its socket under the `/tmp` tmpfs (pinned there by the injected
+  `TMUX_TMPDIR=/tmp`, since the container's `TMPDIR` points at the `/workspace` bind — issue #42 — and
+  tmux would otherwise put its socket on the bind, unreliable for a unix socket on Docker Desktop's
+  virtiofs); the conf is read-only; no hardening-flag change — the floor is byte-identical
+  (invariant 2). The image-smoke gate starts a server
   under `--read-only` and checks the `tmux-256color` terminfo the panes see. The launcher falls back
   to `TERM=xterm-256color` when the host's forwarded TERM (`xterm-ghostty`…) has no terminfo in the
   image — tmux drives the outer terminal through terminfo (RGB is forced via `terminal-features`).

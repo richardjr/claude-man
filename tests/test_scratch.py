@@ -1,4 +1,5 @@
-"""Scratch / data-transfer dir: the shared managed-block patcher, the wipe, and the CLAUDE.md note.
+"""Scratch / data-transfer dir: the shared managed-block patcher, the wipe, and the CLAUDE.md note —
+plus the per-session temp dir (the container's TMPDIR, issue #42) that shares the wipe.
 
 Pure stdlib: CLAUDE_MAN_STATE_HOME (the workspace bind) + CLAUDE_MAN_CONFIG_HOME (the registry)
 point at tempdirs. No docker/textual."""
@@ -107,6 +108,18 @@ class ConfigPathTest(unittest.TestCase):
         ws = config.workspace_dir("demo")
         self.assertEqual(config.scratch_dir("demo").parent, ws)
 
+    def test_tmp_under_workspace(self) -> None:
+        # issue #42: TMPDIR rides the disk-backed /workspace bind, never the 512m /tmp tmpfs.
+        self.assertTrue(config.CONTAINER_TMP.startswith(config.CONTAINER_WORKSPACE + "/"))
+        self.assertEqual(config.CONTAINER_TMP, "/workspace/.tmp")
+        self.assertNotEqual(config.TMP_DIRNAME, config.SCRATCH_DIRNAME)
+        self.assertEqual(config.CONTAINER_TMUX_TMPDIR, "/tmp")   # tmux socket stays on the tmpfs
+
+    def test_tmp_dir_under_workspace_dir(self) -> None:
+        ws = config.workspace_dir("demo")
+        self.assertEqual(config.tmp_dir("demo").parent, ws)
+        self.assertEqual(config.tmp_dir("demo").name, config.TMP_DIRNAME)
+
 
 class _StateEnv(unittest.TestCase):
     def setUp(self) -> None:
@@ -148,6 +161,33 @@ class ClearTest(_StateEnv):
         self.assertEqual(list(d.iterdir()), [])            # scratch emptied
         self.assertTrue((repo / "keep.txt").is_file())     # sibling repo untouched
         self.assertEqual((repo / "keep.txt").read_text(), "important")
+
+    def test_clear_tmp_creates_dir_when_absent(self) -> None:
+        # The runner points TMPDIR here; nothing that honours TMPDIR creates it, so the start hook must.
+        note = scratch.clear_tmp(self.slug)
+        self.assertEqual(note, "")
+        d = config.tmp_dir(self.slug)
+        self.assertTrue(d.is_dir())
+        self.assertEqual(list(d.iterdir()), [])
+
+    def test_clear_tmp_wipes_residue_and_leaves_scratch_and_repo(self) -> None:
+        ws = config.workspace_dir(self.slug)
+        repo = ws / "myrepo"
+        repo.mkdir(parents=True)
+        (repo / "keep.txt").write_text("important")
+        scratch.clear(self.slug)
+        (config.scratch_dir(self.slug) / "input.csv").write_text("data")
+        d = config.tmp_dir(self.slug)
+        (d / "xfs-abc").mkdir(parents=True)
+        (d / "xfs-abc" / "pkg.zip").write_text("temp")
+
+        note = scratch.clear_tmp(self.slug)
+
+        self.assertEqual(note, "")
+        self.assertTrue(d.is_dir())
+        self.assertEqual(list(d.iterdir()), [])                                   # temp emptied
+        self.assertTrue((config.scratch_dir(self.slug) / "input.csv").is_file())  # scratch untouched
+        self.assertEqual((repo / "keep.txt").read_text(), "important")            # repo untouched
 
 
 class EnsureNoteTest(_StateEnv):
@@ -191,6 +231,15 @@ class AddRepoGuardTest(_StateEnv):
     def test_rejects_repo_dir_under_scratch(self) -> None:
         with self.assertRaises(ValidationError):
             projects.add_repo(self.slug, "https://example.com/x.git", dir="scratch/nested")
+
+    def test_rejects_repo_dir_equal_to_tmp(self) -> None:
+        # /workspace/.tmp is the wiped-each-session TMPDIR (issue #42) — same guard as scratch.
+        with self.assertRaises(ValidationError):
+            projects.add_repo(self.slug, "https://example.com/x.git", dir=".tmp")
+
+    def test_rejects_repo_dir_under_tmp(self) -> None:
+        with self.assertRaises(ValidationError):
+            projects.add_repo(self.slug, "https://example.com/x.git", dir=".tmp/nested")
 
     def test_allows_normal_repo(self) -> None:
         updated = projects.add_repo(self.slug, "https://github.com/foo/bar.git")
