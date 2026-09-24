@@ -29,6 +29,9 @@
 #     file write. The CLI's STS assume-role cache (~/.aws/cli/cache) and SSO cache (~/.aws/sso/cache)
 #     have no redirect env and would EROFS under the floor, so role-caching / `aws sso login` are not
 #     supported in-container — pass already-resolved credentials via env instead.
+#   * AWS_PAGER="" (issue #41): on a TTY the AWS CLI pipes output through a pager, defaulting to
+#     `less`, which the image doesn't ship — every command died "Unable to redirect output to pager".
+#     Empty = no pager (an agent can never block on one; the operator can still pipe to `bat`).
 #   These env vars are scoped to this overlay (like the rust overlay's CARGO_HOME/RUSTUP_HOME), so the
 #   global hardened floor / _BAKED_ENV is untouched. All three tools' CORE ops are verified end-to-end,
 #   as uid 1000 under --read-only, by `claudemanctl image smoke terraform` (smoke._overlay_probes).
@@ -59,7 +62,8 @@ ENV CHECKPOINT_DISABLE=1 \
     PACKER_CONFIG_DIR=/workspace/.packer \
     PACKER_PLUGIN_PATH=/workspace/.packer/plugins \
     AWS_CONFIG_FILE=/home/agent/.cache/aws/config \
-    AWS_SHARED_CREDENTIALS_FILE=/home/agent/.cache/aws/credentials
+    AWS_SHARED_CREDENTIALS_FILE=/home/agent/.cache/aws/credentials \
+    AWS_PAGER=""
 
 RUN set -eux; \
     apt-get update; \

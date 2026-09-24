@@ -61,6 +61,14 @@ may land in minor versions until 1.0).
   present, canonicalised, floor byte-identical beside it) and `test_settings`.
 
 ### Fixed
+- **AWS CLI failing on every command in an interactive shell** (issue #41): `aws: [ERROR]: An error
+  occurred (Pager): Unable to redirect output to pager … No such file or directory: 'less'`. On a
+  TTY the CLI pipes output through a pager that defaults to `less`, which the images don't ship.
+  The `aws-cli` approved tool and the `terraform` overlay now set `AWS_PAGER=""` (no pager) next to
+  their existing config/creds redirects, and both gain a smoke probe that fakes a TTY with `script`
+  (the existing probes never paged, which is why the gate missed it). The tool registry now accepts
+  empty `[env]` values. To apply: the tools layer rebuilds by itself at the next `up`/`recreate`
+  (content-addressed); the terraform overlay needs `image build terraform`, then a recreate.
 - **False "Docker: docker version timed out — daemon not responding" startup banner** on a
   socket-activated Docker (issue #34). With `docker.socket` enabled and `docker.service` not (the
   Arch default) the daemon is started by its FIRST client — on a fresh boot, the TUI's own startup

@@ -74,6 +74,7 @@ url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.47.zip"
 sha256 = "{SHA}"
 [env]
 AWS_CONFIG_FILE = "/home/agent/.cache/aws/config"
+AWS_PAGER = ""
 '''
 
 
@@ -122,6 +123,7 @@ class DiscoverTest(unittest.TestCase):
     def test_parses_bundle(self) -> None:
         _mk(self.root, "aws-cli", BUNDLE_TOOL)
         a = library.discover(self.root)["aws-cli"]
+        self.assertEqual(a.env["AWS_PAGER"], "")  # empty env values are legal
         self.assertEqual((a.kind, a.install, a.version), ("release", "bundle", "2.36.47"))
         self.assertEqual(a.tree, "aws/dist")
         self.assertEqual(a.bins, ("aws", "aws_completer"))
@@ -167,6 +169,8 @@ class DiscoverTest(unittest.TestCase):
         self._bad("x", _apt('[env]\nHOME = "/x"\n'), "reserved")
         self._bad("x", _apt('[env]\nANTHROPIC_API_KEY = "sk"\n'), "reserved")
         self._bad("x", _apt('[env]\nlower = "v"\n'), "invalid env key")
+        self._bad("x", _apt('[env]\nK = 1\n'), "single-line string")
+        self._bad("x", _apt('[env]\nK = "a\\nb"\n'), "single-line string")
         self._bad("x", APT_TOOL + '[[smoke]]\nname = "n"\nargv = []\n', "non-empty argv")
         self._bad("x", APT_TOOL + '[[smoke]]\nname = "n"\nargv = ["a"]\ntimeout = 0\n', "positive integer")
 
@@ -251,6 +255,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn('test -x "/opt/aws-cli/aws"; ln -sfn "/opt/aws-cli/aws" "/usr/local/bin/aws"', text)
         self.assertIn('ln -sfn "/opt/aws-cli/aws_completer" "/usr/local/bin/aws_completer"', text)
         self.assertIn('ENV AWS_CONFIG_FILE="/home/agent/.cache/aws/config" \\', text)
+        # an empty value is legal (set-but-empty — AWS_PAGER="" disables the pager) and renders quoted
+        self.assertIn('    AWS_PAGER="" \\', text)
         self.assertIn('LABEL claude-man.overlay="terraform" claude-man.tools="aws-cli,helm,jq,kubectl,ssm"',
                       text)
         self.assertTrue(text.rstrip().endswith("USER agent"))
@@ -337,10 +343,13 @@ class ShippedLibraryLintTest(unittest.TestCase):
         aws = lib["aws-cli"]
         self.assertEqual(aws.install, "bundle")
         self.assertEqual(aws.env, {"AWS_CONFIG_FILE": "/home/agent/.cache/aws/config",
-                                   "AWS_SHARED_CREDENTIALS_FILE": "/home/agent/.cache/aws/credentials"})
+                                   "AWS_SHARED_CREDENTIALS_FILE": "/home/agent/.cache/aws/credentials",
+                                   "AWS_PAGER": ""})  # issue #41: no `less` in the image
         overlay = (Path(__file__).resolve().parents[1] / "images/overlays/terraform.Dockerfile").read_text()
         for key, value in aws.env.items():
-            self.assertIn(f"{key}={value}", overlay)
+            self.assertIn(f"{key}={value}" if value else f'{key}=""', overlay)
+        # the TTY probe is what catches a pager regression (a plain exec never pages)
+        self.assertTrue(any(s.argv[0] == "script" for s in aws.smoke), aws.smoke)
         # k9s rides kubectl's KUBECONFIG redirect and keeps its own state off the read-only ~/.config
         self.assertEqual(lib["k9s"].requires, ("kubectl",))
         self.assertIn("K9S_CONFIG_DIR", lib["k9s"].env)

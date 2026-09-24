@@ -75,6 +75,12 @@ class OverlayProbesTest(unittest.TestCase):
         # The aws write probe must actually exercise a write (`aws configure set`), not just --version.
         aws_write = next(p for p in probes if "aws config writes" in p.name)
         self.assertIn("configure set", " ".join(aws_write.argv))
+        # Issue #41: the pager only engages on a TTY, so the probe must fake one (`script`) to catch
+        # a regression to the missing-`less` failure.
+        pager = next(p for p in probes if "pager" in p.name)
+        self.assertEqual(pager.argv[0], "script")
+        self.assertTrue(pager.required)
+        self.assertEqual(pager.expect, "Buckets")
 
     def test_overlays_without_extra_probes_return_empty(self) -> None:
         # node/python/base tools are already covered by the base battery — no extra probes.

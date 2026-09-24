@@ -34,9 +34,13 @@ sha256 = "118ef53b6f5c652471fd299af01c058901c1a53db69c6b71a7bf3ebd93590969"
 # — no file write at all. The STS assume-role cache (~/.aws/cli/cache) and SSO cache
 # (~/.aws/sso/cache) have no redirect env and EROFS under the floor: role-caching / `aws sso login`
 # are unsupported in-container — pass already-resolved credentials instead.
+# AWS_PAGER="" (issue #41): on a TTY the CLI pipes output through a pager, defaulting to `less` — not
+# in the image, so every command died "Unable to redirect output to pager". Empty = no pager: an agent
+# can never block on one, and the operator can still pipe (`| bat`).
 [env]
 AWS_CONFIG_FILE = "/home/agent/.cache/aws/config"
 AWS_SHARED_CREDENTIALS_FILE = "/home/agent/.cache/aws/credentials"
+AWS_PAGER = ""
 
 [[smoke]]
 name = "aws --version"
@@ -49,3 +53,11 @@ expect = "aws-cli/2."
 name = "aws configure writes to the .cache tmpfs (read-only floor)"
 argv = ["sh", "-lc", "aws configure set region eu-west-1 && test -f \"$AWS_CONFIG_FILE\" && echo ok"]
 expect = "ok"
+
+# Output on a TTY (issue #41): the pager only engages when stdout is a terminal, which a plain exec
+# never is — `script` (util-linux, Essential) fakes one. `--generate-cli-skeleton output` prints the
+# response shape with no network or credentials; without AWS_PAGER="" it dies on the missing `less`.
+[[smoke]]
+name = "aws output on a TTY needs no pager"
+argv = ["script", "-qc", "aws s3api list-buckets --generate-cli-skeleton output", "/dev/null"]
+expect = "Buckets"

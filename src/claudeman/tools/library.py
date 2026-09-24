@@ -205,8 +205,9 @@ def _load_tool(tool_dir: Path) -> Tool:
             raise LibraryError(f"{name}: invalid env key {key!r}")
         if key in _RESERVED_ENV or config.is_forbidden_env_name(key):
             raise LibraryError(f"{name}: env key {key!r} is reserved (auth/identity/floor plumbing)")
-        if not isinstance(value, str) or not value or "\n" in value:
-            raise LibraryError(f"{name}: env {key} must be a non-empty single-line string")
+        # Empty is legal: set-but-empty is a real env state some tools key on (AWS_PAGER="" = no pager).
+        if not isinstance(value, str) or "\n" in value:
+            raise LibraryError(f"{name}: env {key} must be a single-line string")
         env[str(key)] = value
 
     smoke: list[SmokeSpec] = []
