@@ -397,7 +397,9 @@ uv run claudemanctl config status-bar off        # plain launch (the pre-#37 beh
 Launch-time — applies to the next window, no recreate. The image must bake the launcher: after
 upgrading run `image build base`, then any `up`/`recreate` (or `image build --project <slug>`)
 rebuilds the project's now-stale overlay chain on it automatically. Until then a window opens
-plainly and says so (a stderr line here, a toast in the TUI). Closing a claude
+plainly and says so (a stderr line here, a toast in the TUI). Scrollback while the bar is on: the
+mouse wheel, or **Shift+PgUp / Alt+PgUp** (page up into tmux's history; Shift/Alt+PgDn back, exits at
+the bottom — use the Alt form under ghostty, which keeps Shift+PgUp for itself). Closing a claude
 window leaves claude running in its session; the next `project claude` **re-attaches** to it
 (`Ctrl-b d` detaches by hand). `nvim` windows never get the bar. In the TUI: Settings (`,`) → `s`.
 
