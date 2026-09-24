@@ -179,6 +179,11 @@ def _overlay_probes(overlay: str) -> list[Probe]:
             Probe("aws config writes to the .cache tmpfs (read-only floor)",
                   ["sh", "-lc", "aws configure set region eu-west-1 && aws configure get region"],
                   required=True, expect="eu-west-1"),
+            # Issue #41: on a TTY the CLI pages output through `less` (absent) unless AWS_PAGER="".
+            # A plain exec has no TTY, so `script` fakes one; the skeleton needs no network/creds.
+            Probe("aws output on a TTY needs no pager",
+                  ["script", "-qc", "aws s3api list-buckets --generate-cli-skeleton output", "/dev/null"],
+                  required=True, expect="Buckets"),
         ]
     return []
 
