@@ -382,12 +382,15 @@ Project… menu. Each persists the choice and applies it itself — no manual
   other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
   **local** model is **refused on a locked (strict-egress) project** — unlock first;
   claude picks and unpinning stay allowed when locked.
-- **`a` Auth…** — the project's claude auth mode: **token** (default — the profile's
-  setup-token as env; inference-only, so claude.ai account connectors are unavailable) or
-  **login** (opt-in — no token env; run `/login` once inside the container and claude mints a
-  self-refreshing credential in the project's bind, enabling account connectors). Switching
-  recreates to apply; the Projects table badges login projects `[login]` on the Profile cell.
-  When a minted credential exists, **Logout** removes it (project must be stopped).
+- **`a` Auth…** — the project's auth mode: **token** (default — the profile's token as env:
+  claude's setup-token, inference-only, so claude.ai account connectors are unavailable; an
+  api-key-kind provider's key, API-billed) or **login** (opt-in — no token env; a one-time
+  in-container login mints a self-refreshing credential in the project's bind — claude's `/login`
+  → `.credentials.json`, codex's device-code login → `auth.json` — enabling account connectors).
+  The screen's wording and the credential file are the project's agent's. Switching recreates to
+  apply; the Projects table badges login projects `[login]` on the Profile cell. When a minted
+  credential exists, **Logout** removes it (project must be stopped). The **Profile…** picker (`f`)
+  offers only profiles of the project's agent.
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams

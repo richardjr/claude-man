@@ -123,7 +123,8 @@ def _is_scrubbed(key: str, provider: AgentProvider) -> bool:
     global mis-bill scrub, the provider's own scrub set + token env (sole-sourced pass-through), and
     GH_TOKEN (sole-sourced from gh_token.py). Invariant 1."""
     return (key in config.SCRUBBED_ENV_KEYS or key in provider.auth.scrub_env
-            or key == provider.auth.token_env or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV)
+            or key == provider.auth.token_env or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV
+            or key in agents.credential_env_names())   # every OTHER provider's names too (invariant 9)
 
 
 def _render_memory(limit: str) -> list[str]:
@@ -166,7 +167,7 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
             # Pass-through name only; the value is supplied via the child env in create() from the
             # 0600 state-tier store, so it never reaches argv. Schema rejects forbidden names; this
             # is belt-and-braces so one can never be rendered even if a flagged mount slips through.
-            if m.name and not config.is_forbidden_env_name(m.name):
+            if m.name and not agents.is_forbidden_env_name(m.name):
                 args += ["-e", m.name]
         elif m.kind == "ssh":
             args += ["--tmpfs",
@@ -425,7 +426,7 @@ def read_env_file(path: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if (not key or key in config.SCRUBBED_ENV_KEYS
+            if (not key or key in config.SCRUBBED_ENV_KEYS or key in agents.credential_env_names()
                     or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV):
                 continue  # GH_TOKEN never comes from an env_file — only the configured state-tier token
             out[key] = value
@@ -479,8 +480,8 @@ def create(
         tint=tint, memory=memory, image=image, provider=provider,
     )
     env = dict(os.environ)
-    for key in (*config.SCRUBBED_ENV_KEYS, *provider.auth.scrub_env):
-        env.pop(key, None)
+    for key in (*config.SCRUBBED_ENV_KEYS, *agents.credential_env_names()):
+        env.pop(key, None)   # never inherit ANY provider's credential from the host env (invariant 9)
     env.pop(GH_TOKEN_ENV, None)  # never inherit a host GH_TOKEN — only the configured token is injected
     if token:
         env[provider.auth.token_env] = token
@@ -494,7 +495,7 @@ def create(
     # kind="env" env-mount values (pass-through; argv has the `-e NAME` from _render_env_mounts).
     # Forbidden names are filtered so an operator env var can never shadow the scrubbed/auth keys.
     for key, value in (env_secrets or {}).items():
-        if not config.is_forbidden_env_name(key):
+        if not agents.is_forbidden_env_name(key):
             env[key] = value
     return _run(argv, env=env)
 

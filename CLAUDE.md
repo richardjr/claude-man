@@ -58,7 +58,17 @@ These are security- and correctness-critical. Every change must preserve them.
    `0600` in the state tier (`env_secrets.py` → `config.project_env_path()`, never config.toml/synced)
    and is injected `-e NAME` pass-through. The name is validated and **`FORBIDDEN_ENV_NAMES`**
    (the scrubbed keys + the OAuth token + `GH_TOKEN`) are rejected, so an operator var can never shadow
-   the auth/sole-sourced secrets.
+   the auth/sole-sourced secrets. **Per provider (Phase 7-auth, invariant 9 of docs/V2-PLAN.md):** the
+   layer injects exactly ONE credential — the chosen profile's, for the project's agent, in its auth mode
+   (`AuthSpec.token_env` pass-through in `token` mode; nothing in `login` mode) — and scrubs EVERY
+   registered provider's credential env names (`agents.credential_env_names()` — each provider's
+   token env + mis-bill scrub set; `agents.is_forbidden_env_name` is the check `runner`/`schema`/
+   `tools` use) from `project.env` / `env_file` / env-mounts / the inherited host env, so a codex key
+   can never ride into a claude container or vice versa. The login-mode credential file, the
+   in-container login hint and the token kind (`oauth-token` | `api-key`) are provider DATA
+   (`AuthSpec`); `lifecycle.login_credential_path(project)` / `logout` / `set_auth` / the Auth… screen
+   / `profile add --agent` (api-key = hidden prompt or `--stdin`; `--login-only` = no token) all key on
+   it. A provider with `identity_file = ""` gets no identity stub seed and no up-time identity verify.
 2. **The hardened run profile is the floor, not a suggestion.** `--read-only`, `--cap-drop ALL`,
    `--security-opt no-new-privileges`, `--user 1000:1000`, `--pids-limit 1024`, **plus a hard
    memory cap `--memory X --memory-swap X` that is ALWAYS rendered** (issue #29 — the one floor

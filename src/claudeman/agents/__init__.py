@@ -5,6 +5,7 @@ provider's policy data. Today the registry holds the ``claude`` provider only; `
 
 from __future__ import annotations
 
+from .. import config
 from .base import AgentProvider, AuthSpec, ImageSpec, UpdateSpec
 from .claude import PROVIDER as CLAUDE
 
@@ -43,5 +44,27 @@ def config_dir_envs() -> frozenset[str]:
     return frozenset(p.config_dir_env for p in PROVIDERS.values())
 
 
+def credential_env_names() -> frozenset[str]:
+    """EVERY provider's credential env names (its token env + its mis-bill scrub set) — invariant 9:
+    the layer injects exactly ONE credential (the chosen profile's, for the chosen provider) and
+    scrubs every provider's credential names from operator-supplied env, so a codex key can never
+    ride into a claude container (or vice versa) via ``project.env`` / ``env_file`` / an env-mount."""
+    names: set[str] = set()
+    for p in PROVIDERS.values():
+        names.add(p.auth.token_env)
+        names.update(p.auth.scrub_env)
+    return frozenset(names)
+
+
+def is_forbidden_env_name(name: str) -> bool:
+    """``config.is_forbidden_env_name`` (GH_TOKEN + the claude names) extended over every registered
+    provider's credential names — same case/underscore-padding normalisation."""
+    if config.is_forbidden_env_name(name):
+        return True
+    norm = name.strip("_").upper()
+    return any(norm == f.strip("_").upper() for f in credential_env_names())
+
+
 __all__ = ["AgentProvider", "AuthSpec", "ImageSpec", "UpdateSpec", "CLAUDE", "DEFAULT",
-           "DEFAULT_ID", "PROVIDERS", "resolve", "ids", "binaries", "config_dirs", "config_dir_envs"]
+           "DEFAULT_ID", "PROVIDERS", "resolve", "ids", "binaries", "config_dirs", "config_dir_envs",
+           "credential_env_names", "is_forbidden_env_name"]

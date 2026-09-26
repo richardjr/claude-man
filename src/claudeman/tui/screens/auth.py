@@ -41,12 +41,20 @@ class AuthScreen(ModalScreen["str | None"]):
     #buttons { height: auto; padding-top: 1; grid-gutter: 0 1; }
     """
 
-    def __init__(self, slug: str, mode: str, cred_present: bool) -> None:
+    def __init__(self, slug: str, mode: str, cred_present: bool, *, provider=None) -> None:
         super().__init__()
         self._slug = slug
         self._mode = mode
         self._cred_present = cred_present
         self._target = "login" if mode == "token" else "token"
+        # The provider's wording (Phase 7-auth): how the login credential is minted in-container,
+        # what the token kind is. None = the claude defaults (tests / older callers).
+        auth = provider.auth if provider is not None else None
+        self._binary = provider.binary if provider is not None else "claude"
+        self._cred_file = auth.credential_file if auth else ".credentials.json"
+        self._login_hint = (auth.login_hint.format(slug=slug) if auth and auth.login_hint
+                            else "open claude in the container (c) and run /login once")
+        self._token_kind = auth.token_kind if auth else "oauth-token"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -62,20 +70,21 @@ class AuthScreen(ModalScreen["str | None"]):
     def _body_lines(self) -> list[str]:
         lines = [f"Current: [bold]{self._mode}[/]"]
         if self._mode == "login":
-            state = ("present (minted by the in-container /login; survives stop/recreate)"
-                     if self._cred_present else
-                     "absent — open claude in the container (c) and run /login once")
+            state = (f"present ({self._cred_file}, minted in-container; survives stop/recreate)"
+                     if self._cred_present else f"absent — {self._login_hint}")
             lines.append(f"Credential: {state}")
         elif self._cred_present:
             lines.append("Credential: a minted login credential remains in the bind — "
                          "Logout removes it")
+        token_desc = ("the profile's setup-token injected as env. Inference-only scope: claude.ai "
+                      "account connectors are unavailable." if self._token_kind == "oauth-token"
+                      else "the profile's API key injected as env (billed at API rates).")
         lines += [
             "",
-            "[bold]token[/] (default) — the profile's setup-token injected as env. "
-            "Inference-only scope: claude.ai account connectors are unavailable.",
-            "[bold]login[/] (opt-in) — no token env; /login once in-container mints a "
-            "self-refreshing credential in this project's bind. Enables claude.ai account "
-            "connectors (remote MCP).",
+            f"[bold]token[/] (default) — {token_desc}",
+            f"[bold]login[/] (opt-in) — no token env; a one-time in-container login mints a "
+            f"self-refreshing {self._cred_file} in this project's bind (the {self._binary} "
+            f"subscription pays; account connectors work).",
             "",
             "Switching recreates the container to apply (workspace + config binds are kept)."
             + (" Logout requires the project to be stopped." if self._cred_present else ""),

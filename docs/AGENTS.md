@@ -15,7 +15,15 @@ with their seams). **7b landed the same day:** `Project.agent` / `Profile.agent`
 against the registry, terse-default TOML), `Project.provider`, the `claude-man.agent` label, the
 AGENT column in both surfaces, `project create --agent` + the create modal's Agent select, the
 `agent_mismatch` profile guard, and the provider threaded through lifecycle → runner / images /
-updates / egress (squid allowlist) / terminals (`provider_for`). Tracking:
+updates / egress (squid allowlist) / terminals (`provider_for`). **7-auth (same day):** `AuthSpec`
+carries both modes as data (`token_kind` oauth-token|api-key, `login_hint`, `token_hint`,
+`credential_file`, an optional `identity_file`); invariant 9 — `agents.credential_env_names()` /
+`is_forbidden_env_name` scrub every provider's credential names everywhere operator env enters
+(runner, schema, tools, smoke, the host env at create); the login-mode plumbing
+(`lifecycle.login_credential_path/present`, `_login_note`, `set_auth`, `logout`, the CLI
+`status`/`auth`, the TUI Auth… screen) keys on the provider's credential file + hint; the seed
+skips the identity stub for a provider without one; `profile add --agent [--login-only|--stdin]` +
+`renew` mint per the token kind; the Profile… picker filters to the project's agent. Tracking:
 [`ROADMAP.md`](../ROADMAP.md) Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
 modes per provider (`AuthSpec` as data, provider-scoped profiles, a per-provider `forbidden_env` scrub),
 a new **headless-run seam** (`RunSpec` → normalised `AgentEvent` stream; `project run`), a third

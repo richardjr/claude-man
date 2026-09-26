@@ -388,7 +388,7 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
             notes.append(note)
     elif not token:
         notes.append(f"no token — in-container `{provider.binary}` won't authenticate "
-                     "(mint one with `claude setup-token` → "
+                     f"({provider.auth.token_hint} → "
                      f"{config.profile_token_path(profile_name)})" if profile
                      else "no profile/token — define one with `claudemanctl profile add`")
     if clone_failures:
@@ -858,18 +858,23 @@ def set_tools(slug: str, names: tuple[str, ...]) -> Result:
 # Login auth mode (invariant 1's opt-in amendment): no token env is injected; the in-container
 # claude mints its own .credentials.json in the per-project claude-config bind via /login.
 # ---------------------------------------------------------------------------
-def _login_credential_path(slug: str):
-    """The in-container-minted credential's host-side location (inside the claude-config bind)."""
-    return config.claude_config_dir(slug) / ".credentials.json"
+def login_credential_path(project: Project):
+    """The in-container-minted credential's host-side location (inside the project's config bind):
+    the PROVIDER's credential file name (claude ``.credentials.json``, codex ``auth.json``)."""
+    return config.claude_config_dir(project.slug) / project.provider.auth.credential_file
+
+
+def login_credential_present(project: Project) -> bool:
+    return login_credential_path(project).exists()
 
 
 def _login_note(project: Project) -> str:
-    """The first-launch /login hint — '' unless a login-mode project has no minted credential."""
-    if project.auth != "login" or _login_credential_path(project.slug).exists():
+    """The first-launch login hint — '' unless a login-mode project has no minted credential.
+    The wording is the provider's (``auth.login_hint``)."""
+    if project.auth != "login" or login_credential_present(project):
         return ""
-    return (f"login mode — no credential yet; run /login once inside the container "
-            f"(`claudemanctl project claude {project.slug}`, then paste the code the browser "
-            f"shows back into the terminal — no in-container browser needed)")
+    hint = project.provider.auth.login_hint.format(slug=project.slug) or "log in once inside the container"
+    return f"login mode — no credential yet; {hint}"
 
 
 def login_identity_action(seeded_email: str, profile_email: str) -> str:
@@ -895,8 +900,8 @@ def _verify_login_identity(project: Project) -> str:
     cross-account guards (``account_mismatch`` on recreate) work for login-created profiles.
     Returns a '; '-prefixed note for the ``up`` detail, or ''."""
     profile = effective_profile(project)
-    if profile is None:
-        return ""
+    if profile is None or not project.provider.auth.identity_file:
+        return ""   # no identity stub for this provider — nothing to verify/backfill
     seeded = seed_mod.read_seeded_email(project.slug)
     action = login_identity_action(seeded, profile.account_email)
     if action == "backfill":
@@ -1154,10 +1159,11 @@ def set_auth(slug: str, mode: str) -> Result:
     except OSError as exc:
         return _lock_error(slug, exc)
     if mode == "login":
+        hint = project.provider.auth.login_hint.format(slug=slug) or "log in once inside the container"
         return Result(True, f"{slug} auth = login — `recreate` to apply (drops the injected "
-                            f"token env); then run /login once inside the container")
+                            f"token env); then {hint}")
     leftover = ""
-    if _login_credential_path(slug).exists():
+    if login_credential_present(project):
         leftover = (f"; a minted login credential remains in the bind — remove it with "
                     f"`project logout {slug}`")
     return Result(True, f"{slug} auth = token — `recreate` to apply (re-injects the profile "
@@ -1174,17 +1180,19 @@ def logout(slug: str) -> Result:
     the identity (which also removes the credential), ``delete`` removes everything."""
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    binary = project.provider.binary
     if runner.is_running(slug):
-        return Result(False, f"{slug} is running — stop it first (claude holds the credential "
+        return Result(False, f"{slug} is running — stop it first ({binary} holds the credential "
                              f"in memory and may rewrite it on refresh)")
-    path = _login_credential_path(slug)
+    path = login_credential_path(project)
     if not path.exists():
-        return Result(True, f"no credential in {slug}'s claude-config bind (nothing to do)")
+        return Result(True, f"no credential in {slug}'s config bind (nothing to do)")
     try:
         path.unlink()
     except OSError as exc:
         return Result(False, f"could not remove {path}: {exc}")
-    return Result(True, f"removed .credentials.json from {slug}'s claude-config bind — the "
+    return Result(True, f"removed {path.name} from {slug}'s config bind — the "
                         f"login identity and session history remain (`recreate --force` "
                         f"re-seeds the identity; `delete` removes everything)")
 

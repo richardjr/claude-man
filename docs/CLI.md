@@ -62,6 +62,15 @@ uv run claudemanctl profile add work --sso --display-name "Work (ACME SSO)"
 # Other login front-ends, used instead of --sso:
 uv run claudemanctl profile add work --login     # plain `claude auth login`
 uv run claudemanctl profile add api  --console   # Anthropic Console (API billing)
+
+# Profiles are AGENT-scoped (Phase 7 — docs/AGENTS.md): `--agent` names the provider the account
+# belongs to (default claude); a project can only run a profile of its own agent. How the token is
+# minted follows the provider's auth kind — claude = the setup-token flow above; an api-key-kind
+# provider (codex, from 7c) prompts for the key (hidden) or reads it from --stdin, never argv.
+# `--login-only` records the profile WITHOUT a token: the identity for projects that use
+# `--auth login`, where the credential is minted inside the container.
+uv run claudemanctl profile add oa --agent claude --login-only        # no token; for login-mode projects
+printenv OPENAI_API_KEY | uv run claudemanctl profile add oa --agent codex --stdin   # (7c) api-key kind
 ```
 
 `--sso`, `--login`, and `--console` all run `claude auth login` **before** `claude setup-token`,

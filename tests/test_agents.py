@@ -399,9 +399,9 @@ class SeamConsumersTest(unittest.TestCase):
 
     def test_mount_dst_denylist_covers_every_provider_config_dir(self) -> None:
         for d in agents.config_dirs():
-            self.assertIn(d, schema._MOUNT_FORBIDDEN_DST_EXACT)
-            self.assertIn(d + ".json", schema._MOUNT_FORBIDDEN_DST_EXACT)
-            self.assertIn(d + "/", schema._MOUNT_FORBIDDEN_DST_PREFIXES)
+            self.assertIn(d, schema._forbidden_dst_exact())
+            self.assertIn(d + ".json", schema._forbidden_dst_exact())
+            self.assertIn(d + "/", schema._forbidden_dst_prefixes())
         with self.assertRaises(schema.ValidationError):
             EnvMount(kind="file", src="/h/creds", dst="/home/agent/.claude/.credentials.json")
 
@@ -557,3 +557,153 @@ class ProjectAgentFieldTest(unittest.TestCase):
     def test_terminals_provider_for_fails_open(self) -> None:
         with mock.patch.object(terminals.projects, "load", side_effect=FileNotFoundError):
             self.assertIs(terminals.provider_for("nope"), agents.DEFAULT)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7-auth — both auth modes per provider as DATA; invariant 9 (every provider's credential
+# env names scrubbed); login-mode plumbing keyed on the provider's credential file
+# ---------------------------------------------------------------------------
+from claudeman.profiles import seed as seed_mod  # noqa: E402
+from claudeman.profiles import setup_token  # noqa: E402
+from claudeman.tui import profilesview  # noqa: E402
+
+FAKE = AgentProvider(
+    id="fake", display_name="Fake Agent", binary="fakeagent", proc_comm="fakeagent",
+    config_dir="/home/agent/.fake", config_dir_env="FAKE_HOME",
+    auth=AuthSpec(token_env="FAKE_API_KEY", scrub_env=("FAKE_ALT_KEY",), credential_file="auth.json",
+                  identity_file="", token_kind="api-key",
+                  login_hint="run `fakeagent login` inside the container ({slug})",
+                  token_hint="paste a Fake API key via `profile add --agent fake`"),
+    image=ImageSpec(version_build_arg="FAKE_VERSION", version_label="fake-version", default_version="1"),
+    updates=None, required_hosts=("api.fake.example",),
+)
+
+
+def _with_fake():
+    return mock.patch.dict(agents.PROVIDERS, {"fake": FAKE})
+
+
+class Invariant9Test(unittest.TestCase):
+    def test_credential_names_union_all_providers(self) -> None:
+        with _with_fake():
+            names = agents.credential_env_names()
+            for n in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                      "FAKE_API_KEY", "FAKE_ALT_KEY"):
+                self.assertIn(n, names)
+            self.assertTrue(agents.is_forbidden_env_name("fake_api_key"))   # normalised
+            self.assertTrue(agents.is_forbidden_env_name("GH_TOKEN"))       # config's set still
+            self.assertFalse(agents.is_forbidden_env_name("FAKE_API_KEY_BACKUP"))
+
+    def test_runner_scrubs_other_providers_keys(self) -> None:
+        with _with_fake():
+            # A claude container never renders another provider's key from operator env
+            self.assertTrue(runner._is_scrubbed("FAKE_API_KEY", agents.CLAUDE))
+            self.assertTrue(runner._is_scrubbed("CLAUDE_CODE_OAUTH_TOKEN", FAKE))
+            argv = runner.build_create_argv(Project(slug="demo"), profile_name="h", created_iso="c",
+                                            claude_config_path="/c", workspace_path="/w",
+                                            file_env={"FAKE_API_KEY": "x", "OK": "1"})
+            self.assertNotIn("FAKE_API_KEY", argv)
+            self.assertIn("OK", argv)
+            # and the FAKE provider's container injects ITS token env, binds ITS config dir
+            argv = runner.build_create_argv(Project(slug="demo"), profile_name="h", created_iso="c",
+                                            claude_config_path="/c", workspace_path="/w", provider=FAKE)
+            self.assertIn("FAKE_API_KEY", argv)
+            self.assertIn("FAKE_HOME=/home/agent/.fake", argv)
+            self.assertIn("/c:/home/agent/.fake", argv)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", argv)
+
+    def test_schema_rejects_other_providers_keys(self) -> None:
+        with _with_fake():
+            with self.assertRaises(ValidationError):
+                Project(slug="demo", env={"FAKE_API_KEY": "x"})
+            with self.assertRaises(ValidationError):
+                EnvMount(kind="env", name="FAKE_ALT_KEY")
+            with self.assertRaises(ValidationError):
+                EnvMount(kind="file", src="/h/auth.json", dst="/home/agent/.fake/auth.json")
+
+
+class LoginModePerProviderTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": self.tmp.name + "/cfg",
+                                                "CLAUDE_MAN_STATE_HOME": self.tmp.name + "/state"})
+        self.env.start()
+        self.fake = _with_fake()
+        self.fake.start()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.env.stop)
+        self.addCleanup(self.fake.stop)
+
+    def test_credential_path_and_hint_follow_the_provider(self) -> None:
+        p = Project(slug="demo", agent="fake", auth="login")
+        self.assertEqual(lifecycle.login_credential_path(p).name, "auth.json")
+        self.assertEqual(lifecycle.login_credential_path(Project(slug="demo", auth="login")).name,
+                         ".credentials.json")
+        self.assertIn("run `fakeagent login` inside the container (demo)", lifecycle._login_note(p))
+        self.assertIn("/login once inside the container", lifecycle._login_note(Project(slug="d", auth="login")))
+        self.assertEqual(lifecycle._login_note(Project(slug="d")), "")   # token mode: no note
+
+    def test_logout_removes_the_providers_file(self) -> None:
+        p = Project(slug="demo", agent="fake", auth="login")
+        projects_registry.save(p)
+        cred = config.claude_config_dir("demo") / "auth.json"
+        cred.parent.mkdir(parents=True)
+        cred.write_text("{}")
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: False):
+            res = lifecycle.logout("demo")
+        self.assertTrue(res.ok, res.detail)
+        self.assertFalse(cred.exists())
+        self.assertIn("auth.json", res.detail)
+
+    def test_seed_skips_identity_stub_for_a_provider_without_one(self) -> None:
+        cfg = seed_mod.seed_project_config(Project(slug="demo", agent="fake"), Profile(name="w", agent="fake"))
+        self.assertTrue(cfg.is_dir())
+        self.assertFalse((cfg / ".claude.json").exists())
+        (cfg / "auth.json").write_text("{}")
+        seed_mod.seed_project_config(Project(slug="demo", agent="fake"), None, overwrite_identity=True)
+        self.assertFalse((cfg / "auth.json").exists())   # forced re-seed unlinks the provider's cred
+        # the claude seed is unchanged
+        cfg2 = seed_mod.seed_project_config(Project(slug="cl"), Profile(name="w"))
+        self.assertTrue((cfg2 / ".claude.json").exists())
+
+    def test_profile_mint_api_key_kind_and_login_only(self) -> None:
+        prof = setup_token.mint("fk", agent="fake", api_key="sk-fake-123", email="a@b.c")
+        self.assertEqual(prof.agent, "fake")
+        path = config.profile_token_path("fk")
+        self.assertEqual(path.read_text().strip(), "sk-fake-123")
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(profiles_registry.load("fk").agent, "fake")
+        with self.assertRaises(RuntimeError):
+            setup_token.mint("fk2", agent="fake", api_key="has space")
+        lo = setup_token.mint("lo", agent="fake", login_only=True)
+        self.assertIsNone(profiles_registry.load_token("lo"))
+        self.assertEqual(lo.agent, "fake")
+        setup_token.renew("fk", api_key="sk-fake-456")
+        self.assertEqual(path.read_text().strip(), "sk-fake-456")
+        # a claude login-only profile needs no host claude at all
+        setup_token.mint("cl-login", login_only=True)
+        self.assertIsNone(profiles_registry.load_token("cl-login"))
+
+    def test_profile_picker_filters_by_agent(self) -> None:
+        profiles_registry.save(Profile(name="w"))
+        profiles_registry.save(Profile(name="fk", agent="fake"))
+        self.assertEqual([r.name for r in profilesview.rows("w")], ["fk", "w"])
+        self.assertEqual([r.name for r in profilesview.rows("w", "claude")], ["w"])
+        self.assertEqual([r.name for r in profilesview.rows("", "fake")], ["fk"])
+
+    def test_agent_mismatch_with_a_real_second_provider(self) -> None:
+        msg = lifecycle.agent_mismatch(Project(slug="d", agent="fake"), Profile(name="w"))
+        self.assertIn("claude profile", msg)
+        self.assertIn("runs fake", msg)
+
+    def test_cli_profile_add_flags(self) -> None:
+        parser = cli.build_parser()
+        ns = parser.parse_args(["profile", "add", "fk", "--agent", "fake", "--login-only", "--stdin"])
+        self.assertEqual((ns.agent, ns.login_only, ns.stdin), ("fake", True, True))
+        self.assertIsNone(parser.parse_args(["profile", "add", "w"]).agent)
+
+
+class AuthSpecValidationTest(unittest.TestCase):
+    def test_token_kind_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            AuthSpec(token_env="X", scrub_env=(), credential_file="a", identity_file="b", token_kind="magic")

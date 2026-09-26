@@ -45,14 +45,18 @@ def token_status(age_days: float | None) -> str:
     return f"{days}d aging" if age_days >= _TOKEN_AGING_DAYS else f"{days}d"
 
 
-def rows(current: str) -> list[Row]:
+def rows(current: str, agent: str | None = None) -> list[Row]:
     """All registry profiles (sorted, malformed ones skipped) as display rows.
 
     ``current`` is the project's *effective* profile name; the matching row is ``marked`` so the
-    screen can cue it and treat re-picking it as a no-op.
+    screen can cue it and treat re-picking it as a no-op. ``agent`` (Phase 7-auth) keeps only the
+    profiles of that provider — a project can only run a profile of its own agent
+    (``lifecycle.agent_mismatch``), so the picker never offers one that would be refused.
     """
     out: list[Row] = []
     for p in profiles_registry.list_profiles():
+        if agent is not None and p.agent != agent:
+            continue
         out.append(
             Row(
                 key=p.name,

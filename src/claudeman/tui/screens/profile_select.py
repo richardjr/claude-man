@@ -42,8 +42,9 @@ class ProfileSelectScreen(ModalScreen["str | None"]):
     #buttons Button { margin-left: 2; }
     """
 
-    def __init__(self, slug: str, current: str) -> None:
+    def __init__(self, slug: str, current: str, *, agent: str | None = None) -> None:
         super().__init__()
+        self._agent = agent   # only this provider's profiles are offered (7-auth)
         self._slug = slug
         self._current = current
 
@@ -63,7 +64,7 @@ class ProfileSelectScreen(ModalScreen["str | None"]):
     def on_mount(self) -> None:
         table = self.query_one("#profiles", DataTable)
         table.add_columns(*_COLUMNS)
-        for row in profilesview.rows(self._current):
+        for row in profilesview.rows(self._current, self._agent):
             mark = " ←" if row.marked else ""
             table.add_row(
                 f"{row.name}{mark}", row.account, "✓" if row.default else "", row.token, key=row.key

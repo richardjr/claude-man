@@ -32,6 +32,11 @@ PROVIDER = AgentProvider(
         scrub_env=config.SCRUBBED_ENV_KEYS,
         credential_file=".credentials.json",
         identity_file=".claude.json",
+        token_kind="oauth-token",
+        login_hint=("run /login once inside the container (`claudemanctl project claude {slug}`, "
+                    "then paste the code the browser shows back into the terminal — no in-container "
+                    "browser needed)"),
+        token_hint="mint one with `claude setup-token` (`claudemanctl profile add <name>`)",
     ),
     image=ImageSpec(
         version_build_arg="CLAUDE_VERSION",

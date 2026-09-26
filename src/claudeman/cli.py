@@ -46,23 +46,29 @@ def cmd_profile_list(_args) -> int:
     for p in rows:
         flag = " [default]" if p.default else ""
         email = f"  <{p.account_email}>" if p.account_email else ""
-        print(f"{p.name}{flag}{email}  [{_token_status(p.name)}]  {p.display_name}")
+        print(f"{p.name}{flag}  ({p.agent}){email}  [{_token_status(p.name)}]  {p.display_name}")
     return 0
 
 
 def cmd_profile_add(args) -> int:
     from .profiles import setup_token
 
+    api_key = None
+    if getattr(args, "stdin", False):
+        api_key = sys.stdin.readline().strip()   # `printenv OPENAI_API_KEY | … --stdin` (never argv)
     try:
         prof = setup_token.mint(
             args.name, sso=args.sso, login=args.login, console=args.console,
             email=args.email, default=args.default, display_name=args.display_name or "",
+            agent=args.agent or agents.DEFAULT_ID, login_only=args.login_only, api_key=api_key,
         )
     except Exception as exc:  # noqa: BLE001 - surface any mint/login failure to the operator
         print(f"profile add failed: {exc}", file=sys.stderr)
         return 1
     suffix = " [default]" if prof.default else ""
-    print(f"profile {prof.name!r} added ({prof.account_email or 'unknown account'}){suffix}")
+    kind = " (login-only — no token; for login-mode projects)" if args.login_only else ""
+    print(f"profile {prof.name!r} ({prof.agent}) added ({prof.account_email or 'unknown account'})"
+          f"{suffix}{kind}")
     return 0
 
 
@@ -197,9 +203,10 @@ def cmd_project_status(args) -> int:
     if args.slug and projects.exists(args.slug):
         p = projects.load(args.slug)
         if p.auth == "login":
-            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            from . import lifecycle
+            cred = lifecycle.login_credential_path(p)
             state = (f"present ({cred})" if cred.exists()
-                     else f"absent — run /login via `project claude {args.slug}`")
+                     else f"absent — {p.provider.auth.login_hint.format(slug=args.slug)}")
             print(f"\nauth: login (credential {state})")
         if p.ports:
             print("\npublished ports:")
@@ -1013,13 +1020,13 @@ def cmd_project_auth(args) -> int:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
         p = projects.load(args.slug)
-        print(f"{args.slug}: auth = {p.auth}")
+        print(f"{args.slug}: auth = {p.auth} (agent {p.agent})")
         if p.auth == "login":
-            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            cred = lifecycle.login_credential_path(p)
             if cred.exists():
                 print(f"credential: present ({cred})")
             else:
-                print(f"credential: absent — run /login via `project claude {args.slug}`")
+                print(f"credential: absent — {p.provider.auth.login_hint.format(slug=args.slug)}")
         return 0
     res = lifecycle.set_auth(args.slug, args.mode)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
@@ -1614,8 +1621,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # profile
     prof = sub.add_parser("profile", help="account profiles").add_subparsers(dest="cmd", required=True)
-    pa = prof.add_parser("add", help="mint a profile token via `claude setup-token`")
+    pa = prof.add_parser("add", help="add an account profile (mints its token per the agent's auth kind)")
     pa.add_argument("name", type=_slug_arg)
+    pa.add_argument("--agent", choices=agents.ids(),
+                    help="the provider this account belongs to (default claude). An api-key-kind "
+                         "provider prompts for the key (hidden; or --stdin) instead of setup-token")
+    pa.add_argument("--login-only", action="store_true", dest="login_only",
+                    help="record the profile WITHOUT minting a token — for projects that use "
+                         "`--auth login` (the credential is minted inside the container)")
+    pa.add_argument("--stdin", action="store_true",
+                    help="read an api-key-kind token from stdin (e.g. `printenv OPENAI_API_KEY | …`)")
     pa.add_argument("--default", action="store_true", help="make this the default profile")
     pa.add_argument("--email", help="account email (else read from `claude auth status`)")
     pa.add_argument("--display-name", dest="display_name", help="human-readable label")

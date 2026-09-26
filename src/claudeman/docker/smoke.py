@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
-from .. import config
+from .. import agents, config
 from ..registry import profiles as profiles_registry
 from ..registry.schema import Project
 from ..tools import library as tools_library
@@ -295,7 +295,7 @@ def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = ()) -> Smok
             inject_token=bool(token), image=tag,
         )
         env = dict(os.environ)
-        for key in config.SCRUBBED_ENV_KEYS:
+        for key in (*config.SCRUBBED_ENV_KEYS, *agents.credential_env_names()):
             env.pop(key, None)
         if token:
             env[runner.OAUTH_TOKEN_ENV] = token

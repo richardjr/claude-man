@@ -39,7 +39,17 @@ class AuthSpec:
     token_env: str
     scrub_env: tuple[str, ...]
     credential_file: str
-    identity_file: str          # the onboarding/identity stub the seed writes (e.g. ".claude.json")
+    identity_file: str          # the onboarding/identity stub the seed writes (e.g. ".claude.json");
+    #                             "" = the provider has no identity stub (no seed, no up-time verify)
+    token_kind: str = "oauth-token"   # "oauth-token" (minted by the agent's own setup flow on the
+    #                                    host) | "api-key" (pasted; billed at API rates)
+    login_hint: str = ""        # operator instruction to mint the login-mode credential IN-CONTAINER
+    #                             ("{slug}" is substituted); the credential lands in the config bind
+    token_hint: str = ""        # operator instruction to mint the token-mode credential on the HOST
+
+    def __post_init__(self) -> None:
+        if self.token_kind not in ("oauth-token", "api-key"):
+            raise ValueError(f"token_kind {self.token_kind!r} must be oauth-token | api-key")
 
 
 @dataclass(frozen=True)

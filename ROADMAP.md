@@ -349,7 +349,7 @@ per-provider `forbidden_env` table — invariant 9); a **headless-run seam** (`R
 to be evaluated as the single transport); and a **third provider** to prove the seam. Jev (TypeSafe)
 is NOT a provider — it is a decision model and lands with the manager tier (Phase 16)._
 
-- [ ] **7-auth:** `AuthSpec` carrying both modes as data + per-provider `forbidden_env` (invariant 9); `profile add --agent codex` (API-key paste, hidden, `0600`); the `login`-mode identity verify/backfill made provider-generic
+- [x] **7-auth:** *(LANDED 2026-09-26)* `AuthSpec` carrying both modes as data (`token_kind`/`login_hint`/`token_hint`/`credential_file`/optional `identity_file`) + the cross-provider credential scrub `agents.credential_env_names()`/`is_forbidden_env_name` (invariant 9) at every operator-env entry; `profile add --agent <id> [--login-only | --stdin]` (api-key kind = hidden prompt, `0600`; login-only = no token) + `renew` per kind; the login-mode plumbing (credential path/present, notes, `set_auth`, `logout`, CLI status/auth, the TUI Auth… screen, the seed's identity stub + credential unlink, the up-time identity verify) keyed on the provider; the Profile… picker filtered to the project's agent. The mount-dst denylist is evaluated at validation time so a provider registered later is covered
 - [ ] **7-run:** the headless seam — `RunSpec`/`AgentEvent` for claude first; `agentryctl project run <slug> "<prompt>"` (streams; `--json` raw); the ACP spike note
 - [ ] **7e:** a third provider (gemini or opencode — operator to pick) so the seam is not a two-case special
 

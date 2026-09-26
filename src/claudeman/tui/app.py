@@ -1421,9 +1421,9 @@ class ClaudeManApp(App):
             self._log("[red]auth: select a defined project (orphan rows aren't managed)[/]")
             return
         project = projects.load(slug)
-        cred = (config.claude_config_dir(slug) / ".credentials.json").exists()
+        cred = lifecycle.login_credential_present(project)
         self._log(f"managing auth for {slug} (a mode switch recreates to apply)")
-        self.push_screen(AuthScreen(slug, project.auth, cred),
+        self.push_screen(AuthScreen(slug, project.auth, cred, provider=project.provider),
                          lambda choice: self._on_auth(slug, choice))
 
     def _on_auth(self, slug: str, choice) -> None:
@@ -1597,7 +1597,8 @@ class ClaudeManApp(App):
         eff = lifecycle.effective_profile(project)  # mark the EFFECTIVE profile (None = inherits default)
         current = eff.name if eff else (project.profile or "")
         self._log(f"changing profile for {slug} (recreates to apply; re-seeds identity)")
-        self.push_screen(ProfileSelectScreen(slug, current), lambda name: self._on_profile(slug, name))
+        self.push_screen(ProfileSelectScreen(slug, current, agent=project.agent),
+                         lambda name: self._on_profile(slug, name))
 
     def _on_profile(self, slug: str, name) -> None:
         if name is None:  # cancelled, or picked the current profile — nothing to recreate
