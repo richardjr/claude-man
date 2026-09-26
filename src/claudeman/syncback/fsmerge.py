@@ -36,7 +36,7 @@ def timestamp() -> str:
 
 
 def copy_dir_filtered(src_dir: Path, dst_dir: Path, *, root_rel: str, src_root: Path,
-                      gate: bool) -> list[str]:
+                      gate: bool, policy=None) -> list[str]:
     """Recursively copy ``src_dir`` -> ``dst_dir``, applying per-entry guards (the security boundary):
 
     - cruft names (``TREE_EXCLUDE_NAMES``) are skipped;
@@ -54,12 +54,13 @@ def copy_dir_filtered(src_dir: Path, dst_dir: Path, *, root_rel: str, src_root: 
         rel = f"{root_rel}/{name}"
         if name in TREE_EXCLUDE_NAMES:
             continue
-        if gate and (name == "settings.json" or denylist.is_denied_path(name)):
+        settings = policy.settings_file if policy is not None else "settings.json"
+        if gate and ((settings and name == settings) or denylist.is_denied_path(name, policy)):
             notes.append(f"{rel}: skipped (denylisted name)")
             continue
         dst = dst_dir / name
         if entry.is_symlink():
-            note = check_symlink(entry, rel, src_root=src_root, gate=gate)
+            note = check_symlink(entry, rel, src_root=src_root, gate=gate, policy=policy)
             if note:
                 notes.append(note)
                 continue
@@ -68,13 +69,14 @@ def copy_dir_filtered(src_dir: Path, dst_dir: Path, *, root_rel: str, src_root: 
                 continue
             replace_with_file(dst, anchor=src_root, rel_parts=tuple(rel.split("/")))
         elif entry.is_dir():
-            notes += copy_dir_filtered(entry, dst, root_rel=rel, src_root=src_root, gate=gate)
+            notes += copy_dir_filtered(entry, dst, root_rel=rel, src_root=src_root, gate=gate,
+                                       policy=policy)
         else:
             replace_with_file(dst, anchor=src_root, rel_parts=tuple(rel.split("/")))
     return notes
 
 
-def check_symlink(link: Path, rel: str, *, src_root: Path, gate: bool) -> str | None:
+def check_symlink(link: Path, rel: str, *, src_root: Path, gate: bool, policy=None) -> str | None:
     """Return a skip-note if ``link`` is an unsafe symlink, else None (safe to dereference).
 
     Refuses a target that escapes ``src_root`` (catches ``-> /etc``, ``-> ~/.ssh``) and, on the gated
@@ -87,7 +89,7 @@ def check_symlink(link: Path, rel: str, *, src_root: Path, gate: bool) -> str | 
             tgt_rel = link.resolve().relative_to(src_root.resolve()).as_posix()
         except (OSError, ValueError):
             return f"{rel}: skipped (unresolvable symlink)"
-        if denylist.is_denied_path(tgt_rel):
+        if denylist.is_denied_path(tgt_rel, policy):
             return f"{rel}: skipped (symlink targets denylisted {tgt_rel})"
     return None
 

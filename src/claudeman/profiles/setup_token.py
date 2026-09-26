@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 
-from .. import config
+from .. import agents, config
 from ..registry import profiles as registry
 from ..registry.schema import Profile
 
@@ -102,8 +102,36 @@ def mint(
     email: str | None = None,
     default: bool = False,
     display_name: str = "",
+    agent: str = agents.DEFAULT_ID,
+    login_only: bool = False,
+    api_key: str | None = None,
 ) -> Profile:
-    """Create a new profile: (optionally) log in, mint + store a token, write the profile TOML."""
+    """Create a new profile: (optionally) log in, mint + store a token, write the profile TOML.
+
+    ``agent`` scopes the profile to a provider (Phase 7-auth). How the token is minted follows the
+    provider's ``auth.token_kind``: ``oauth-token`` (claude — the interactive ``setup-token`` flow
+    below) or ``api-key`` (a pasted key — ``api_key``, else a hidden prompt — stored ``0600`` exactly
+    like the OAuth token and injected as the provider's ``token_env``). ``login_only`` writes the
+    profile record WITHOUT a token: the account identity for projects that run in ``login`` auth
+    mode (the credential is minted in-container, so the profile needs none)."""
+    provider = agents.resolve(agent)
+    if login_only:
+        profile = Profile(name=name, agent=agent, display_name=display_name or name,
+                          account_email=email or "", default=default)
+        registry.save(profile, make_default=default)
+        return profile
+    if provider.auth.token_kind == "api-key":
+        key = (api_key if api_key is not None else _prompt_api_key(provider)).strip()
+        if not key or any(c.isspace() for c in key):
+            raise RuntimeError(f"{provider.display_name} API key must be a single non-empty token")
+        _store_token(name, key)
+        profile = Profile(name=name, agent=agent, display_name=display_name or name,
+                          account_email=email or "", default=default)
+        registry.save(profile, make_default=default)
+        return profile
+    if provider is not agents.CLAUDE:
+        raise RuntimeError(f"{provider.display_name}: no host mint flow for token_kind "
+                           f"{provider.auth.token_kind!r} (use --login-only)")
     if login or sso or console:
         argv = ["claude", "auth", "login"]
         if sso:
@@ -122,6 +150,7 @@ def mint(
     resolved_email = email or _account_email()
     profile = Profile(
         name=name,
+        agent=agent,
         display_name=display_name or name,
         account_email=resolved_email,
         default=default,
@@ -130,9 +159,25 @@ def mint(
     return profile
 
 
-def renew(name: str) -> Profile:
-    """Re-mint the token for an existing profile, preserving its identity/default settings."""
+def _prompt_api_key(provider) -> str:
+    """Hidden prompt for an API-key-kind provider token (never echoed; never argv)."""
+    import getpass
+    if not sys.stdin.isatty():
+        raise RuntimeError(f"{provider.display_name} API key: pass --stdin or run on a TTY")
+    return getpass.getpass(f"{provider.display_name} API key ({provider.auth.token_env}): ")
+
+
+def renew(name: str, *, api_key: str | None = None) -> Profile:
+    """Re-mint the token for an existing profile, preserving its identity/default settings. An
+    ``api-key``-kind profile re-prompts (or takes ``api_key``); an OAuth one re-runs setup-token."""
     profile = registry.load(name)  # raises FileNotFoundError if the profile doesn't exist
+    provider = agents.resolve(profile.agent)
+    if provider.auth.token_kind == "api-key":
+        key = (api_key if api_key is not None else _prompt_api_key(provider)).strip()
+        if not key or any(c.isspace() for c in key):
+            raise RuntimeError(f"{provider.display_name} API key must be a single non-empty token")
+        _store_token(name, key)
+        return profile
     token = _mint_token()
     _store_token(name, token)
     return profile
@@ -147,11 +192,12 @@ def account_info(token: str) -> dict:
     ``ANTHROPIC_*`` is scrubbed so it can't outrank the token.
     """
     env = dict(os.environ)
-    for key in config.SCRUBBED_ENV_KEYS:
+    for key in (*config.SCRUBBED_ENV_KEYS, *agents.credential_env_names()):
         env.pop(key, None)
-    env[config.OAUTH_TOKEN_ENV] = token
+    provider = agents.CLAUDE   # this IS the claude `auth status` probe
+    env[provider.auth.token_env] = token
     with tempfile.TemporaryDirectory(prefix="claude-man-verify-") as tmp:
-        env["CLAUDE_CONFIG_DIR"] = tmp
+        env[provider.config_dir_env] = tmp
         cp = subprocess.run(
             ["claude", "auth", "status", "--json"],
             env=env, capture_output=True, text=True, check=False,

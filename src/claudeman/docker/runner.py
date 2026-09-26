@@ -21,7 +21,8 @@ from __future__ import annotations
 import os
 import subprocess
 
-from .. import config, hostplatform
+from .. import agents, config, hostplatform
+from ..agents import AgentProvider
 from ..registry.schema import Project
 from . import labels
 
@@ -48,10 +49,10 @@ _HARDENING = [
                f"uid={config.CONTAINER_UID},gid={config.CONTAINER_GID},mode=0700",
 ]
 
-# Baked-but-also-explicit env (matches images/base/Dockerfile).
+# Baked-but-also-explicit env (matches images/base/Dockerfile). The agent's config-dir pointer
+# (CLAUDE_CONFIG_DIR for claude) is provider-owned and inserted by ``_baked_env`` right after HOME.
 _BAKED_ENV = {
     "HOME": config.CONTAINER_HOME,
-    "CLAUDE_CONFIG_DIR": config.CONTAINER_CLAUDE_CONFIG,
     "XDG_CACHE_HOME": config.CONTAINER_CACHE,
     "XDG_STATE_HOME": config.CONTAINER_STATE,
     # Redirect git/gh config onto the writable .cache tmpfs (rootfs is read-only). Identity itself is
@@ -109,6 +110,23 @@ _BAKED_ENV = {
 }
 
 
+def _baked_env(provider: AgentProvider) -> dict[str, str]:
+    """``_BAKED_ENV`` with the provider's config-dir pointer (``CLAUDE_CONFIG_DIR=…`` for claude)
+    inserted after HOME — the agent-specific half of the baked env (Phase 7a seam)."""
+    env = {"HOME": _BAKED_ENV["HOME"], provider.config_dir_env: provider.config_dir}
+    env.update((k, v) for k, v in _BAKED_ENV.items() if k != "HOME")
+    return env
+
+
+def _is_scrubbed(key: str, provider: AgentProvider) -> bool:
+    """True for any auth/token key that must never be rendered from operator-supplied env: the
+    global mis-bill scrub, the provider's own scrub set + token env (sole-sourced pass-through), and
+    GH_TOKEN (sole-sourced from gh_token.py). Invariant 1."""
+    return (key in config.SCRUBBED_ENV_KEYS or key in provider.auth.scrub_env
+            or key == provider.auth.token_env or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV
+            or key in agents.credential_env_names())   # every OTHER provider's names too (invariant 9)
+
+
 def _render_memory(limit: str) -> list[str]:
     """Render the HARD memory cap — ``--memory X --memory-swap X``. PART OF THE FLOOR, ALWAYS PRESENT
     (issue #29): unlike the additive renderers below it is never empty, only its VALUE is operator-chosen
@@ -149,7 +167,7 @@ def _render_env_mounts(project: Project, *, ssh_auth_sock: str | None) -> list[s
             # Pass-through name only; the value is supplied via the child env in create() from the
             # 0600 state-tier store, so it never reaches argv. Schema rejects forbidden names; this
             # is belt-and-braces so one can never be rendered even if a flagged mount slips through.
-            if m.name and not config.is_forbidden_env_name(m.name):
+            if m.name and not agents.is_forbidden_env_name(m.name):
                 args += ["-e", m.name]
         elif m.kind == "ssh":
             args += ["--tmpfs",
@@ -276,8 +294,12 @@ def build_create_argv(
     tint: bool = False,
     memory: str = config.DEFAULT_CONTAINER_MEMORY,
     image: str = "",
+    provider: AgentProvider = agents.DEFAULT,
 ) -> list[str]:
     """Render the full ``docker create`` argv for a project's hardened container.
+
+    ``provider`` (Phase 7a) owns the agent-specific tokens: the config-dir env pointer + bind
+    destination and the auth token env name. The hardened floor is identical for every provider.
 
     ``image`` overrides the image tag (default ``project.image``, the overlay) — the lifecycle
     passes the resolved tools-layer tag for a project with a ``tools`` selection. Only the final
@@ -303,12 +325,12 @@ def build_create_argv(
     argv += _render_memory(memory)
 
     # Baked env (explicit for clarity even though the image bakes it).
-    for key, value in _BAKED_ENV.items():
+    for key, value in _baked_env(provider).items():
         argv += ["-e", f"{key}={value}"]
 
     # OAuth token: pass-through form, value stays out of argv.
     if inject_token:
-        argv += ["-e", OAUTH_TOKEN_ENV]
+        argv += ["-e", provider.auth.token_env]
     # Optional GitHub token (opt-in): same pass-through form so the value never reaches argv.
     if inject_gh_token:
         argv += ["-e", GH_TOKEN_ENV]
@@ -317,7 +339,7 @@ def build_create_argv(
     # ALWAYS skipped here (like the OAuth token): its only legitimate source is the configured
     # state-tier token injected pass-through above — never a value in argv / the secret-free config.
     for key, value in project.env.items():
-        if key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV:
+        if _is_scrubbed(key, provider):
             continue
         argv += ["-e", f"{key}={value}"]
     # env_file vars: injected as pass-through (-e KEY, value supplied via the subprocess
@@ -328,7 +350,7 @@ def build_create_argv(
     for key in file_env or {}:
         # GH_TOKEN is sole-sourced from the configured token (above), never an env_file — so it's
         # always skipped here too (read_env_file already scrubs it; this is belt-and-braces).
-        if (key in config.SCRUBBED_ENV_KEYS or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV):
+        if _is_scrubbed(key, provider):
             continue
         argv += ["-e", key]
     # Git author identity (GIT_CONFIG_COUNT/KEY_n/VALUE_n) — non-secret name/email, so rendered as a
@@ -344,7 +366,7 @@ def build_create_argv(
         argv += ["-e", f"{config.CONTAINER_PROJECT_TINT_ENV}={config.project_tint(project.slug)}"]
 
     # Writable persistent binds + read-only rootfs everywhere else.
-    argv += ["-v", f"{cfg_path}:{config.CONTAINER_CLAUDE_CONFIG}"]
+    argv += ["-v", f"{cfg_path}:{provider.config_dir}"]
     argv += ["-v", f"{ws_path}:{config.CONTAINER_WORKSPACE}"]
     # Env-mounts (ssh + files) + published ports + strict-egress wiring — additive only; the hardened
     # floor above is untouched (each renderer is unit-pinned to add only its own value tokens).
@@ -404,7 +426,7 @@ def read_env_file(path: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if (not key or key in config.SCRUBBED_ENV_KEYS
+            if (not key or key in config.SCRUBBED_ENV_KEYS or key in agents.credential_env_names()
                     or key == OAUTH_TOKEN_ENV or key == GH_TOKEN_ENV):
                 continue  # GH_TOKEN never comes from an env_file — only the configured state-tier token
             out[key] = value
@@ -431,6 +453,7 @@ def create(
     tint: bool = False,
     memory: str = config.DEFAULT_CONTAINER_MEMORY,
     image: str = "",
+    provider: AgentProvider = agents.DEFAULT,
 ) -> subprocess.CompletedProcess:
     """Create the container, passing the token(s) + env_file values through the subprocess env.
 
@@ -454,14 +477,14 @@ def create(
         project, profile_name=profile_name, version=version, created_iso=created_iso,
         file_env=file_env, inject_token=bool(token), inject_gh_token=bool(gh_token),
         ssh_auth_sock=ssh_sock, git_env=git_env, shell_history_host_dir=shell_history_host_dir,
-        tint=tint, memory=memory, image=image,
+        tint=tint, memory=memory, image=image, provider=provider,
     )
     env = dict(os.environ)
-    for key in config.SCRUBBED_ENV_KEYS:
-        env.pop(key, None)
+    for key in (*config.SCRUBBED_ENV_KEYS, *agents.credential_env_names()):
+        env.pop(key, None)   # never inherit ANY provider's credential from the host env (invariant 9)
     env.pop(GH_TOKEN_ENV, None)  # never inherit a host GH_TOKEN — only the configured token is injected
     if token:
-        env[OAUTH_TOKEN_ENV] = token
+        env[provider.auth.token_env] = token
     env.update(file_env)
     if gh_token:
         env[GH_TOKEN_ENV] = gh_token  # the sole source; argv has the pass-through `-e GH_TOKEN`
@@ -472,7 +495,7 @@ def create(
     # kind="env" env-mount values (pass-through; argv has the `-e NAME` from _render_env_mounts).
     # Forbidden names are filtered so an operator env var can never shadow the scrubbed/auth keys.
     for key, value in (env_secrets or {}).items():
-        if not config.is_forbidden_env_name(key):
+        if not agents.is_forbidden_env_name(key):
             env[key] = value
     return _run(argv, env=env)
 

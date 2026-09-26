@@ -4,6 +4,8 @@
 
 [project]
 slug    = "my-project"
+# agent = "claude"           # the coding-agent provider (default claude; codex with Phase 7c —
+#                             # docs/AGENTS.md). Fixed at create; the profile must match the agent
 profile = "work"            # optional; omit to inherit the default profile
 overlay = "node"            # image variant: base | python | rust | node | python-node | terraform
 # tools = ["jq", "kubectl"]     # optional: approved tools (docs/TOOLS.md — `claudemanctl tools list`)

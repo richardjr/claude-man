@@ -17,9 +17,10 @@ import fcntl
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import (
+    agents,
     assets,
     config,
     env_secrets,
@@ -268,16 +269,25 @@ def _has_ssh_mount(project: Project) -> bool:
     return any(m.kind == "ssh" for m in project.env_mount)
 
 
+def image_tools(project: Project) -> tuple[str, ...]:
+    """PURE: the tool selection a project's image bakes — its ``tools`` plus the provider's own
+    ``image.tools`` (order-preserving, deduped)."""
+    return tuple(dict.fromkeys((*project.tools, *project.provider.image.tools)))
+
+
 def resolve_image(project: Project) -> tuple[str, str]:
     """The image NAME a project's container runs on: its overlay, or — with a ``tools`` selection —
     the content-addressed tools-layer name (docs/TOOLS.md), whose Dockerfile is rendered + written
     to the state tier here so the build chain can reach it. Returns ``(name, error)``; ``error``
     is set (and ``name`` empty) when the selection names a tool the registry no longer has — an
     image must never be built with a selected tool silently missing."""
-    if not project.tools:
+    # The provider's own install (codex = the `codex` registry entry) rides the SAME tools layer as
+    # the operator's selection — implicit, never something the operator has to select.
+    selection = image_tools(project)
+    if not selection:
         return project.overlay, ""
     try:
-        return tools_render.materialize(project.overlay, project.tools), ""
+        return tools_render.materialize(project.overlay, selection), ""
     except (tools_library.LibraryError, OSError) as exc:
         return "", (f"{project.slug}: cannot render the tools layer: {exc} — fix the selection "
                     f"(`claudemanctl project tools rm {project.slug} <name>`)")
@@ -303,6 +313,10 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
 
     profile = effective_profile(project)
     profile_name = profile.name if profile else "none"
+    provider = project.provider
+    mismatch = agent_mismatch(project, profile)
+    if mismatch:
+        return Result(False, mismatch)
     # Login mode (invariant 1's opt-in amendment): resolve token=None DELIBERATELY — no
     # CLAUDE_CODE_OAUTH_TOKEN env is rendered, and the in-container /login-minted credential in
     # the claude-config bind is the auth instead (a fully-minted profile token is ignored).
@@ -339,7 +353,10 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                 if m.kind == "env" and not m.error and m.name in stored}
     # Stamp the container's version label with the image's ACTUAL baked claude (the source of truth),
     # not the build-time DEFAULT — so the Version column stays truthful after an on-start image rebuild.
-    version = images.image_claude_version(project.overlay) or config.DEFAULT_CLAUDE_VERSION
+    # Read the version off the RESOLVED image (a codex project's version label lives on its tools
+    # layer; claude's overlays/layers inherit the base label, so this is equivalent for claude).
+    version = (images.image_claude_version(image_name, provider=provider)
+               or provider.image.default_version)
     settings = settings_registry.load()
     # Persistent shell history (opt-in; default off keeps the hardened floor byte-identical). When on,
     # ensure the per-project state dir exists 0700 (current uid == container uid 1000) so the agent can
@@ -371,7 +388,7 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                        git_env=gitconfig.container_env(), version=version,
                        shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header,
                        tint=settings.terminal_tint, memory=settings.container_memory,
-                       image=config.image_tag(image_name))
+                       image=config.image_tag(image_name), provider=provider)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
@@ -381,8 +398,8 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         if note:
             notes.append(note)
     elif not token:
-        notes.append("no token — in-container `claude` won't authenticate "
-                     "(mint one with `claude setup-token` → "
+        notes.append(f"no token — in-container `{provider.binary}` won't authenticate "
+                     f"({provider.auth.token_hint} → "
                      f"{config.profile_token_path(profile_name)})" if profile
                      else "no profile/token — define one with `claudemanctl profile add`")
     if clone_failures:
@@ -440,7 +457,12 @@ def check_update(project: Project) -> UpdateCheck:
         return UpdateCheck(note="config unreadable — skipping update check")
     if not settings.image_update_check:
         return UpdateCheck(note="update check disabled")
-    current = images.image_claude_version(project.overlay) or ""
+    provider = project.provider
+    if provider.updates is None:
+        # No release pointer (codex: pinned by its registry entry) — the claude channel/pin settings
+        # must not be applied to it. Fail open: start on the existing image.
+        return UpdateCheck(note=f"{provider.id}: version pinned by its tool entry (no channel check)")
+    current = images.image_claude_version(project.overlay, provider=provider) or ""
     # Resolve the target: a per-project pin wins, then the global pin, else the tracked channel.
     pin = (project.claude_version or settings.claude_version_pin or "").strip()
     if pin:
@@ -450,7 +472,7 @@ def check_update(project: Project) -> UpdateCheck:
             return UpdateCheck(current=current, target=pin, note=f"pinned {pin} (image current)")
         # Image drifted off the pin — offer to rebuild to it (an explicit pin wins, up or down).
         return UpdateCheck(current=current, target=pin, prompt=True, note=f"pinned {pin}")
-    rc = updates.resolve_channel(settings.claude_channel)
+    rc = updates.resolve_channel(settings.claude_channel, provider=provider)
     if not rc.version:
         return UpdateCheck(current=current, note=rc.note or "offline")  # fail open
     target = rc.version
@@ -500,7 +522,8 @@ def _maybe_rebuild_for_update(project: Project, version: str, *, on_progress: Pr
         if on_progress:
             on_progress(f"[update] {img_err}; starting on the existing image")
         return
-    rb = images.rebuild_chain(image_name, claude_version=version, on_line=on_progress)
+    rb = images.rebuild_chain(image_name, claude_version=version, on_line=on_progress,
+                              provider=project.provider)
     if not rb.ok:
         if on_progress:
             on_progress(f"[update] rebuild failed: {rb.detail}; starting on the existing image")
@@ -726,6 +749,8 @@ def _write_baseline_if_absent(slug: str, *, on_progress: ProgressFn | None = Non
     refreshed only after a successful merge. Best-effort — never raises (a baseline fault must never
     block a container start)."""
     try:
+        if not projects_registry.load(slug).provider.syncback:
+            return   # no sync-back policy for this provider (codex until 7d) — never a partial sync
         if config.baseline_path(slug).exists():
             return
         syncback_baseline.write_baseline(slug)
@@ -743,6 +768,8 @@ def _pending_syncback_note(slug: str) -> str:
     SYNC-2), so claude never auto-syncs config out; this stop-time nudge is the only prompt the
     operator gets to review what the agent changed."""
     try:
+        if not projects_registry.load(slug).provider.syncback:
+            return ""
         n = len(syncback_detect.detect_changes(slug))
     except Exception:  # noqa: BLE001 - a detect fault must not make a stop look failed
         return ""
@@ -773,8 +800,8 @@ def sync_plan(slug: str) -> SyncPlan:
 
     Read-only EXCEPT for writing a fresh baseline when none exists yet (the documented no-baseline
     degradation in ``detect.detect_changes``)."""
-    if not projects_registry.exists(slug):
-        return SyncPlan(slug, ())
+    if not projects_registry.exists(slug) or not projects_registry.load(slug).provider.syncback:
+        return SyncPlan(slug, ())   # no policy for this provider → nothing is ever offered
     rows = [
         SyncChange(c, tuple(syncback_diff.change_diff(slug, c)))
         for c in syncback_detect.detect_changes(slug)
@@ -788,6 +815,10 @@ def sync_apply(slug: str, decisions: dict[str, str]) -> Result:
     ``decisions`` maps a change label (``artifact/unit``) → ``accept`` / ``reject`` / ``skip``."""
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    if not project.provider.syncback:
+        return Result(False, f"{slug}: {project.provider.display_name} has no sync-back policy yet "
+                             f"(docs/AGENTS.md 7d) — nothing is synced back for it")
     try:
         rep = syncback_merge.apply_accepted(slug, decisions)
     except Exception as exc:  # noqa: BLE001 - surface as a red Result, never crash the caller
@@ -847,21 +878,144 @@ def set_tools(slug: str, names: tuple[str, ...]) -> Result:
 
 
 # ---------------------------------------------------------------------------
+# Headless run (Phase 7-run — the manager tier's primitive): ONE non-interactive agent session
+# inside the project's RUNNING container, its event stream normalised by the provider's RunSpec.
+# ---------------------------------------------------------------------------
+@dataclass
+class RunOutcome:
+    ok: bool
+    detail: str
+    session_id: str = ""
+    text: str = ""                 # the final agent message
+    usage: dict[str, int] = field(default_factory=dict)
+    events: int = 0
+    returncode: int | None = None
+
+
+def run_exec_argv(project: Project, request: agents.RunRequest) -> list[str]:
+    """PURE: the host-side ``docker exec`` argv for a headless run — ``-i`` (the prompt rides
+    stdin), the project's launch workdir, then the provider's own argv. Raises ``ValueError`` for
+    a provider with no headless mode."""
+    spec = project.provider.run
+    if spec is None:
+        raise ValueError(f"{project.provider.display_name} has no headless-run mode")
+    return ["docker", "exec", "-i", "-w", project.launch_workdir, project.container,
+            *spec.argv(request)]
+
+
+def run(project: Project, request: agents.RunRequest, *,
+        on_event: Callable[[agents.AgentEvent], None] | None = None,
+        timeout: float | None = None) -> RunOutcome:
+    """Run ONE headless session in ``project``'s container and stream its normalised events.
+
+    Requires a RUNNING container (callers ``up`` first — the CLI/TUI do, like shell/claude).
+    Refuses while the project's agent is already live in the container (invariant 6 — a headless
+    run IS an agent process; the guard is the same /proc comm probe ``spawn_claude`` uses). The
+    prompt goes to the agent's stdin; every stdout line is decoded as JSON and handed to the
+    provider's ``parse``; non-JSON lines are ignored. The outcome carries the last message text,
+    the session id and the usage from the turn_done/failed event. ``timeout`` bounds the whole run
+    (None = unbounded — the caller's choice); on expiry the exec is killed and the outcome fails."""
+    import json
+    import subprocess
+
+    from .tui import terminals   # textual-free; the one-agent-per-container probe lives there
+
+    if project.provider.run is None:
+        return RunOutcome(False, f"{project.provider.display_name} has no headless-run mode")
+    if not runner.is_running(project.slug):
+        return RunOutcome(False, f"{project.slug} is not running — `project up {project.slug}` first")
+    if terminals.claude_already_running(project.slug, provider=project.provider):
+        return RunOutcome(False, f"{project.provider.binary} is already running in {project.slug!r} "
+                                 f"— one agent per container (invariant 6); wait for it or use "
+                                 f"that session")
+    argv = run_exec_argv(project, request)
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        return RunOutcome(False, f"could not exec into {project.container}: {exc}")
+    outcome = RunOutcome(True, "")
+    last_text = ""
+    try:
+        try:
+            proc.stdin.write(request.prompt)
+            if not request.prompt.endswith("\n"):
+                proc.stdin.write("\n")
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass   # the agent may have exited before reading (surfaced via rc/stderr below)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            for ev in project.provider.run.parse(rec):
+                outcome.events += 1
+                if ev.session_id and not outcome.session_id:
+                    outcome.session_id = ev.session_id
+                if ev.kind == "message" and ev.text:
+                    last_text = ev.text
+                if ev.kind in ("turn_done", "failed"):
+                    outcome.usage = dict(ev.usage) or outcome.usage
+                    if ev.kind == "failed":
+                        outcome.ok = False
+                        outcome.detail = ev.text or "run failed"
+                    elif ev.text and not last_text:
+                        last_text = ev.text
+                if on_event is not None:
+                    on_event(ev)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return RunOutcome(False, f"run timed out after {timeout}s", session_id=outcome.session_id,
+                              text=last_text, usage=outcome.usage, events=outcome.events)
+    finally:
+        stderr_tail = ""
+        try:
+            if proc.stderr is not None:
+                stderr_tail = proc.stderr.read()[-2000:].strip()
+        except (OSError, ValueError):
+            pass
+    outcome.returncode = proc.returncode
+    outcome.text = last_text
+    if proc.returncode != 0 and outcome.ok:
+        outcome.ok = False
+        outcome.detail = (f"{project.provider.binary} exited {proc.returncode}"
+                          + (f": {stderr_tail.splitlines()[-1]}" if stderr_tail else ""))
+    if outcome.ok and not outcome.detail:
+        outcome.detail = f"run complete ({outcome.events} events)"
+    return outcome
+
+
+# ---------------------------------------------------------------------------
 # Login auth mode (invariant 1's opt-in amendment): no token env is injected; the in-container
 # claude mints its own .credentials.json in the per-project claude-config bind via /login.
 # ---------------------------------------------------------------------------
-def _login_credential_path(slug: str):
-    """The in-container-minted credential's host-side location (inside the claude-config bind)."""
-    return config.claude_config_dir(slug) / ".credentials.json"
+def login_credential_path(project: Project):
+    """The in-container-minted credential's host-side location (inside the project's config bind):
+    the PROVIDER's credential file name (claude ``.credentials.json``, codex ``auth.json``)."""
+    return config.claude_config_dir(project.slug) / project.provider.auth.credential_file
+
+
+def login_credential_present(project: Project) -> bool:
+    return login_credential_path(project).exists()
 
 
 def _login_note(project: Project) -> str:
-    """The first-launch /login hint — '' unless a login-mode project has no minted credential."""
-    if project.auth != "login" or _login_credential_path(project.slug).exists():
+    """The first-launch login hint — '' unless a login-mode project has no minted credential.
+    The wording is the provider's (``auth.login_hint``)."""
+    if project.auth != "login" or login_credential_present(project):
         return ""
-    return (f"login mode — no credential yet; run /login once inside the container "
-            f"(`claudemanctl project claude {project.slug}`, then paste the code the browser "
-            f"shows back into the terminal — no in-container browser needed)")
+    hint = project.provider.auth.login_hint.format(slug=project.slug) or "log in once inside the container"
+    return f"login mode — no credential yet; {hint}"
 
 
 def login_identity_action(seeded_email: str, profile_email: str) -> str:
@@ -887,8 +1041,8 @@ def _verify_login_identity(project: Project) -> str:
     cross-account guards (``account_mismatch`` on recreate) work for login-created profiles.
     Returns a '; '-prefixed note for the ``up`` detail, or ''."""
     profile = effective_profile(project)
-    if profile is None:
-        return ""
+    if profile is None or not project.provider.auth.identity_file:
+        return ""   # no identity stub for this provider — nothing to verify/backfill
     seeded = seed_mod.read_seeded_email(project.slug)
     action = login_identity_action(seeded, profile.account_email)
     if action == "backfill":
@@ -902,6 +1056,15 @@ def _verify_login_identity(project: Project) -> str:
                 f"is {profile.account_email!r} — /login again in-container, or "
                 f"`project recreate {project.slug} --profile <right-one> --force` to re-seed")
     return ""
+
+
+def agent_mismatch(project: Project, profile: Profile | None) -> str:
+    """Pure: a refusal message when ``profile`` belongs to a different agent provider than the
+    project (a claude setup-token can't authenticate codex and vice versa — Phase 7b), else ''."""
+    if profile is None or profile.agent == project.agent:
+        return ""
+    return (f"profile {profile.name!r} is a {profile.agent} profile but project {project.slug!r} "
+            f"runs {project.agent} — pick a {project.agent} profile (`--profile`) or create one")
 
 
 def account_mismatch(project: Project, profile: Profile | None) -> str | None:
@@ -1137,10 +1300,11 @@ def set_auth(slug: str, mode: str) -> Result:
     except OSError as exc:
         return _lock_error(slug, exc)
     if mode == "login":
+        hint = project.provider.auth.login_hint.format(slug=slug) or "log in once inside the container"
         return Result(True, f"{slug} auth = login — `recreate` to apply (drops the injected "
-                            f"token env); then run /login once inside the container")
+                            f"token env); then {hint}")
     leftover = ""
-    if _login_credential_path(slug).exists():
+    if login_credential_present(project):
         leftover = (f"; a minted login credential remains in the bind — remove it with "
                     f"`project logout {slug}`")
     return Result(True, f"{slug} auth = token — `recreate` to apply (re-injects the profile "
@@ -1157,17 +1321,19 @@ def logout(slug: str) -> Result:
     the identity (which also removes the credential), ``delete`` removes everything."""
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    binary = project.provider.binary
     if runner.is_running(slug):
-        return Result(False, f"{slug} is running — stop it first (claude holds the credential "
+        return Result(False, f"{slug} is running — stop it first ({binary} holds the credential "
                              f"in memory and may rewrite it on refresh)")
-    path = _login_credential_path(slug)
+    path = login_credential_path(project)
     if not path.exists():
-        return Result(True, f"no credential in {slug}'s claude-config bind (nothing to do)")
+        return Result(True, f"no credential in {slug}'s config bind (nothing to do)")
     try:
         path.unlink()
     except OSError as exc:
         return Result(False, f"could not remove {path}: {exc}")
-    return Result(True, f"removed .credentials.json from {slug}'s claude-config bind — the "
+    return Result(True, f"removed {path.name} from {slug}'s config bind — the "
                         f"login identity and session history remain (`recreate --force` "
                         f"re-seeds the identity; `delete` removes everything)")
 
@@ -1182,9 +1348,12 @@ def create_project(
     ssh_auto_trust: bool = False,
     auth: str | None = None,
     tools: tuple[str, ...] = (),
+    agent: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Write (or load) the project definition, then create the container.
+
+    ``agent`` (Phase 7b) picks the coding-agent provider (default claude); validated by the schema.
 
     ``tools`` (an approved-tool selection, docs/TOOLS.md) is validated against the registry up front
     so a typo fails before anything is written or built.
@@ -1209,6 +1378,7 @@ def create_project(
                 on_progress(f"pack library unreadable — no default packs applied: {exc}")
         project = Project(
             slug=slug,
+            agent=agent or agents.DEFAULT_ID,
             profile=profile,
             overlay=overlay or config.DEFAULT_OVERLAY,
             egress=egress or config.DEFAULT_EGRESS,

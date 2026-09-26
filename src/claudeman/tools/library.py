@@ -7,9 +7,13 @@ directory carrying a ``tool.toml`` that says HOW it is installed under the harde
 * ``kind = "release"`` — a pinned upstream artefact per arch (``[release.amd64]`` /
   ``[release.arm64]``: ``url`` + ``sha256``, verified at build) placed as a bare ``binary``, a
   ``tar`` (listed ``members`` installed to ``/usr/local/bin`` by basename), a ``deb``, or a
-  ``bundle`` (a zip carrying one self-contained directory ``tree`` — an embedded-runtime
-  distribution like the AWS CLI v2's ``aws/dist`` — installed whole to ``/opt/<name>`` with its
-  ``bins`` symlinked into ``/usr/local/bin``; needs ``unzip`` in ``build_deps``);
+  ``bundle`` (a zip OR tar.gz carrying one self-contained directory ``tree`` — an embedded-runtime
+  distribution like the AWS CLI v2's ``aws/dist``, or ``"."`` for an archive whose root IS the
+  tree (the Codex package) — installed whole to ``/opt/<name>`` with its ``bins`` (tree-relative,
+  may be nested like ``bin/codex``) symlinked into ``/usr/local/bin`` by basename; a zip needs
+  ``unzip`` in ``build_deps``, a tar.gz needs nothing). An optional ``version_label`` stamps
+  ``<LABEL_PREFIX>.<version_label>=<version>`` on the layer — how an agent PROVIDER installed as
+  a tool (codex) exposes its version to ``images.image_claude_version``;
 
 plus the "custom config" a tool needs to actually WORK under ``--read-only`` (invariant 2):
 ``[env]`` redirects (image ENV, so a HOME-dotdir write lands on a writable surface), ``[[smoke]]``
@@ -28,7 +32,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
+from .. import agents, config
 
 TOOL_META = "tool.toml"
 KINDS = ("apt", "release")
@@ -44,8 +48,7 @@ _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 # A [env] entry must never touch the container's identity/auth/path plumbing — those are the
 # runner's (invariant 1 + the baked floor env), not a tool's.
-_RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "CLAUDE_CONFIG_DIR", "XDG_CACHE_HOME",
-                           "XDG_STATE_HOME"})
+_RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "XDG_CACHE_HOME", "XDG_STATE_HOME"}) | agents.config_dir_envs()
 
 
 class LibraryError(ValueError):
@@ -87,6 +90,13 @@ class Tool:
     allowlist: tuple[str, ...] = ()       # runtime egress hosts a LOCKED project should add
     env: dict[str, str] = field(default_factory=dict)   # image ENV (read-only-floor redirects)
     smoke: tuple[SmokeSpec, ...] = ()     # image-smoke probes (CORE ops under the floor)
+    version_label: str = ""               # release: stamp `<LABEL_PREFIX>.<version_label>=<version>`
+
+    @property
+    def archive_kind(self) -> str:
+        """``zip`` | ``tar`` for a bundle, from the amd64 artefact's URL (both arches must match)."""
+        url = self.release.get("amd64").url if self.release.get("amd64") else ""
+        return "tar" if re.search(r"\.(tar\.gz|tgz)$", url) else "zip"
 
     @property
     def summary(self) -> str:
@@ -186,24 +196,31 @@ def _load_tool(tool_dir: Path) -> Tool:
         tree = str(meta.get("tree", "") or "")
         bins = _str_list(meta, "bins", name)
         if install == "bundle":
-            if not _is_safe_member(tree):
+            if tree != "." and not _is_safe_member(tree):
                 raise LibraryError(f"{name}: install = \"bundle\" needs a valid archive `tree` dir")
             if not bins:
                 raise LibraryError(f"{name}: install = \"bundle\" needs `bins` (tree-relative executables)")
             for b in bins:
                 if not _is_safe_member(b):
                     raise LibraryError(f"{name}: bad bundle bin {b!r}")
-            if "unzip" not in build_deps:
-                raise LibraryError(f"{name}: install = \"bundle\" (a zip) needs build_deps = [\"unzip\"]")
         elif tree or bins:
             raise LibraryError(f"{name}: `tree`/`bins` are only valid for install = \"bundle\"")
         release = _parse_release(name, meta.get("release"), install)
+        if install == "bundle":
+            kinds = {"tar" if re.search(r"\.(tar\.gz|tgz)$", r.url) else "zip" for r in release.values()}
+            if len(kinds) != 1:
+                raise LibraryError(f"{name}: bundle artefacts must all be zips or all tar.gz")
+            if kinds == {"zip"} and "unzip" not in build_deps:
+                raise LibraryError(f"{name}: install = \"bundle\" (a zip) needs build_deps = [\"unzip\"]")
+    version_label = str(meta.get("version_label", "") or "")
+    if version_label and (kind != "release" or not re.match(r"^[a-z][a-z0-9-]*$", version_label)):
+        raise LibraryError(f"{name}: version_label must be a lowercase slug on a release tool")
 
     env: dict[str, str] = {}
     for key, value in (meta.get("env", {}) or {}).items():
         if not _ENV_KEY_RE.match(str(key)):
             raise LibraryError(f"{name}: invalid env key {key!r}")
-        if key in _RESERVED_ENV or config.is_forbidden_env_name(key):
+        if key in _RESERVED_ENV or agents.is_forbidden_env_name(key):
             raise LibraryError(f"{name}: env key {key!r} is reserved (auth/identity/floor plumbing)")
         # Empty is legal: set-but-empty is a real env state some tools key on (AWS_PAGER="" = no pager).
         if not isinstance(value, str) or "\n" in value:
@@ -228,7 +245,7 @@ def _load_tool(tool_dir: Path) -> Tool:
                 version=version, install=install, bin=bin_name, tree=tree, bins=bins, release=release,
                 build_deps=build_deps, requires=requires,
                 note=str(meta.get("note", "") or "").strip(), allowlist=allowlist, env=env,
-                smoke=tuple(smoke))
+                smoke=tuple(smoke), version_label=version_label)
 
 
 def _is_safe_member(m: str) -> bool:

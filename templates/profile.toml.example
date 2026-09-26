@@ -4,6 +4,7 @@
 
 [profile]
 name          = "work"
+# agent       = "claude"                    # the provider this account belongs to (default claude)
 display_name  = "Work (Your Org)"
 account_email = "you@example.com"          # used for the switch-time mismatch guard + TUI
 default       = false                       # set true on the profile new projects inherit

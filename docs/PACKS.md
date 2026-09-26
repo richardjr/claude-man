@@ -22,7 +22,7 @@ Two content kinds inside a pack:
 - **Skills** — full skill dirs (`SKILL.md` + support files) → injected under
   `~/.claude/skills/<name>/`. The asset sync's claude side already allowlists exactly
   `skills/agents/commands` (default-deny), so the security boundary is already built.
-- **CLAUDE.md fragments** ("injectors") — focused memory fragments, one concern per file →
+- **Context-file fragments** ("injectors"; `claude-md/*.md`) — focused memory fragments, one concern per file (for a claude project `@`-linked from `CLAUDE.md`; for a codex project, whose `AGENTS.md` has no import syntax, their bodies are INLINED into the managed block — `materialize.inline_lines`) →
   injected as files under `/workspace/.claude-man/<pack>/`, and **linked** from the main
   `/workspace/CLAUDE.md` via Claude Code's native `@path` import syntax. The main file stays the
   operator's; claude-man owns only a fenced block of `@` lines inside it.

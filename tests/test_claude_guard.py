@@ -41,14 +41,14 @@ class SpawnGuardTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_refuses_second_claude(self) -> None:
-        with mock.patch.object(terminals, "claude_already_running", lambda slug: True):
+        with mock.patch.object(terminals, "claude_already_running", lambda slug, **kw: True):
             with self.assertRaises(RuntimeError) as ctx:
                 terminals.spawn_claude("demo")
         self.assertIn("already running", str(ctx.exception))
         self.assertEqual(self._spawned, [])  # never reached the spawn layer
 
     def test_spawns_when_no_claude_live(self) -> None:
-        with mock.patch.object(terminals, "claude_already_running", lambda slug: False), \
+        with mock.patch.object(terminals, "claude_already_running", lambda slug, **kw: False), \
                 mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace/x"), \
                 mock.patch.object(terminals, "claude_model_args", lambda slug: ()):
             terminals.spawn_claude("demo")
@@ -88,7 +88,7 @@ class ClaudeModelPinTest(unittest.TestCase):
         calls: list[tuple] = []
         with mock.patch.object(terminals, "spawn",
                                lambda slug, program, **kw: calls.append((slug, program, kw))), \
-                mock.patch.object(terminals, "claude_already_running", lambda slug: False), \
+                mock.patch.object(terminals, "claude_already_running", lambda slug, **kw: False), \
                 mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace"), \
                 mock.patch.object(terminals, "claude_model_args",
                                   lambda slug: ("--model", "opus")):

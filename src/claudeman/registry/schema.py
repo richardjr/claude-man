@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from .. import config
+from .. import agents, config
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # An ollama model ref: ``name[:tag]`` (namespaced ``ns/name`` allowed). SHAPE-only — a since-removed
@@ -84,8 +84,8 @@ _MOUNT_FORBIDDEN_DST_EXACT = (
     "/", "/etc", "/usr", "/bin", "/sbin", "/lib",
     config.CONTAINER_HOME,                       # /home/agent (read-only rootfs anchor)
     config.CONTAINER_WORKSPACE,                  # /workspace (would shadow the repos bind)
-    config.CONTAINER_CLAUDE_CONFIG,              # /home/agent/.claude (never inject auth)
-    config.CONTAINER_CLAUDE_CONFIG + ".json",    # /home/agent/.claude.json (identity sibling)
+    # (+ EVERY agent provider's config dir and its `.json` identity sibling — appended at CHECK time
+    # by `_forbidden_dst_exact()`, so a provider registered after import is covered too.)
     config.CONTAINER_CACHE,                      # /home/agent/.cache (bare tmpfs)
     "/tmp",                                       # bare tmpfs
     config.CONTAINER_SSH_DIR,                    # /home/agent/.ssh (ssh tmpfs)
@@ -97,12 +97,25 @@ _MOUNT_FORBIDDEN_DST_EXACT = (
 # lifecycle._ensure_workspace_mountpoints pre-creating it operator-owned before create. Bare
 # /workspace stays blocked (you can't replace the whole repos bind).
 _MOUNT_FORBIDDEN_DST_PREFIXES = (
-    config.CONTAINER_CLAUDE_CONFIG + "/",   # /home/agent/.claude/  (config bind; the creds attack)
+    # (+ every provider's config dir + "/" — appended at check time by `_forbidden_dst_prefixes()`:
+    # /home/agent/.claude/ for claude — the config bind, the creds-injection attack.)
     config.CONTAINER_CACHE + "/",           # /home/agent/.cache/  (tmpfs)
     config.CONTAINER_SSH_DIR + "/",         # /home/agent/.ssh/  (no binding a private key in — agent-forward)
     config.CONTAINER_HOME + "/.local/",     # /home/agent/.local/  (the baked claude install + launcher)
     "/tmp/",                                 # tmpfs (ephemeral)
 )
+
+
+def _forbidden_dst_exact() -> tuple[str, ...]:
+    """The static exact-path denylist + every REGISTERED provider's config dir and its `.json`
+    identity sibling — evaluated per check (invariant 1: never inject auth into any agent's config)."""
+    return _MOUNT_FORBIDDEN_DST_EXACT + tuple(
+        p for d in agents.config_dirs() for p in (d, d + ".json"))
+
+
+def _forbidden_dst_prefixes() -> tuple[str, ...]:
+    """The static prefix denylist + every registered provider's config bind (``<dir>/``)."""
+    return _MOUNT_FORBIDDEN_DST_PREFIXES + tuple(d + "/" for d in agents.config_dirs())
 
 
 # Real lowercase container roots an operator would realistically target a FILE at. A dst that
@@ -141,9 +154,9 @@ def _validate_container_dst(dst: str) -> None:
     if any(part == ".." for part in p.parts):
         raise ValidationError(f"mount dst {dst!r} must not contain a '..' component")
     norm = re.sub(r"^/+", "/", p.as_posix())  # collapse a leading // before the denylist checks
-    if norm in _MOUNT_FORBIDDEN_DST_EXACT:
+    if norm in _forbidden_dst_exact():
         raise ValidationError(f"mount dst {norm!r} is reserved; choose another container path")
-    for pre in _MOUNT_FORBIDDEN_DST_PREFIXES:
+    for pre in _forbidden_dst_prefixes():
         if norm.startswith(pre):
             raise ValidationError(
                 f"mount dst {norm!r} is inside a claude-man-managed mount ({pre.rstrip('/')}); "
@@ -218,10 +231,10 @@ class EnvMount:
                     f"env mount name {self.name!r} must be a valid env var name (letters/digits/_, "
                     f"not starting with a digit)"
                 )
-            if config.is_forbidden_env_name(name):
+            if agents.is_forbidden_env_name(name):
                 raise ValidationError(
                     f"env var {name!r} is reserved (it has dedicated handling / would breach auth) — "
-                    f"use `config gh-token` for GH_TOKEN; ANTHROPIC_*/the OAuth token are never settable"
+                    f"use `config gh-token` for GH_TOKEN; agent credential vars are never settable"
                 )
 
     def resolved_src(self) -> str:
@@ -364,6 +377,13 @@ class Sync:
                 raise ValidationError(f"sync entry {rel!r} must not contain a '..' component")
 
 
+def default_sync(provider) -> Sync:
+    """The ``Sync`` a project of ``provider`` gets by default: its context file + the pack fragments
+    dir on the workspace side, its syncable config-dir trees on the config side (claude = ``Sync()``)."""
+    return Sync(workspace=(provider.context.file, DEFAULT_SYNC_WORKSPACE[1]),
+                claude=tuple(provider.context.config_entries))
+
+
 @dataclass(frozen=True)
 class Repo:
     url: str
@@ -385,6 +405,9 @@ class Repo:
 @dataclass(frozen=True)
 class Project:
     slug: str
+    agent: str = agents.DEFAULT_ID       # the coding-agent provider ("claude" | (7c) "codex") — Phase 7b.
+    #                                      Fixed at create (the config bind + profile are agent-scoped);
+    #                                      resolved via ``agents.resolve`` (docs/AGENTS.md)
     profile: str | None = None          # None -> inherit the default profile
     overlay: str = config.DEFAULT_OVERLAY
     egress: str = config.DEFAULT_EGRESS  # "open" | "strict"
@@ -423,6 +446,14 @@ class Project:
             raise ValidationError(
                 f"invalid slug {self.slug!r}: must match {_SLUG_RE.pattern}"
             )
+        if self.agent not in agents.ids():
+            raise ValidationError(
+                f"invalid agent {self.agent!r}: one of {agents.ids()}"
+            )
+        # A non-claude project whose TOML carries no [project.sync] gets ITS provider's defaults
+        # (AGENTS.md + skills for codex), not claude's — the stored default stays absent either way.
+        if self.agent != agents.DEFAULT_ID and self.sync == Sync():
+            object.__setattr__(self, "sync", default_sync(agents.resolve(self.agent)))
         # Pack/language names share the slug shape (they become directory names). Validated by
         # SHAPE only — never against the live library, so a registry entry naming a since-removed
         # pack still loads (materialize skips it with a note).
@@ -466,10 +497,11 @@ class Project:
                 "model and claude_model are mutually exclusive — a project has one model choice "
                 "(a local ollama pin OR a claude --model pin)"
             )
-        for k in config.SCRUBBED_ENV_KEYS:
+        for k in (*config.SCRUBBED_ENV_KEYS, *sorted(agents.credential_env_names())):
             if k in self.env:
                 raise ValidationError(
-                    f"env key {k!r} is forbidden (it would outrank the OAuth token); remove it"
+                    f"env key {k!r} is forbidden (an agent credential var would outrank the injected "
+                    f"token / bill another account); remove it"
                 )
         if config.GH_TOKEN_ENV in self.env:
             raise ValidationError(
@@ -484,6 +516,11 @@ class Project:
         built from it instead — resolved (library read + render) by ``lifecycle.resolve_image``
         and handed to the runner explicitly, since this dataclass stays IO-free."""
         return config.image_tag(self.overlay)
+
+    @property
+    def provider(self):
+        """The resolved ``AgentProvider`` for this project (validated above, so never KeyError)."""
+        return agents.resolve(self.agent)
 
     @property
     def container(self) -> str:
@@ -588,6 +625,8 @@ class ProfileSeed:
 @dataclass(frozen=True)
 class Profile:
     name: str
+    agent: str = agents.DEFAULT_ID       # the provider this account/token belongs to (Phase 7b) —
+    #                                      a project's profile must match its agent
     display_name: str = ""
     account_email: str = ""
     default: bool = False
@@ -603,3 +642,5 @@ class Profile:
             raise ValidationError(
                 f"invalid profile name {self.name!r}: must match {_SLUG_RE.pattern}"
             )
+        if self.agent not in agents.ids():
+            raise ValidationError(f"invalid agent {self.agent!r}: one of {agents.ids()}")

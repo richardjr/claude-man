@@ -53,7 +53,9 @@ sweeps across the gradient, then the whole splash scrolls off to reveal the main
 
 The main screen, top to bottom:
 
-- **Projects table** — `Project · Status · Profile · Egress · Model · Repos · Version · Detail`.
+- **Projects table** — `Project · Status · Agent · Profile · Egress · Model · Repos · Version · Detail`.
+  **Agent** is the project's coding-agent provider (`claude` today; `codex` with Phase 7c —
+  registry-sourced, never silent).
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);
   it's polled fresh every 10 s, never cached. **Model** is the per-project model pin — a local
   (hybrid) tag or a claude `--model` ref, whichever is set (`-` = default — see *Model…* in
@@ -91,7 +93,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `u` Run prompt (headless)… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -112,10 +114,13 @@ opens the editor.)
 
 ## 2. Create a project (`n`)
 
-Press `n`. The **New project** form has seven fields:
+Press `n`. The **New project** form has eight fields:
 
 - **Slug** — lowercase letters/digits/hyphens, ≤ 64 chars (validated inline; duplicates
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
+- **Agent** — the coding-agent provider the container runs (`claude`; `codex` once Phase 7c
+  lands). Fixed at create; the profile you pick must belong to the same agent (the CLI twin is
+  `project create --agent`).
 - **Profile (account)** — pick a profile, or leave the first entry (`(default: <name>)`) to
   inherit the default. Only existing profiles are listed (step 0).
 - **Overlay (image)** — `base`, `python`, `rust`, `node`, `python-node`, or `terraform`: the
@@ -377,12 +382,21 @@ Project… menu. Each persists the choice and applies it itself — no manual
   other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
   **local** model is **refused on a locked (strict-egress) project** — unlock first;
   claude picks and unpinning stay allowed when locked.
-- **`a` Auth…** — the project's claude auth mode: **token** (default — the profile's
-  setup-token as env; inference-only, so claude.ai account connectors are unavailable) or
-  **login** (opt-in — no token env; run `/login` once inside the container and claude mints a
-  self-refreshing credential in the project's bind, enabling account connectors). Switching
-  recreates to apply; the Projects table badges login projects `[login]` on the Profile cell.
-  When a minted credential exists, **Logout** removes it (project must be stopped).
+- **`u` Run prompt (headless)…** — run ONE non-interactive agent session in the project's
+  container (the CLI twin is `project run`): a prompt + a permission level (default / edits /
+  full — full auto-approves every tool call, inside the hardened container which is the real
+  sandbox). Starts the container if needed; the tool calls, notices and the final message stream
+  into the log pane, with the usage on the closing line. Refused while the project's agent is
+  already running in the container (one agent per container).
+- **`a` Auth…** — the project's auth mode: **token** (default — the profile's token as env:
+  claude's setup-token, inference-only, so claude.ai account connectors are unavailable; an
+  api-key-kind provider's key, API-billed) or **login** (opt-in — no token env; a one-time
+  in-container login mints a self-refreshing credential in the project's bind — claude's `/login`
+  → `.credentials.json`, codex's device-code login → `auth.json` — enabling account connectors).
+  The screen's wording and the credential file are the project's agent's. Switching recreates to
+  apply; the Projects table badges login projects `[login]` on the Profile cell. When a minted
+  credential exists, **Logout** removes it (project must be stopped). The **Profile…** picker (`f`)
+  offers only profiles of the project's agent.
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams

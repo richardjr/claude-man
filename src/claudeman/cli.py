@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, config
+from . import agents, __version__, config
 from .docker import status
 from .registry import profiles, projects
 from .tui import terminals
@@ -46,23 +46,29 @@ def cmd_profile_list(_args) -> int:
     for p in rows:
         flag = " [default]" if p.default else ""
         email = f"  <{p.account_email}>" if p.account_email else ""
-        print(f"{p.name}{flag}{email}  [{_token_status(p.name)}]  {p.display_name}")
+        print(f"{p.name}{flag}  ({p.agent}){email}  [{_token_status(p.name)}]  {p.display_name}")
     return 0
 
 
 def cmd_profile_add(args) -> int:
     from .profiles import setup_token
 
+    api_key = None
+    if getattr(args, "stdin", False):
+        api_key = sys.stdin.readline().strip()   # `printenv OPENAI_API_KEY | … --stdin` (never argv)
     try:
         prof = setup_token.mint(
             args.name, sso=args.sso, login=args.login, console=args.console,
             email=args.email, default=args.default, display_name=args.display_name or "",
+            agent=args.agent or agents.DEFAULT_ID, login_only=args.login_only, api_key=api_key,
         )
     except Exception as exc:  # noqa: BLE001 - surface any mint/login failure to the operator
         print(f"profile add failed: {exc}", file=sys.stderr)
         return 1
     suffix = " [default]" if prof.default else ""
-    print(f"profile {prof.name!r} added ({prof.account_email or 'unknown account'}){suffix}")
+    kind = " (login-only — no token; for login-mode projects)" if args.login_only else ""
+    print(f"profile {prof.name!r} ({prof.agent}) added ({prof.account_email or 'unknown account'})"
+          f"{suffix}{kind}")
     return 0
 
 
@@ -178,7 +184,7 @@ def cmd_project_status(args) -> int:
         # pin (mutually exclusive in the schema). Display hint only — a bare local name is legal,
         # so the cell doesn't encode the kind; `project model show <slug>` does.
         (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
-         p.auth)
+         p.auth, p.agent)
         for p in projects.list_projects()
     ]
     rows = status.join(defined, status.query_containers())
@@ -187,23 +193,100 @@ def cmd_project_status(args) -> int:
         if not rows:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
-    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'AUTH':<6} {'REPOS':<5} "
-          f"{'VERSION':<10} MODEL")
+    print(f"{'SLUG':<20} {'STATE':<8} {'AGENT':<7} {'PROFILE':<12} {'EGRESS':<7} {'AUTH':<6} "
+          f"{'REPOS':<5} {'VERSION':<10} MODEL")
     for r in rows:
-        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.auth:<6} {r.repos:<5} "
-              f"{(r.version or '-'):<10} {r.model or '-'}")
+        print(f"{r.slug:<20} {r.kind:<8} {r.agent:<7} {r.profile:<12} {r.egress:<7} {r.auth:<6} "
+              f"{r.repos:<5} {(r.version or '-'):<10} {r.model or '-'}")
     # For a single project, also show its published ports (config — registry-only, recreate to apply)
     # and, in login mode, whether the in-container-minted credential exists (never silent).
     if args.slug and projects.exists(args.slug):
         p = projects.load(args.slug)
         if p.auth == "login":
-            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            from . import lifecycle
+            cred = lifecycle.login_credential_path(p)
             state = (f"present ({cred})" if cred.exists()
-                     else f"absent — run /login via `project claude {args.slug}`")
+                     else f"absent — {p.provider.auth.login_hint.format(slug=args.slug)}")
             print(f"\nauth: login (credential {state})")
         if p.ports:
             print("\npublished ports:")
             _print_ports(p.ports)
+    return 0
+
+
+def _ensure_running(slug: str) -> int:
+    """Start ``slug`` if it isn't running (a ``docker exec`` needs a RUNNING container). rc 0 when up;
+    1 (with the reason on stderr) for an unmanaged/orphan project or a failed start."""
+    from . import lifecycle
+    from .docker import runner
+
+    if runner.is_running(slug):
+        return 0
+    if not projects.exists(slug):
+        extra = (" (orphan container exists — reconcile it, or `docker start` it by hand)"
+                 if runner.exists(slug)
+                 else f"; create it with `claudemanctl project create {slug}`")
+        print(f"no managed project {slug!r}{extra}", file=sys.stderr)
+        return 1
+    print(f"{slug} not running — starting it first …", file=sys.stderr)
+    res = lifecycle.up(projects.load(slug))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_run(args) -> int:
+    """Run ONE headless agent session in the project's container (the 7-run seam): the prompt on the
+    agent's stdin, its event stream normalised + printed (``--json`` = the raw provider records)."""
+    import json as _json
+
+    from . import lifecycle
+
+    prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    try:
+        request = agents.RunRequest(prompt=prompt, permission=args.permission,
+                                    resume=args.resume or "", model=args.model or "")
+    except ValueError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+    rc = _ensure_running(args.slug)
+    if rc:
+        return rc
+    project = projects.load(args.slug)
+    if not args.model and project.claude_model and project.agent == "claude":
+        request = agents.RunRequest(prompt=request.prompt, permission=request.permission,
+                                    resume=request.resume, model=project.claude_model)
+
+    def show(ev: agents.AgentEvent) -> None:
+        if args.json:
+            print(_json.dumps(ev.raw), flush=True)
+            return
+        if ev.kind == "started":
+            print(f"[started] {ev.session_id}{' ' + ev.text if ev.text else ''}", file=sys.stderr)
+        elif ev.kind == "tool_use":
+            print(f"[tool] {ev.tool}: {ev.text}", file=sys.stderr)
+        elif ev.kind == "tool_result":
+            tail = ev.text.strip().splitlines()[-1] if ev.text.strip() else ""
+            print(f"[tool{'' if ev.ok else ' FAILED'}] {tail[:160]}", file=sys.stderr)
+        elif ev.kind == "notice":
+            print(f"[notice] {ev.text}", file=sys.stderr)
+        elif ev.kind == "failed":
+            print(f"[failed] {ev.text}", file=sys.stderr)
+        elif ev.kind == "message":
+            pass   # the final message prints once on stdout below
+
+    out = lifecycle.run(project, request, on_event=show, timeout=args.timeout or None)
+    if not args.json and out.text:
+        print(out.text)
+    if out.usage and not args.json:
+        u = out.usage
+        print(f"[usage] in {u.get('input', 0)} out {u.get('output', 0)} cache-read {u.get('cache_read', 0)} "
+              f"cache-write {u.get('cache_creation', 0)}"
+              + (f" · session {out.session_id}" if out.session_id else ""), file=sys.stderr)
+    if not out.ok:
+        print(f"run failed: {out.detail}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -216,21 +299,9 @@ def _open_terminal(slug: str, program: str) -> int:
     already-running container (including an orphan) is exec'd straight into; a non-running container
     with no registry entry can't be managed. Mirrors the TUI ``_open_terminal`` flow.
     """
-    from . import lifecycle
-    from .docker import runner
-
-    if not runner.is_running(slug):
-        if not projects.exists(slug):
-            extra = (" (orphan container exists — reconcile it, or `docker start` it by hand)"
-                     if runner.exists(slug)
-                     else f"; create it with `claudemanctl project create {slug}`")
-            print(f"no managed project {slug!r}{extra}", file=sys.stderr)
-            return 1
-        print(f"{slug} not running — starting it first …", file=sys.stderr)
-        res = lifecycle.up(projects.load(slug))
-        print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
-        if not res.ok:
-            return 1
+    rc = _ensure_running(slug)
+    if rc:
+        return rc
     label, spawn = {
         "claude": ("claude", terminals.spawn_claude),
         "nvim": ("nvim", terminals.spawn_nvim),
@@ -271,7 +342,7 @@ def cmd_project_create(args) -> int:
     res = lifecycle.create_project(
         args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
         language=args.language, ssh_auto_trust=args.ssh_auto_trust, auth=args.auth,
-        tools=tuple(args.tool or ()),
+        tools=tuple(args.tool or ()), agent=args.agent,
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -1013,13 +1084,13 @@ def cmd_project_auth(args) -> int:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
         p = projects.load(args.slug)
-        print(f"{args.slug}: auth = {p.auth}")
+        print(f"{args.slug}: auth = {p.auth} (agent {p.agent})")
         if p.auth == "login":
-            cred = config.claude_config_dir(args.slug) / ".credentials.json"
+            cred = lifecycle.login_credential_path(p)
             if cred.exists():
                 print(f"credential: present ({cred})")
             else:
-                print(f"credential: absent — run /login via `project claude {args.slug}`")
+                print(f"credential: absent — {p.provider.auth.login_hint.format(slug=args.slug)}")
         return 0
     res = lifecycle.set_auth(args.slug, args.mode)
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
@@ -1463,6 +1534,7 @@ def cmd_image_build(args) -> int:
 
 
 def cmd_image_smoke(args) -> int:
+    from . import lifecycle
     from .docker import smoke as smoke_mod
 
     if bool(args.overlay) == bool(args.project):
@@ -1473,7 +1545,8 @@ def cmd_image_smoke(args) -> int:
         if err:
             print(err, file=sys.stderr)
             return 1
-        result = smoke_mod.smoke(project.overlay, image=name, tools=project.tools)
+        result = smoke_mod.smoke(project.overlay, image=name, tools=lifecycle.image_tools(project),
+                                 provider=project.provider)
     else:
         result = smoke_mod.smoke(args.overlay)
     for line in result.lines:
@@ -1614,8 +1687,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # profile
     prof = sub.add_parser("profile", help="account profiles").add_subparsers(dest="cmd", required=True)
-    pa = prof.add_parser("add", help="mint a profile token via `claude setup-token`")
+    pa = prof.add_parser("add", help="add an account profile (mints its token per the agent's auth kind)")
     pa.add_argument("name", type=_slug_arg)
+    pa.add_argument("--agent", choices=agents.ids(),
+                    help="the provider this account belongs to (default claude). An api-key-kind "
+                         "provider prompts for the key (hidden; or --stdin) instead of setup-token")
+    pa.add_argument("--login-only", action="store_true", dest="login_only",
+                    help="record the profile WITHOUT minting a token — for projects that use "
+                         "`--auth login` (the credential is minted inside the container)")
+    pa.add_argument("--stdin", action="store_true",
+                    help="read an api-key-kind token from stdin (e.g. `printenv OPENAI_API_KEY | …`)")
     pa.add_argument("--default", action="store_true", help="make this the default profile")
     pa.add_argument("--email", help="account email (else read from `claude auth status`)")
     pa.add_argument("--display-name", dest="display_name", help="human-readable label")
@@ -1643,6 +1724,9 @@ def build_parser() -> argparse.ArgumentParser:
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)
     pc = proj.add_parser("create", help="create a project + container")
     pc.add_argument("slug", type=_slug_arg)
+    pc.add_argument("--agent", choices=agents.ids(),
+                    help="the coding-agent provider to run in the container (default claude; "
+                         "docs/AGENTS.md). The profile must belong to the same agent")
     pc.add_argument("--profile", type=_slug_arg)
     pc.add_argument("--overlay", choices=config.OVERLAYS)
     pc.add_argument("--egress", choices=config.EGRESS_MODES)
@@ -1672,8 +1756,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("sync-repos", cmd_project_sync_repos, "git fetch each repo"),
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
-        ("claude", cmd_project_claude, "run claude in a new terminal"),
+        ("claude", cmd_project_claude, "run the project's agent (claude/codex) in a new terminal"),
+        ("agent", cmd_project_claude, "alias of `claude` — run the project's agent in a new terminal"),
         ("nvim", cmd_project_nvim, "open neovim in a new terminal"),
+        ("run", cmd_project_run, "run ONE headless agent session (prompt → normalised event stream)"),
         ("lock", cmd_project_lock, "switch to strict egress (allowlist proxy; recreates)"),
         ("unlock", cmd_project_unlock, "return to open egress (recreates)"),
         ("egress-log", cmd_project_egress_log, "show denied egress destinations (for allowlist tuning)"),
@@ -1684,6 +1770,17 @@ def build_parser() -> argparse.ArgumentParser:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug", type=_slug_arg)
         sp.set_defaults(func=func)
+        if name == "run":
+            sp.add_argument("prompt", help="the prompt, or '-' to read it from stdin")
+            sp.add_argument("--permission", choices=agents.PERMISSIONS, default="default",
+                            help="default = the agent's headless default (approval-needing tool calls "
+                                 "are refused) | edits = auto-accept file edits | full = every tool call "
+                                 "auto-approved (inside the hardened container — the real sandbox)")
+            sp.add_argument("--resume", default="", help="continue a prior session by its id")
+            sp.add_argument("--model", default="", help="launch-time model ref (default: the project's pin)")
+            sp.add_argument("--timeout", type=float, default=0.0, help="kill the run after N seconds (0 = none)")
+            sp.add_argument("--json", action="store_true",
+                            help="print the provider's raw JSON records instead of the human lines")
     pst = proj.add_parser("ssh-trust",
                           help="toggle auto-trust of unknown SSH host keys (TOFU; accept-new)")
     pst.add_argument("slug", type=_slug_arg)

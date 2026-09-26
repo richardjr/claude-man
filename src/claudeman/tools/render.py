@@ -62,8 +62,12 @@ def render_dockerfile(overlay: str, tools: tuple[library.Tool, ...]) -> str:
                    "RUN set -eux; \\\n"
                    f"    apt-get purge -y {' '.join(build_deps)}; \\\n"
                    "    apt-get autoremove -y --purge\n")
+    # A tool with `version_label` (an agent provider installed as a tool — codex) also stamps its
+    # version on the layer, which is how images.image_claude_version reads it for that provider.
+    versions = "".join(f' {config.LABEL_PREFIX}.{t.version_label}="{t.version}"'
+                       for t in tools if t.version_label)
     out.append(f'\nLABEL {config.LABEL_PREFIX}.overlay="{overlay}" '
-               f'{config.LABEL_PREFIX}.tools="{",".join(names)}"\n'
+               f'{config.LABEL_PREFIX}.tools="{",".join(names)}"{versions}\n'
                "USER agent\n")
     return "".join(out)
 
@@ -108,10 +112,15 @@ def _release_run(tool: library.Tool) -> str:
         # embedded runtime relative to their real path), symlinked into /usr/local/bin by basename —
         # the same layout the AWS CLI's own `install` script produces, minus the script.
         opt = f"/opt/{tool.name}"
+        extract = (f"    tar -xzf {dl} -C {x}; \\\n" if tool.archive_kind == "tar"
+                   else f"    unzip -q {dl} -d {x}; \\\n")
+        # tree "." = the archive root IS the tree (the Codex package: bin/ + codex-resources/ at top)
+        src = f"{x}/." if tool.tree == "." else f"{x}/{tool.tree}"
         lines += [f"    mkdir -p {x}; \\\n",
-                  f"    unzip -q {dl} -d {x}; \\\n",
+                  extract,
                   f"    rm -rf {opt}; \\\n",
-                  f'    cp -a "{x}/{tool.tree}" {opt}; \\\n',
+                  *([f"    mkdir -p {opt}; \\\n"] if tool.tree == "." else []),
+                  f'    cp -a "{src}" {opt}; \\\n',
                   *(f'    test -x "{opt}/{b}"; ln -sfn "{opt}/{b}" "/usr/local/bin/{b.rsplit("/", 1)[-1]}"; \\\n'
                     for b in tool.bins),
                   f"    rm -rf {x}; \\\n"]

@@ -62,6 +62,23 @@ uv run claudemanctl profile add work --sso --display-name "Work (ACME SSO)"
 # Other login front-ends, used instead of --sso:
 uv run claudemanctl profile add work --login     # plain `claude auth login`
 uv run claudemanctl profile add api  --console   # Anthropic Console (API billing)
+
+# Profiles are AGENT-scoped (Phase 7 — docs/AGENTS.md): `--agent` names the provider the account
+# belongs to (default claude); a project can only run a profile of its own agent. How the token is
+# minted follows the provider's auth kind — claude = the setup-token flow above; an api-key-kind
+# provider (codex, from 7c) prompts for the key (hidden) or reads it from --stdin, never argv.
+# `--login-only` records the profile WITHOUT a token: the identity for projects that use
+# `--auth login`, where the credential is minted inside the container.
+uv run claudemanctl profile add oa --agent claude --login-only        # no token; for login-mode projects
+printenv OPENAI_API_KEY | uv run claudemanctl profile add oa --agent codex --stdin   # api-key kind (API-billed)
+
+# A Codex project on a ChatGPT plan (login mode — docs/AGENTS.md § Codex):
+uv run claudemanctl profile add codex-home --agent codex --login-only   # identity only; no key
+uv run claudemanctl project create cx --agent codex --profile codex-home --auth login
+#   builds base → <overlay> → a tools layer carrying the pinned codex package (docs/TOOLS.md)
+uv run claudemanctl project shell cx                 # then, once, inside: codex login --device-auth
+uv run claudemanctl project agent cx                 # (= `project claude`) opens codex in a terminal
+uv run claudemanctl project run cx "summarise the repo"   # headless, same as a claude project
 ```
 
 `--sso`, `--login`, and `--console` all run `claude auth login` **before** `claude setup-token`,
@@ -99,14 +116,31 @@ uv run claudemanctl project create demo --profile work --overlay python --langua
 #   --tool <name>                approved tool baked as a layer ON TOP of the overlay (repeatable;
 #                                `claudemanctl tools list` — see Approved tools below)
 #   --language <tier>            curated-pack tier whose defaults apply (see Curated packs below)
+#   --agent   claude             the coding-agent provider run in the container (default claude — the
+#                                only one registered today; codex lands with Phase 7c, docs/AGENTS.md).
+#                                Fixed at create; the profile must belong to the same agent
 #   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
 
 uv run claudemanctl project up demo         # create-if-needed + start
-uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug)
+uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug);
+                                            # the AGENT column is the project's provider (registry-sourced)
 uv run claudemanctl project stop demo       # stop the container (project + workspace are kept)
 uv run claudemanctl project shell demo      # open a shell in a new terminal
 uv run claudemanctl project claude demo     # run claude in a new terminal
 uv run claudemanctl project nvim demo       # open neovim (baked into the image) in a new terminal
+
+# Run ONE headless (non-interactive) agent session in the container — the Phase 7-run seam that the
+# manager tier will drive (docs/V2-PLAN.md). The prompt rides the agent's STDIN (never argv); the
+# provider's JSON event stream is normalised: tool calls + notices go to stderr, the final message to
+# stdout, a usage line + the session id to stderr. Starts the container first if needed; refused while
+# the project's agent is already running in it (one agent per container).
+uv run claudemanctl project run demo "summarise the repo layout"
+uv run claudemanctl project run demo - < prompt.md                 # prompt from stdin
+uv run claudemanctl project run demo "fix the failing test" --permission edits   # auto-accept file edits
+uv run claudemanctl project run demo "…" --permission full        # every tool call auto-approved — inside the
+                                                                   # hardened container, which IS the sandbox
+uv run claudemanctl project run demo "continue" --resume <session-id>   # continue a prior session
+uv run claudemanctl project run demo "…" --json --timeout 600      # raw provider records; kill after 10 min
 
 # Recreate the container (applies env/port/identity changes). Like `up`, it offers the on-start
 # claude update — prompts on a TTY; --update-yes rebuilds to the latest without asking, --no-update skips:

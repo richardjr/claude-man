@@ -20,10 +20,10 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Header, Label, RichLog, Static
 
-from .. import config, doctor, lifecycle, usage
+from .. import agents, config, doctor, lifecycle, usage
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
-from ..docker import stats, status
+from ..docker import runner, stats, status
 from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
@@ -32,6 +32,7 @@ from . import setupview
 from . import terminals
 from .screens.add_repo import AddRepoScreen
 from .screens.auth import AuthScreen
+from .screens.run_prompt import RunPromptScreen
 from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
@@ -58,7 +59,7 @@ from .screens.update_confirm import UpdateConfirmScreen
 from ..registry import settings as settings_registry
 from . import splash as splash_mod
 
-_COLUMNS = ("Project", "Status", "Profile", "Egress", "Model", "Repos", "Version", "Detail")
+_COLUMNS = ("Project", "Status", "Agent", "Profile", "Egress", "Model", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
 # Per-project network panel. Traffic = whole-container NetIO since start (docker stats). Blocked/Allowed
 # = distinct destinations from the squid access log — locked projects only (open ones have no sidecar).
@@ -167,6 +168,7 @@ class ClaudeManApp(App):
         ("m", "Model…", "model_pin"),
         ("f", "Profile…", "profile"),
         ("a", "Auth…", "auth"),
+        ("u", "Run prompt (headless)…", "run"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -329,7 +331,7 @@ class ClaudeManApp(App):
             # not a parser — claude refs never carry a colon, ollama tags usually do, but a bare
             # local name ("devstral") is legal; `project model show` names the kind exactly.
             (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
-             p.auth)
+             p.auth, p.agent)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -369,7 +371,7 @@ class ClaudeManApp(App):
             # A login-mode project badges its Profile cell — the auth posture must never be
             # silent (invariant 1's login amendment), and the badge avoids a ninth column.
             profile_cell = f"{row.profile} [login]" if row.auth == "login" else row.profile
-            cells = [row.slug, row.kind, profile_cell, row.egress, row.model or "-",
+            cells = [row.slug, row.kind, row.agent, profile_cell, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
             # Colour the Project name with its gradient tint, and the Status cell green = UP /
@@ -1082,6 +1084,7 @@ class ClaudeManApp(App):
             "model_pin": self.action_model_pin,
             "profile": self.action_profile,
             "auth": self.action_auth,
+            "run": self.action_run,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1152,16 +1155,17 @@ class ClaudeManApp(App):
     def _on_new_project(self, data: NewProject | None) -> None:
         if not data:
             return  # cancelled
-        slug, profile, overlay, egress, language, ssh_auto_trust, tools = data
+        slug, profile, overlay, egress, language, ssh_auto_trust, tools, agent = data
         if not self._reserve(slug, "create"):
             return
-        self._log(f"creating {slug} …" + (f" (tools: {', '.join(tools)})" if tools else ""))
-        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust, tools)
+        self._log(f"creating {slug} ({agent}) …" + (f" (tools: {', '.join(tools)})" if tools else ""))
+        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust, tools,
+                                    agent)
 
     @work(thread=True, group="create")
     def _create_project_worker(
         self, slug: str, profile: str | None, overlay: str, egress: str, language: str,
-        ssh_auto_trust: bool = False, tools: tuple[str, ...] = (),
+        ssh_auto_trust: bool = False, tools: tuple[str, ...] = (), agent: str = "claude",
     ) -> None:
         """Run the blocking create (image build + registry write + seed + `docker create`) off the
         UI thread, streaming build progress to the log.
@@ -1176,7 +1180,8 @@ class ClaudeManApp(App):
         try:
             res = lifecycle.create_project(
                 slug, profile=profile, overlay=overlay, egress=egress, language=language or None,
-                ssh_auto_trust=ssh_auto_trust, tools=tools, on_progress=self._thread_log,
+                ssh_auto_trust=ssh_auto_trust, tools=tools, agent=agent,
+                on_progress=self._thread_log,
             )
         except schema.ValidationError as exc:
             res = lifecycle.Result(False, f"invalid project {slug!r}: {exc}")
@@ -1412,6 +1417,59 @@ class ClaudeManApp(App):
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
+    # -- headless run (7-run) ----------------------------------------------
+    def action_run(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            self._log("[red]run: select a defined project (orphan rows aren't managed)[/]")
+            return
+        project = projects.load(slug)
+        if project.provider.run is None:
+            self._log(f"[red]run: {project.provider.display_name} has no headless mode[/]")
+            return
+        self.push_screen(RunPromptScreen(slug, project.agent), lambda data: self._on_run(slug, data))
+
+    def _on_run(self, slug: str, data) -> None:
+        if not data:
+            return
+        prompt, permission = data
+        if not self._reserve(slug, "run"):
+            return
+        self._log(f"running a headless session in {slug} (permission {permission}) …")
+        self._run_worker(slug, prompt, permission)
+
+    @work(thread=True, group="create")
+    def _run_worker(self, slug: str, prompt: str, permission: str) -> None:
+        """Start the container if needed, then stream ``lifecycle.run``'s events into the log."""
+        try:
+            project = projects.load(slug)
+            if not runner.is_running(slug):
+                up = lifecycle.up(project, on_progress=self._thread_log)
+                if not up.ok:
+                    self.call_from_thread(self._after_action, slug, up)
+                    return
+            request = agents.RunRequest(prompt=prompt, permission=permission,
+                                        model=project.claude_model if project.agent == "claude" else "")
+
+            def show(ev: agents.AgentEvent) -> None:
+                if ev.kind == "tool_use":
+                    self._thread_log(f"[run] tool {ev.tool}: {ev.text}")
+                elif ev.kind == "tool_result":
+                    tail = ev.text.strip().splitlines()[-1] if ev.text.strip() else ""
+                    self._thread_log(f"[run] tool{'' if ev.ok else ' FAILED'}: {tail[:160]}")
+                elif ev.kind in ("notice", "failed"):
+                    self._thread_log(f"[run] [{'yellow' if ev.kind == 'notice' else 'red'}]{ev.text}[/]")
+                elif ev.kind == "message":
+                    self._thread_log(f"[run] {ev.text}")
+
+            out = lifecycle.run(project, request, on_event=show)
+            u = out.usage
+            tail = (f" · usage in {u.get('input', 0)} out {u.get('output', 0)}" if u else "")
+            res = lifecycle.Result(out.ok, out.detail + tail)
+        except Exception as exc:  # noqa: BLE001 - a background worker must never tear down the app
+            res = lifecycle.Result(False, f"run failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
     # -- auth mode (token | login) ----------------------------------------
     def action_auth(self) -> None:
         slug = self._current_slug()
@@ -1419,9 +1477,9 @@ class ClaudeManApp(App):
             self._log("[red]auth: select a defined project (orphan rows aren't managed)[/]")
             return
         project = projects.load(slug)
-        cred = (config.claude_config_dir(slug) / ".credentials.json").exists()
+        cred = lifecycle.login_credential_present(project)
         self._log(f"managing auth for {slug} (a mode switch recreates to apply)")
-        self.push_screen(AuthScreen(slug, project.auth, cred),
+        self.push_screen(AuthScreen(slug, project.auth, cred, provider=project.provider),
                          lambda choice: self._on_auth(slug, choice))
 
     def _on_auth(self, slug: str, choice) -> None:
@@ -1595,7 +1653,8 @@ class ClaudeManApp(App):
         eff = lifecycle.effective_profile(project)  # mark the EFFECTIVE profile (None = inherits default)
         current = eff.name if eff else (project.profile or "")
         self._log(f"changing profile for {slug} (recreates to apply; re-seeds identity)")
-        self.push_screen(ProfileSelectScreen(slug, current), lambda name: self._on_profile(slug, name))
+        self.push_screen(ProfileSelectScreen(slug, current, agent=project.agent),
+                         lambda name: self._on_profile(slug, name))
 
     def _on_profile(self, slug: str, name) -> None:
         if name is None:  # cancelled, or picked the current profile — nothing to recreate

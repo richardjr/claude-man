@@ -34,14 +34,27 @@ def seed_project_config(
     cfg.mkdir(parents=True, exist_ok=True)
     os.chmod(cfg, 0o700)
 
-    claude_json = cfg / ".claude.json"
+    provider = project.provider
+    if overwrite_identity:
+        # An identity overwrite means "this dir now belongs to a different account" — a
+        # login-mode credential minted by the OLD account must not survive the switch and
+        # keep authenticating as it (invariant 1's login-mode amendment). No-op in token
+        # mode (the file never exists there). The file name is the provider's.
+        (cfg / provider.auth.credential_file).unlink(missing_ok=True)
+    # Provider config seed (codex: config.toml with the sandbox off + the file credential store) —
+    # written only if absent, so an operator edit is never clobbered.
+    for rel, content in provider.config_seed:
+        target = cfg / rel
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+    if not provider.auth.identity_file:
+        # No identity stub for this provider (codex: auth.json carries the account; nothing to
+        # pre-seed). The profile seed is claude's host-config capture (~/.claude assets), so it
+        # is skipped too — a codex bind gets only the config seed above.
+        return cfg
+    claude_json = cfg / provider.auth.identity_file
     if overwrite_identity or not claude_json.exists():
-        if overwrite_identity:
-            # An identity overwrite means "this dir now belongs to a different account" — a
-            # login-mode credential minted by the OLD account must not survive the switch and
-            # keep authenticating as it (invariant 1's login-mode amendment). No-op in token
-            # mode (the file never exists there).
-            (cfg / ".credentials.json").unlink(missing_ok=True)
         email = profile.account_email if profile else ""
         keep = profile.keep_identity_fields if profile else identity.DEFAULT_KEEP
         oauth = {"emailAddress": email} if email else {}

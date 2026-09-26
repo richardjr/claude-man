@@ -27,7 +27,7 @@ class JoinTest(unittest.TestCase):
     """status.join is the invariant-4 registry<->docker reconciliation; pin its outer-join branches."""
 
     def test_defined_with_no_container(self) -> None:
-        rows = status.join([("alpha", "work", "open", 2, "qwen3-coder:30b", "token")], {})
+        rows = status.join([("alpha", "work", "open", 2, "qwen3-coder:30b", "token", "claude")], {})
         self.assertEqual(len(rows), 1)
         r = rows[0]
         self.assertEqual((r.slug, r.kind, r.profile, r.egress, r.repos, r.version, r.model, r.auth),
@@ -36,7 +36,7 @@ class JoinTest(unittest.TestCase):
 
     def test_running_clean_row_uses_container_state(self) -> None:
         cs = _cs("alpha", state="running", profile="work", egress="strict", repos="2", version="2.1.0")
-        rows = status.join([("alpha", "work", "strict", 2, "qwen3-coder:30b", "token")], {"alpha": cs})
+        rows = status.join([("alpha", "work", "strict", 2, "qwen3-coder:30b", "token", "claude")], {"alpha": cs})
         self.assertEqual(rows[0].kind, status.UP)
         self.assertEqual(rows[0].repos, "2")            # counts match -> no drift marker
         self.assertEqual(rows[0].version, "2.1.0")
@@ -47,7 +47,7 @@ class JoinTest(unittest.TestCase):
     def test_registry_wins_repo_count_with_drift_marker(self) -> None:
         # Container label says 1 repo; registry says 3 (a repo was added post-create, BUG-5).
         cs = _cs("alpha", repos="1", status_text="Up 2h")
-        rows = status.join([("alpha", "work", "open", 3, "", "token")], {"alpha": cs})
+        rows = status.join([("alpha", "work", "open", 3, "", "token", "claude")], {"alpha": cs})
         self.assertEqual(rows[0].repos, "3*")           # registry count wins + '*' drift marker
         self.assertIn("repos label stale", rows[0].status_text)
 
@@ -60,22 +60,22 @@ class JoinTest(unittest.TestCase):
         self.assertEqual(rows[0].auth, "token")         # no label -> the default mode
 
     def test_rows_sorted_by_slug(self) -> None:
-        rows = status.join([("zeta", "", "open", 0, "", "token"),
-                            ("alpha", "", "open", 0, "", "token")], {})
+        rows = status.join([("zeta", "", "open", 0, "", "token", "claude"),
+                            ("alpha", "", "open", 0, "", "token", "claude")], {})
         self.assertEqual([r.slug for r in rows], ["alpha", "zeta"])
 
     def test_auth_registry_wins_over_blank_label(self) -> None:
         # A pre-auth-label container reads blank; the registry's login mode must win (invariant 4),
         # so a login project is never silently indistinguishable from a token one.
         cs = _cs("alpha", auth="")
-        rows = status.join([("alpha", "work", "open", 0, "", "login")], {"alpha": cs})
+        rows = status.join([("alpha", "work", "open", 0, "", "login", "claude")], {"alpha": cs})
         self.assertEqual(rows[0].auth, "login")
 
     def test_auth_registry_wins_over_stale_login_label(self) -> None:
         # Registry says token but the label was stamped login (a stale container from a
         # since-reverted mode, pre-recreate): the registry still wins — labels are a projection.
         cs = _cs("alpha", auth="login")
-        rows = status.join([("alpha", "work", "open", 0, "", "token")], {"alpha": cs})
+        rows = status.join([("alpha", "work", "open", 0, "", "token", "claude")], {"alpha": cs})
         self.assertEqual(rows[0].auth, "token")
 
 
