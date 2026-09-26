@@ -93,7 +93,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `u` Run prompt (headless)… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -382,6 +382,12 @@ Project… menu. Each persists the choice and applies it itself — no manual
   other; a claude pick over a local pin recreates once to drop the gateway. Pinning a
   **local** model is **refused on a locked (strict-egress) project** — unlock first;
   claude picks and unpinning stay allowed when locked.
+- **`u` Run prompt (headless)…** — run ONE non-interactive agent session in the project's
+  container (the CLI twin is `project run`): a prompt + a permission level (default / edits /
+  full — full auto-approves every tool call, inside the hardened container which is the real
+  sandbox). Starts the container if needed; the tool calls, notices and the final message stream
+  into the log pane, with the usage on the closing line. Refused while the project's agent is
+  already running in the container (one agent per container).
 - **`a` Auth…** — the project's auth mode: **token** (default — the profile's token as env:
   claude's setup-token, inference-only, so claude.ai account connectors are unavailable; an
   api-key-kind provider's key, API-billed) or **login** (opt-in — no token env; a one-time

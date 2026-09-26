@@ -707,3 +707,204 @@ class AuthSpecValidationTest(unittest.TestCase):
     def test_token_kind_validated(self) -> None:
         with self.assertRaises(ValueError):
             AuthSpec(token_env="X", scrub_env=(), credential_file="a", identity_file="b", token_kind="magic")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7-run — the headless seam: RunRequest → provider argv; provider JSONL → AgentEvents
+# (pinned against REAL captured streams in tests/fixtures/{claude,codex}/); lifecycle.run
+# ---------------------------------------------------------------------------
+import dataclasses  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+from claudeman.agents import run as run_mod  # noqa: E402
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _records(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _events(parse, path: Path) -> list[agents.AgentEvent]:
+    out: list[agents.AgentEvent] = []
+    for rec in _records(path):
+        out.extend(parse(rec))
+    return out
+
+
+class RunRequestTest(unittest.TestCase):
+    def test_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            agents.RunRequest(prompt="   ")
+        with self.assertRaises(ValueError):
+            agents.RunRequest(prompt="x", permission="yolo")
+        self.assertEqual(agents.PERMISSIONS, ("default", "edits", "full"))
+
+    def test_claude_argv_never_carries_the_prompt(self) -> None:
+        req = agents.RunRequest(prompt="do the thing", permission="edits", resume="abc", model="opus")
+        argv = run_mod.claude_argv(req)
+        self.assertEqual(argv[:5], ("claude", "-p", "--output-format", "stream-json", "--verbose"))
+        self.assertIn("acceptEdits", argv)
+        self.assertEqual(argv[argv.index("--resume") + 1], "abc")
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+        self.assertNotIn("do the thing", " ".join(argv))
+        self.assertIn("--dangerously-skip-permissions", run_mod.claude_argv(agents.RunRequest("x", "full")))
+        self.assertNotIn("--permission-mode", run_mod.claude_argv(agents.RunRequest("x")))
+
+    def test_codex_argv_disables_its_own_sandbox_and_reads_stdin(self) -> None:
+        argv = run_mod.codex_argv(agents.RunRequest(prompt="p", resume="t1"))
+        self.assertEqual(argv[:3], ("codex", "exec", "--json"))
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "danger-full-access")   # our container IS the sandbox
+        self.assertEqual(argv[-3:], ("resume", "t1", "-"))
+        self.assertEqual(run_mod.codex_argv(agents.RunRequest("p"))[-1], "-")
+
+    def test_provider_run_spec(self) -> None:
+        assert agents.CLAUDE.run is not None
+        self.assertIs(agents.CLAUDE.run.argv, run_mod.claude_argv)
+        self.assertIs(agents.CLAUDE.run.parse, run_mod.claude_parse)
+
+
+class ClaudeStreamParseTest(unittest.TestCase):
+    def test_ok_fixture(self) -> None:
+        ev = _events(run_mod.claude_parse, FIXTURES / "claude" / "stream-ok.jsonl")
+        kinds = [e.kind for e in ev]
+        self.assertEqual(kinds, ["started", "message", "turn_done"])   # rate_limit_event ignored
+        self.assertEqual(ev[0].text, "claude-fable-5-1")
+        self.assertTrue(ev[0].session_id)
+        self.assertEqual(ev[1].text, "ok")
+        done = ev[-1]
+        self.assertTrue(done.ok)
+        self.assertEqual(done.text, "ok")
+        self.assertEqual(done.usage["output"], 4)
+        self.assertEqual(done.usage["cache_read"], 10234)
+        self.assertEqual(done.session_id, ev[0].session_id)
+
+    def test_tool_fixture(self) -> None:
+        ev = _events(run_mod.claude_parse, FIXTURES / "claude" / "stream-tool.jsonl")
+        kinds = [e.kind for e in ev]
+        self.assertEqual(kinds, ["started", "message", "tool_use", "tool_result", "message", "turn_done"])
+        self.assertEqual(ev[2].tool, "Bash")
+        self.assertEqual(ev[2].text, "echo hello")
+        self.assertEqual(ev[3].text, "hello")
+        self.assertTrue(ev[3].ok)
+        self.assertEqual(ev[-2].text, "hello")
+
+    def test_error_result_is_failed(self) -> None:
+        ev = run_mod.claude_parse({"type": "result", "subtype": "error_max_turns", "is_error": True,
+                                   "session_id": "s", "usage": {}})
+        self.assertEqual(ev[0].kind, "failed")
+        self.assertFalse(ev[0].ok)
+        self.assertEqual(run_mod.claude_parse({"type": "rate_limit_event"}), ())
+        self.assertEqual(run_mod.claude_parse({"type": "something_new"}), ())
+
+
+class CodexStreamParseTest(unittest.TestCase):
+    def test_unauth_fixture_fails_cleanly(self) -> None:
+        ev = _events(run_mod.codex_parse, FIXTURES / "codex" / "exec-unauth.jsonl")
+        self.assertEqual(ev[0].kind, "started")
+        self.assertTrue(ev[0].session_id)
+        self.assertEqual(ev[-1].kind, "failed")
+        self.assertIn("401", ev[-1].text)
+        self.assertTrue(any(e.kind == "notice" for e in ev))
+
+    def test_auth_fixture(self) -> None:
+        ev = _events(run_mod.codex_parse, FIXTURES / "codex" / "exec-auth.jsonl")
+        self.assertEqual([e.kind for e in ev], ["started", "notice", "message", "turn_done"])
+        self.assertIn("code-mode host", ev[1].text)   # the single-binary image, before the package fix
+        self.assertEqual(ev[2].text, "ok")
+        self.assertEqual(ev[3].usage["output"], 5)
+        self.assertEqual(ev[3].usage["cache_read"], 11776)
+
+    def test_shell_fixture(self) -> None:
+        ev = _events(run_mod.codex_parse, FIXTURES / "codex" / "exec-shell.jsonl")
+        kinds = [e.kind for e in ev]
+        self.assertIn("tool_use", kinds)
+        self.assertIn("tool_result", kinds)
+        tr = next(e for e in ev if e.kind == "tool_result")
+        self.assertTrue(tr.ok)
+        self.assertIn("hello", tr.text)
+        self.assertEqual(ev[-1].kind, "turn_done")
+
+
+class LifecycleRunTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = Project(slug="demo", workdir="app")
+
+    def test_exec_argv(self) -> None:
+        argv = lifecycle.run_exec_argv(self.project, agents.RunRequest("hi"))
+        self.assertEqual(argv[:6], ["docker", "exec", "-i", "-w", "/workspace/app", "claude-man-demo"])
+        self.assertEqual(argv[6:8], ["claude", "-p"])
+        self.assertNotIn("hi", argv)
+
+    def _fake_popen(self, fixture: Path, rc: int = 0, stderr: str = ""):
+        lines = fixture.read_text().splitlines(keepends=True)
+        proc = mock.Mock()
+        proc.stdin = mock.Mock()
+        proc.stdout = iter(lines + ["not json\n"])
+        proc.stderr = mock.Mock(read=lambda: stderr)
+        proc.returncode = rc
+        proc.wait = mock.Mock()
+        return proc
+
+    def test_streams_fixture_into_outcome(self) -> None:
+        proc = self._fake_popen(FIXTURES / "claude" / "stream-tool.jsonl")
+        seen: list[str] = []
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: True), \
+                mock.patch.object(lifecycle.subprocess if hasattr(lifecycle, "subprocess") else subprocess,
+                                  "Popen", return_value=proc), \
+                mock.patch("claudeman.tui.terminals.claude_already_running", lambda slug, **kw: False):
+            out = lifecycle.run(self.project, agents.RunRequest("run echo hello"),
+                                on_event=lambda e: seen.append(e.kind))
+        self.assertTrue(out.ok, out.detail)
+        self.assertEqual(out.text, "hello")
+        self.assertEqual(out.events, 6)
+        result = [r for r in _records(FIXTURES / "claude" / "stream-tool.jsonl") if r["type"] == "result"][-1]
+        self.assertEqual(out.usage["output"], result["usage"]["output_tokens"])
+        self.assertTrue(out.session_id)
+        self.assertIn("tool_use", seen)
+        proc.stdin.write.assert_any_call("run echo hello")
+        proc.stdin.close.assert_called_once()
+
+    def test_failed_stream_and_nonzero_exit(self) -> None:
+        # A fake provider whose stream is codex-shaped: the unauth fixture ends in turn.failed,
+        # and the process exits 1 — the outcome must be failed with the stream's reason.
+        fake = dataclasses.replace(FAKE, run=agents.RunSpec(argv=run_mod.codex_argv, parse=run_mod.codex_parse))
+        proc = self._fake_popen(FIXTURES / "codex" / "exec-unauth.jsonl", rc=1, stderr="boom\nlast line")
+        with mock.patch.dict(agents.PROVIDERS, {"fake": fake}), \
+                mock.patch.object(lifecycle.runner, "is_running", lambda slug: True), \
+                mock.patch.object(subprocess, "Popen", return_value=proc), \
+                mock.patch("claudeman.tui.terminals.claude_already_running", lambda slug, **kw: False):
+            project = Project(slug="demo", agent="fake")
+            self.assertEqual(lifecycle.run_exec_argv(project, agents.RunRequest("x"))[6:8], ["codex", "exec"])
+            out = lifecycle.run(project, agents.RunRequest("x"))
+        self.assertFalse(out.ok)
+        self.assertIn("401", out.detail)
+        self.assertEqual(out.returncode, 1)
+        # a provider with no headless mode (FAKE has run=None) is refused up front
+        with mock.patch.dict(agents.PROVIDERS, {"fake": FAKE}):
+            with self.assertRaises(ValueError):
+                lifecycle.run_exec_argv(Project(slug="d", agent="fake"), agents.RunRequest("x"))
+            self.assertFalse(lifecycle.run(Project(slug="d", agent="fake"), agents.RunRequest("x")).ok)
+
+    def test_refuses_when_not_running_or_agent_live(self) -> None:
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: False):
+            out = lifecycle.run(self.project, agents.RunRequest("x"))
+        self.assertFalse(out.ok)
+        self.assertIn("not running", out.detail)
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: True), \
+                mock.patch("claudeman.tui.terminals.claude_already_running", lambda slug, **kw: True):
+            out = lifecycle.run(self.project, agents.RunRequest("x"))
+        self.assertFalse(out.ok)
+        self.assertIn("one agent per container", out.detail)
+
+    def test_cli_run_parser(self) -> None:
+        parser = cli.build_parser()
+        ns = parser.parse_args(["project", "run", "demo", "do it", "--permission", "full", "--json",
+                                "--timeout", "30"])
+        self.assertEqual((ns.slug, ns.prompt, ns.permission, ns.json, ns.timeout),
+                         ("demo", "do it", "full", True, 30.0))
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["project", "run", "demo", "x", "--permission", "yolo"])
+

@@ -19,7 +19,8 @@ Pure stdlib, no IO, no textual — importable by the CLI, lifecycle and the depe
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 # A /proc ``comm`` name is at most 15 bytes and the probe interpolates it into a ``sh -c`` string,
 # so it must be a plain identifier-ish token — never anything the shell could interpret.
@@ -72,6 +73,55 @@ class UpdateSpec:
     user_agent: str
 
 
+PERMISSIONS = ("default", "edits", "full")   # headless-run permission levels (RunRequest.permission)
+
+
+@dataclass(frozen=True)
+class RunRequest:
+    """ONE non-interactive agent session (the Phase 7-run headless seam; docs/V2-PLAN.md §4).
+
+    ``prompt`` is delivered on the agent's STDIN (never argv — no length limit, no `ps` exposure).
+    ``permission``: ``default`` = the agent's own headless default (tool calls needing approval are
+    refused), ``edits`` = auto-accept file edits, ``full`` = every tool call auto-approved — INSIDE the
+    hardened container, which is the actual sandbox (invariant 2; a provider whose own sandbox can't
+    run under the floor, e.g. codex/bubblewrap, disables it here). ``resume`` continues a prior session
+    by the provider's session id; ``model`` is the launch pin (claude ``--model``)."""
+    prompt: str
+    permission: str = "default"
+    resume: str = ""
+    model: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.prompt.strip():
+            raise ValueError("a run needs a non-empty prompt")
+        if self.permission not in PERMISSIONS:
+            raise ValueError(f"permission {self.permission!r} must be one of {PERMISSIONS}")
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """A provider-NEUTRAL headless-run event (the normalised form of claude's stream-json /
+    codex's exec JSONL). ``kind``: started | message | tool_use | tool_result | notice |
+    turn_done | failed. ``usage`` = input/output/cache_read/cache_creation token counts when the
+    provider reports them (turn_done). ``raw`` keeps the source record for `--json` / debugging."""
+    kind: str
+    text: str = ""
+    session_id: str = ""
+    tool: str = ""
+    ok: bool = True
+    usage: dict[str, int] = field(default_factory=dict)
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    """How a provider runs ONE headless session: ``argv(request)`` renders the in-container command
+    (the prompt goes on stdin, so argv never carries it) and ``parse(record)`` turns one decoded JSON
+    line of its output stream into zero or more ``AgentEvent``s. Both PURE (agents/run.py)."""
+    argv: Callable[[RunRequest], tuple[str, ...]]
+    parse: Callable[[dict], tuple[AgentEvent, ...]]
+
+
 @dataclass(frozen=True)
 class AgentProvider:
     id: str                       # "claude" | (7c) "codex" | …
@@ -84,6 +134,7 @@ class AgentProvider:
     image: ImageSpec
     updates: UpdateSpec | None    # None -> the provider has no release-pointer update check
     required_hosts: tuple[str, ...]   # squid dstdomains a LOCKED container must always allow
+    run: RunSpec | None = None    # the headless-run seam (7-run); None -> no non-interactive mode
 
     def __post_init__(self) -> None:
         if not _ID_RE.match(self.id):

@@ -214,6 +214,82 @@ def cmd_project_status(args) -> int:
     return 0
 
 
+def _ensure_running(slug: str) -> int:
+    """Start ``slug`` if it isn't running (a ``docker exec`` needs a RUNNING container). rc 0 when up;
+    1 (with the reason on stderr) for an unmanaged/orphan project or a failed start."""
+    from . import lifecycle
+    from .docker import runner
+
+    if runner.is_running(slug):
+        return 0
+    if not projects.exists(slug):
+        extra = (" (orphan container exists — reconcile it, or `docker start` it by hand)"
+                 if runner.exists(slug)
+                 else f"; create it with `claudemanctl project create {slug}`")
+        print(f"no managed project {slug!r}{extra}", file=sys.stderr)
+        return 1
+    print(f"{slug} not running — starting it first …", file=sys.stderr)
+    res = lifecycle.up(projects.load(slug))
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_run(args) -> int:
+    """Run ONE headless agent session in the project's container (the 7-run seam): the prompt on the
+    agent's stdin, its event stream normalised + printed (``--json`` = the raw provider records)."""
+    import json as _json
+
+    from . import lifecycle
+
+    prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    try:
+        request = agents.RunRequest(prompt=prompt, permission=args.permission,
+                                    resume=args.resume or "", model=args.model or "")
+    except ValueError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+    rc = _ensure_running(args.slug)
+    if rc:
+        return rc
+    project = projects.load(args.slug)
+    if not args.model and project.claude_model and project.agent == "claude":
+        request = agents.RunRequest(prompt=request.prompt, permission=request.permission,
+                                    resume=request.resume, model=project.claude_model)
+
+    def show(ev: agents.AgentEvent) -> None:
+        if args.json:
+            print(_json.dumps(ev.raw), flush=True)
+            return
+        if ev.kind == "started":
+            print(f"[started] {ev.session_id}{' ' + ev.text if ev.text else ''}", file=sys.stderr)
+        elif ev.kind == "tool_use":
+            print(f"[tool] {ev.tool}: {ev.text}", file=sys.stderr)
+        elif ev.kind == "tool_result":
+            tail = ev.text.strip().splitlines()[-1] if ev.text.strip() else ""
+            print(f"[tool{'' if ev.ok else ' FAILED'}] {tail[:160]}", file=sys.stderr)
+        elif ev.kind == "notice":
+            print(f"[notice] {ev.text}", file=sys.stderr)
+        elif ev.kind == "failed":
+            print(f"[failed] {ev.text}", file=sys.stderr)
+        elif ev.kind == "message":
+            pass   # the final message prints once on stdout below
+
+    out = lifecycle.run(project, request, on_event=show, timeout=args.timeout or None)
+    if not args.json and out.text:
+        print(out.text)
+    if out.usage and not args.json:
+        u = out.usage
+        print(f"[usage] in {u.get('input', 0)} out {u.get('output', 0)} cache-read {u.get('cache_read', 0)} "
+              f"cache-write {u.get('cache_creation', 0)}"
+              + (f" · session {out.session_id}" if out.session_id else ""), file=sys.stderr)
+    if not out.ok:
+        print(f"run failed: {out.detail}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _open_terminal(slug: str, program: str) -> int:
     """Ensure ``slug``'s container is running, then spawn a detached ``program`` terminal into it.
 
@@ -223,21 +299,9 @@ def _open_terminal(slug: str, program: str) -> int:
     already-running container (including an orphan) is exec'd straight into; a non-running container
     with no registry entry can't be managed. Mirrors the TUI ``_open_terminal`` flow.
     """
-    from . import lifecycle
-    from .docker import runner
-
-    if not runner.is_running(slug):
-        if not projects.exists(slug):
-            extra = (" (orphan container exists — reconcile it, or `docker start` it by hand)"
-                     if runner.exists(slug)
-                     else f"; create it with `claudemanctl project create {slug}`")
-            print(f"no managed project {slug!r}{extra}", file=sys.stderr)
-            return 1
-        print(f"{slug} not running — starting it first …", file=sys.stderr)
-        res = lifecycle.up(projects.load(slug))
-        print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
-        if not res.ok:
-            return 1
+    rc = _ensure_running(slug)
+    if rc:
+        return rc
     label, spawn = {
         "claude": ("claude", terminals.spawn_claude),
         "nvim": ("nvim", terminals.spawn_nvim),
@@ -1692,6 +1756,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
         ("claude", cmd_project_claude, "run claude in a new terminal"),
         ("nvim", cmd_project_nvim, "open neovim in a new terminal"),
+        ("run", cmd_project_run, "run ONE headless agent session (prompt → normalised event stream)"),
         ("lock", cmd_project_lock, "switch to strict egress (allowlist proxy; recreates)"),
         ("unlock", cmd_project_unlock, "return to open egress (recreates)"),
         ("egress-log", cmd_project_egress_log, "show denied egress destinations (for allowlist tuning)"),
@@ -1702,6 +1767,17 @@ def build_parser() -> argparse.ArgumentParser:
         sp = proj.add_parser(name, help=helptext)
         sp.add_argument("slug", type=_slug_arg)
         sp.set_defaults(func=func)
+        if name == "run":
+            sp.add_argument("prompt", help="the prompt, or '-' to read it from stdin")
+            sp.add_argument("--permission", choices=agents.PERMISSIONS, default="default",
+                            help="default = the agent's headless default (approval-needing tool calls "
+                                 "are refused) | edits = auto-accept file edits | full = every tool call "
+                                 "auto-approved (inside the hardened container — the real sandbox)")
+            sp.add_argument("--resume", default="", help="continue a prior session by its id")
+            sp.add_argument("--model", default="", help="launch-time model ref (default: the project's pin)")
+            sp.add_argument("--timeout", type=float, default=0.0, help="kill the run after N seconds (0 = none)")
+            sp.add_argument("--json", action="store_true",
+                            help="print the provider's raw JSON records instead of the human lines")
     pst = proj.add_parser("ssh-trust",
                           help="toggle auto-trust of unknown SSH host keys (TOFU; accept-new)")
     pst.add_argument("slug", type=_slug_arg)

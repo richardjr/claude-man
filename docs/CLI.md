@@ -121,6 +121,19 @@ uv run claudemanctl project shell demo      # open a shell in a new terminal
 uv run claudemanctl project claude demo     # run claude in a new terminal
 uv run claudemanctl project nvim demo       # open neovim (baked into the image) in a new terminal
 
+# Run ONE headless (non-interactive) agent session in the container — the Phase 7-run seam that the
+# manager tier will drive (docs/V2-PLAN.md). The prompt rides the agent's STDIN (never argv); the
+# provider's JSON event stream is normalised: tool calls + notices go to stderr, the final message to
+# stdout, a usage line + the session id to stderr. Starts the container first if needed; refused while
+# the project's agent is already running in it (one agent per container).
+uv run claudemanctl project run demo "summarise the repo layout"
+uv run claudemanctl project run demo - < prompt.md                 # prompt from stdin
+uv run claudemanctl project run demo "fix the failing test" --permission edits   # auto-accept file edits
+uv run claudemanctl project run demo "…" --permission full        # every tool call auto-approved — inside the
+                                                                   # hardened container, which IS the sandbox
+uv run claudemanctl project run demo "continue" --resume <session-id>   # continue a prior session
+uv run claudemanctl project run demo "…" --json --timeout 600      # raw provider records; kill after 10 min
+
 # Recreate the container (applies env/port/identity changes). Like `up`, it offers the on-start
 # claude update — prompts on a TTY; --update-yes rebuilds to the latest without asking, --no-update skips:
 uv run claudemanctl project recreate demo

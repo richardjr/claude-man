@@ -8,7 +8,8 @@ and this object is how the rest of the code REACHES them without hard-coding "cl
 from __future__ import annotations
 
 from .. import config
-from .base import AgentProvider, AuthSpec, ImageSpec, UpdateSpec
+from . import run
+from .base import AgentProvider, AuthSpec, ImageSpec, RunSpec, UpdateSpec
 
 # Anthropic / Claude egress a LOCKED container must always reach (invariant 3). `.anthropic.com`
 # (wildcard) covers api.anthropic.com + statsig.anthropic.com — listing those bare too would make
@@ -50,4 +51,5 @@ PROVIDER = AgentProvider(
         user_agent=config.CLAUDE_CODE_USER_AGENT,
     ),
     required_hosts=REQUIRED_HOSTS,
+    run=RunSpec(argv=run.claude_argv, parse=run.claude_parse),
 )

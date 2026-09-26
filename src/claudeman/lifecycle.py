@@ -17,7 +17,7 @@ import fcntl
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import (
     agents,
@@ -852,6 +852,124 @@ def set_tools(slug: str, names: tuple[str, ...]) -> Result:
             detail += (f"; locked project — these tools reach {', '.join(hosts)} at runtime: "
                        f"`project egress` / the Egress… screen to allowlist what you need")
     return Result(True, detail)
+
+
+# ---------------------------------------------------------------------------
+# Headless run (Phase 7-run — the manager tier's primitive): ONE non-interactive agent session
+# inside the project's RUNNING container, its event stream normalised by the provider's RunSpec.
+# ---------------------------------------------------------------------------
+@dataclass
+class RunOutcome:
+    ok: bool
+    detail: str
+    session_id: str = ""
+    text: str = ""                 # the final agent message
+    usage: dict[str, int] = field(default_factory=dict)
+    events: int = 0
+    returncode: int | None = None
+
+
+def run_exec_argv(project: Project, request: agents.RunRequest) -> list[str]:
+    """PURE: the host-side ``docker exec`` argv for a headless run — ``-i`` (the prompt rides
+    stdin), the project's launch workdir, then the provider's own argv. Raises ``ValueError`` for
+    a provider with no headless mode."""
+    spec = project.provider.run
+    if spec is None:
+        raise ValueError(f"{project.provider.display_name} has no headless-run mode")
+    return ["docker", "exec", "-i", "-w", project.launch_workdir, project.container,
+            *spec.argv(request)]
+
+
+def run(project: Project, request: agents.RunRequest, *,
+        on_event: Callable[[agents.AgentEvent], None] | None = None,
+        timeout: float | None = None) -> RunOutcome:
+    """Run ONE headless session in ``project``'s container and stream its normalised events.
+
+    Requires a RUNNING container (callers ``up`` first — the CLI/TUI do, like shell/claude).
+    Refuses while the project's agent is already live in the container (invariant 6 — a headless
+    run IS an agent process; the guard is the same /proc comm probe ``spawn_claude`` uses). The
+    prompt goes to the agent's stdin; every stdout line is decoded as JSON and handed to the
+    provider's ``parse``; non-JSON lines are ignored. The outcome carries the last message text,
+    the session id and the usage from the turn_done/failed event. ``timeout`` bounds the whole run
+    (None = unbounded — the caller's choice); on expiry the exec is killed and the outcome fails."""
+    import json
+    import subprocess
+
+    from .tui import terminals   # textual-free; the one-agent-per-container probe lives there
+
+    if project.provider.run is None:
+        return RunOutcome(False, f"{project.provider.display_name} has no headless-run mode")
+    if not runner.is_running(project.slug):
+        return RunOutcome(False, f"{project.slug} is not running — `project up {project.slug}` first")
+    if terminals.claude_already_running(project.slug, provider=project.provider):
+        return RunOutcome(False, f"{project.provider.binary} is already running in {project.slug!r} "
+                                 f"— one agent per container (invariant 6); wait for it or use "
+                                 f"that session")
+    argv = run_exec_argv(project, request)
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        return RunOutcome(False, f"could not exec into {project.container}: {exc}")
+    outcome = RunOutcome(True, "")
+    last_text = ""
+    try:
+        try:
+            proc.stdin.write(request.prompt)
+            if not request.prompt.endswith("\n"):
+                proc.stdin.write("\n")
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass   # the agent may have exited before reading (surfaced via rc/stderr below)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            for ev in project.provider.run.parse(rec):
+                outcome.events += 1
+                if ev.session_id and not outcome.session_id:
+                    outcome.session_id = ev.session_id
+                if ev.kind == "message" and ev.text:
+                    last_text = ev.text
+                if ev.kind in ("turn_done", "failed"):
+                    outcome.usage = dict(ev.usage) or outcome.usage
+                    if ev.kind == "failed":
+                        outcome.ok = False
+                        outcome.detail = ev.text or "run failed"
+                    elif ev.text and not last_text:
+                        last_text = ev.text
+                if on_event is not None:
+                    on_event(ev)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return RunOutcome(False, f"run timed out after {timeout}s", session_id=outcome.session_id,
+                              text=last_text, usage=outcome.usage, events=outcome.events)
+    finally:
+        stderr_tail = ""
+        try:
+            if proc.stderr is not None:
+                stderr_tail = proc.stderr.read()[-2000:].strip()
+        except (OSError, ValueError):
+            pass
+    outcome.returncode = proc.returncode
+    outcome.text = last_text
+    if proc.returncode != 0 and outcome.ok:
+        outcome.ok = False
+        outcome.detail = (f"{project.provider.binary} exited {proc.returncode}"
+                          + (f": {stderr_tail.splitlines()[-1]}" if stderr_tail else ""))
+    if outcome.ok and not outcome.detail:
+        outcome.detail = f"run complete ({outcome.events} events)"
+    return outcome
 
 
 # ---------------------------------------------------------------------------

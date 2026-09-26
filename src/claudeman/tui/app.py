@@ -20,10 +20,10 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Header, Label, RichLog, Static
 
-from .. import config, doctor, lifecycle, usage
+from .. import agents, config, doctor, lifecycle, usage
 from ..checkout import gitstate
 from ..checkout import repos as repos_mod
-from ..docker import stats, status
+from ..docker import runner, stats, status
 from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
@@ -32,6 +32,7 @@ from . import setupview
 from . import terminals
 from .screens.add_repo import AddRepoScreen
 from .screens.auth import AuthScreen
+from .screens.run_prompt import RunPromptScreen
 from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
@@ -167,6 +168,7 @@ class ClaudeManApp(App):
         ("m", "Model…", "model_pin"),
         ("f", "Profile…", "profile"),
         ("a", "Auth…", "auth"),
+        ("u", "Run prompt (headless)…", "run"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -1082,6 +1084,7 @@ class ClaudeManApp(App):
             "model_pin": self.action_model_pin,
             "profile": self.action_profile,
             "auth": self.action_auth,
+            "run": self.action_run,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1412,6 +1415,59 @@ class ClaudeManApp(App):
             res = lifecycle.set_egress(slug, mode, on_progress=self._thread_log)
         except Exception as exc:  # noqa: BLE001 - never tear down the app from a worker
             res = lifecycle.Result(False, f"egress change failed for {slug!r}: {exc!r}")
+        self.call_from_thread(self._after_action, slug, res)
+
+    # -- headless run (7-run) ----------------------------------------------
+    def action_run(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):
+            self._log("[red]run: select a defined project (orphan rows aren't managed)[/]")
+            return
+        project = projects.load(slug)
+        if project.provider.run is None:
+            self._log(f"[red]run: {project.provider.display_name} has no headless mode[/]")
+            return
+        self.push_screen(RunPromptScreen(slug, project.agent), lambda data: self._on_run(slug, data))
+
+    def _on_run(self, slug: str, data) -> None:
+        if not data:
+            return
+        prompt, permission = data
+        if not self._reserve(slug, "run"):
+            return
+        self._log(f"running a headless session in {slug} (permission {permission}) …")
+        self._run_worker(slug, prompt, permission)
+
+    @work(thread=True, group="create")
+    def _run_worker(self, slug: str, prompt: str, permission: str) -> None:
+        """Start the container if needed, then stream ``lifecycle.run``'s events into the log."""
+        try:
+            project = projects.load(slug)
+            if not runner.is_running(slug):
+                up = lifecycle.up(project, on_progress=self._thread_log)
+                if not up.ok:
+                    self.call_from_thread(self._after_action, slug, up)
+                    return
+            request = agents.RunRequest(prompt=prompt, permission=permission,
+                                        model=project.claude_model if project.agent == "claude" else "")
+
+            def show(ev: agents.AgentEvent) -> None:
+                if ev.kind == "tool_use":
+                    self._thread_log(f"[run] tool {ev.tool}: {ev.text}")
+                elif ev.kind == "tool_result":
+                    tail = ev.text.strip().splitlines()[-1] if ev.text.strip() else ""
+                    self._thread_log(f"[run] tool{'' if ev.ok else ' FAILED'}: {tail[:160]}")
+                elif ev.kind in ("notice", "failed"):
+                    self._thread_log(f"[run] [{'yellow' if ev.kind == 'notice' else 'red'}]{ev.text}[/]")
+                elif ev.kind == "message":
+                    self._thread_log(f"[run] {ev.text}")
+
+            out = lifecycle.run(project, request, on_event=show)
+            u = out.usage
+            tail = (f" · usage in {u.get('input', 0)} out {u.get('output', 0)}" if u else "")
+            res = lifecycle.Result(out.ok, out.detail + tail)
+        except Exception as exc:  # noqa: BLE001 - a background worker must never tear down the app
+            res = lifecycle.Result(False, f"run failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
 
     # -- auth mode (token | login) ----------------------------------------

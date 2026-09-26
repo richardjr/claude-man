@@ -6,7 +6,7 @@ provider's policy data. Today the registry holds the ``claude`` provider only; `
 from __future__ import annotations
 
 from .. import config
-from .base import AgentProvider, AuthSpec, ImageSpec, UpdateSpec
+from .base import PERMISSIONS, AgentEvent, AgentProvider, AuthSpec, ImageSpec, RunRequest, RunSpec, UpdateSpec
 from .claude import PROVIDER as CLAUDE
 
 DEFAULT_ID = CLAUDE.id
@@ -65,6 +65,7 @@ def is_forbidden_env_name(name: str) -> bool:
     return any(norm == f.strip("_").upper() for f in credential_env_names())
 
 
-__all__ = ["AgentProvider", "AuthSpec", "ImageSpec", "UpdateSpec", "CLAUDE", "DEFAULT",
+__all__ = ["AgentProvider", "AuthSpec", "ImageSpec", "UpdateSpec", "RunSpec", "RunRequest",
+           "AgentEvent", "PERMISSIONS", "CLAUDE", "DEFAULT",
            "DEFAULT_ID", "PROVIDERS", "resolve", "ids", "binaries", "config_dirs", "config_dir_envs",
            "credential_env_names", "is_forbidden_env_name"]

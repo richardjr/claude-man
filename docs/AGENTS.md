@@ -23,7 +23,13 @@ carries both modes as data (`token_kind` oauth-token|api-key, `login_hint`, `tok
 (`lifecycle.login_credential_path/present`, `_login_note`, `set_auth`, `logout`, the CLI
 `status`/`auth`, the TUI Auth… screen) keys on the provider's credential file + hint; the seed
 skips the identity stub for a provider without one; `profile add --agent [--login-only|--stdin]` +
-`renew` mint per the token kind; the Profile… picker filters to the project's agent. Tracking:
+`renew` mint per the token kind; the Profile… picker filters to the project's agent. **7-run (same
+day):** the headless seam — `RunRequest` (prompt on stdin, permission default|edits|full, resume,
+model) → `RunSpec.argv`, and `RunSpec.parse` normalising the provider stream to `AgentEvent`s
+(`agents/run.py`: claude stream-json + codex exec JSONL, both pinned by real captured fixtures);
+`lifecycle.run` streams a `docker exec -i` session (one-agent guard, timeout, `RunOutcome` with the
+final text/session/usage); `project run` + the TUI Run prompt… modal. Verified live: a claude
+session with a Bash tool call ran as uid 1000 in a hardened container. Tracking:
 [`ROADMAP.md`](../ROADMAP.md) Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
 modes per provider (`AuthSpec` as data, provider-scoped profiles, a per-provider `forbidden_env` scrub),
 a new **headless-run seam** (`RunSpec` → normalised `AgentEvent` stream; `project run`), a third
