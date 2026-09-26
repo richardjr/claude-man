@@ -37,6 +37,7 @@ class ContainerStatus:
     repos: str = ""
     version: str = ""
     auth: str = ""       # the container's stamped auth-mode label ("" on pre-label containers)
+    agent: str = ""      # the stamped provider id ("" on pre-7b containers)
 
     @property
     def kind(self) -> str:
@@ -57,6 +58,8 @@ class Row:
     #                      --model ref — mutually exclusive in the schema ("" = default)
     auth: str = "token"  # the per-project auth mode ("token" | "login") — registry-sourced like
     #                      egress, so a login-mode project is never silently indistinguishable
+    agent: str = "claude"  # the provider id (Phase 7b) — registry-sourced; a non-claude agent is
+    #                        never silent (AGENT column / cell)
 
 
 def query_containers() -> dict[str, ContainerStatus]:
@@ -92,6 +95,7 @@ def query_containers() -> dict[str, ContainerStatus]:
             repos=lbls.get(labels.REPOS, ""),
             version=lbls.get(labels.VERSION, ""),
             auth=lbls.get(labels.AUTH, ""),
+            agent=lbls.get(labels.AGENT, ""),
         )
     return out
 
@@ -109,7 +113,7 @@ def _parse_label_csv(raw: str) -> dict[str, str]:
 def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
     """Outer-join the registry's defined projects with live container status.
 
-    ``defined_slugs`` is an iterable of (slug, profile, egress, repos_count, model, auth)
+    ``defined_slugs`` is an iterable of (slug, profile, egress, repos_count, model, auth, agent)
     tuples from the registry, so DEFINED projects with no container still appear. ``model`` is
     the registry-only model pin — the local hybrid tag or the claude --model ref, whichever is
     set (no docker label carries it). ``auth`` is the registry auth mode; the registry wins
@@ -117,12 +121,12 @@ def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
     """
     rows: list[Row] = []
     seen: set[str] = set()
-    for slug, profile, egress, repos, model, auth in defined_slugs:
+    for slug, profile, egress, repos, model, auth, agent in defined_slugs:
         seen.add(slug)
         cs = containers.get(slug)
         if cs is None:
             rows.append(Row(slug, DEFINED, profile or "", egress or "", str(repos), "", "",
-                            model, auth or "token"))
+                            model, auth or "token", agent or "claude"))
         else:
             # Registry wins for the repo count (invariant 4 / review BUG-5): the container's
             # `claude-man.repos` label is a create-time projection and goes stale the instant a repo
@@ -137,14 +141,16 @@ def join(defined_slugs, containers: dict[str, ContainerStatus]) -> list[Row]:
                 detail = cs.status_text
             rows.append(
                 Row(slug, cs.kind, cs.profile or profile or "", cs.egress or egress or "",
-                    repos_cell, cs.version, detail, model, auth or cs.auth or "token")
+                    repos_cell, cs.version, detail, model, auth or cs.auth or "token",
+                    agent or cs.agent or "claude")
             )
     # Containers with no registry entry (orphans) — surface them so they can be reconciled.
     for slug, cs in containers.items():
         if slug not in seen:
             rows.append(
                 Row(slug, cs.kind, cs.profile, cs.egress, cs.repos, cs.version,
-                    cs.status_text + " (orphan: no registry entry)", "", cs.auth or "token")
+                    cs.status_text + " (orphan: no registry entry)", "", cs.auth or "token",
+                    cs.agent or "claude")
             )
     rows.sort(key=lambda r: r.slug)
     return rows

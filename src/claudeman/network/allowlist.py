@@ -4,8 +4,9 @@ These are ``squid`` ``dstdomain`` values (a leading dot matches the domain and a
 bare name matches exactly). ``claude.ai`` is REQUIRED — it is the OAuth subscription token-refresh
 path on this host. Omitting it makes token refresh fail opaquely. (See CLAUDE.md invariant 3.)
 
-The base set covers what Claude Code and the standard toolchains reach on a normal run: the
-Anthropic API + OAuth (the `.anthropic.com` wildcard covers `api.`/`statsig.`), GitHub
+The base set = the agent provider's ``required_hosts`` (its auth-refresh + inference + release
+hosts — ``agents/claude.py`` for Claude Code: the Anthropic API + OAuth; the Phase 7a seam) + the
+provider-NEUTRAL toolchain set below: GitHub
 (clone/fetch/release assets via the `.github.com` / `.githubusercontent.com` wildcards), and the
 package registries (npm, PyPI, yarn) + Debian apt mirrors so `npm install` / `pip install` /
 `apt-get install` work under lock (ROADMAP IMG-4). A project adds anything else via its
@@ -22,14 +23,8 @@ from __future__ import annotations
 
 import re
 
-# Anthropic / Claude. `.anthropic.com` (wildcard) covers api.anthropic.com + statsig.anthropic.com —
-# listing those bare too would make squid reject the config, so don't.
-ANTHROPIC = (
-    ".anthropic.com",
-    "claude.ai",            # OAuth refresh — do not remove (invariant 3); exact (no wildcard) so distinct
-    "downloads.claude.ai",  # claude release downloads (distinct host under claude.ai, no wildcard)
-    "sentry.io",
-)
+from .. import agents
+from ..agents import AgentProvider
 
 # Package registries Claude/tools commonly need: npm, PyPI, yarn (IMG-4).
 PACKAGES = (
@@ -65,7 +60,17 @@ BITBUCKET = (
     ".bitbucket.org",
 )
 
-BASE_ALLOWLIST: tuple[str, ...] = ANTHROPIC + PACKAGES + APT + GITHUB + GITLAB + BITBUCKET
+# The provider-neutral part of the base set (what any agent's toolchain reaches under lock).
+TOOLCHAIN: tuple[str, ...] = PACKAGES + APT + GITHUB + GITLAB + BITBUCKET
+
+
+def base_allowlist(provider: AgentProvider = agents.DEFAULT) -> tuple[str, ...]:
+    """The base egress set for a locked container running ``provider``: its required hosts (auth
+    refresh + inference + releases — invariant 3) first, then the neutral toolchain set."""
+    return provider.required_hosts + TOOLCHAIN
+
+
+BASE_ALLOWLIST: tuple[str, ...] = base_allowlist()   # the default (claude) provider's set
 
 # A valid dstdomain: an optional leading dot (subdomain wildcard) then ≥2 dot-separated labels ending
 # in an alphabetic TLD. This rejects the squid catch-all ``.``, a bare ``*``, anything with a
@@ -81,8 +86,10 @@ def is_valid_dstdomain(host: str) -> bool:
     return bool(_HOST_RE.match(host))
 
 
-def build_allowlist(project_extras: tuple[str, ...] = ()) -> list[str]:
-    """Base allowlist + the project's ``[project.egress].allowlist`` extras → a deduped, squid-safe list.
+def build_allowlist(project_extras: tuple[str, ...] = (), *,
+                    provider: AgentProvider = agents.DEFAULT) -> list[str]:
+    """Base allowlist (for ``provider``) + the project's ``[project.egress].allowlist`` extras → a
+    deduped, squid-safe list.
 
     Order-preserving (base first, then extras). Drops: blank entries; invalid/over-broad entries
     (``.``/``*``/ports/paths/bare-TLDs — see ``is_valid_dstdomain``); and any bare host already covered
@@ -92,7 +99,7 @@ def build_allowlist(project_extras: tuple[str, ...] = ()) -> list[str]:
     """
     merged: list[str] = []
     seen: set[str] = set()
-    for host in (*BASE_ALLOWLIST, *project_extras):
+    for host in (*base_allowlist(provider), *project_extras):
         h = host.strip()
         if h and is_valid_dstdomain(h) and h not in seen:
             seen.add(h)

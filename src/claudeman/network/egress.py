@@ -280,7 +280,7 @@ def render_conf(project: Project) -> str:
     so it is safe in the (non-synced) state dir and is overwritten on every lock so an allowlist edit
     applies on the next recreate.
     """
-    al = allowlist_mod.build_allowlist(project.allowlist)
+    al = allowlist_mod.build_allowlist(project.allowlist, provider=project.provider)
     path = config.squid_conf_path(project.slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(squid.render_squid_conf(al), encoding="utf-8")
@@ -313,7 +313,7 @@ def ensure_proxy(project, *, on_progress=None) -> Result:
         runner._run(["docker", "rm", "-f", config.proxy_container_name(slug)])  # no half-wired proxy
         return Result(False, f"could not connect sidecar to egress bridge: "
                              f"{bc.stderr.strip() or bc.stdout.strip()}")
-    n = len(allowlist_mod.build_allowlist(project.allowlist))
+    n = len(allowlist_mod.build_allowlist(project.allowlist, provider=project.provider))
     return Result(True, f"egress locked ({n} allowed domains) via {config.proxy_container_name(slug)}")
 
 

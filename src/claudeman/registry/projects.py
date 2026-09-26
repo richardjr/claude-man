@@ -32,7 +32,7 @@ import tomllib
 from pathlib import Path
 from uuid import uuid4
 
-from .. import config
+from .. import agents, config
 from .schema import (
     DEFAULT_SYNC_CLAUDE,
     DEFAULT_SYNC_WORKSPACE,
@@ -103,6 +103,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
     )
     return Project(
         slug=slug,
+        agent=str(proj.get("agent", agents.DEFAULT_ID) or agents.DEFAULT_ID),
         profile=proj.get("profile"),
         overlay=proj.get("overlay", config.DEFAULT_OVERLAY),
         egress=egress_tbl.get("mode", config.DEFAULT_EGRESS),
@@ -167,6 +168,8 @@ def save(project: Project) -> Path:
     doc = tomlkit.document()
     proj = tomlkit.table()
     proj["slug"] = project.slug
+    if project.agent != agents.DEFAULT_ID:  # the claude default stays absent (terse template)
+        proj["agent"] = project.agent
     if project.profile:
         proj["profile"] = project.profile
     proj["overlay"] = project.overlay

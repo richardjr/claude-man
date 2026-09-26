@@ -53,7 +53,9 @@ sweeps across the gradient, then the whole splash scrolls off to reveal the main
 
 The main screen, top to bottom:
 
-- **Projects table** — `Project · Status · Profile · Egress · Model · Repos · Version · Detail`.
+- **Projects table** — `Project · Status · Agent · Profile · Egress · Model · Repos · Version · Detail`.
+  **Agent** is the project's coding-agent provider (`claude` today; `codex` with Phase 7c —
+  registry-sourced, never silent).
   Status is green `UP`, red `STOPPED`, or yellow `DEFINED` (registry entry, no container);
   it's polled fresh every 10 s, never cached. **Model** is the per-project model pin — a local
   (hybrid) tag or a claude `--model` ref, whichever is set (`-` = default — see *Model…* in
@@ -112,10 +114,13 @@ opens the editor.)
 
 ## 2. Create a project (`n`)
 
-Press `n`. The **New project** form has seven fields:
+Press `n`. The **New project** form has eight fields:
 
 - **Slug** — lowercase letters/digits/hyphens, ≤ 64 chars (validated inline; duplicates
   rejected). This names the container (`claude-man-<slug>`) and the state dirs.
+- **Agent** — the coding-agent provider the container runs (`claude`; `codex` once Phase 7c
+  lands). Fixed at create; the profile you pick must belong to the same agent (the CLI twin is
+  `project create --agent`).
 - **Profile (account)** — pick a profile, or leave the first entry (`(default: <name>)`) to
   inherit the default. Only existing profiles are listed (step 0).
 - **Overlay (image)** — `base`, `python`, `rust`, `node`, `python-node`, or `terraform`: the

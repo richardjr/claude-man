@@ -122,7 +122,9 @@ items — **BUG-2** (per-label `docker inspect`, latent today) and **IMG-4** (`C
 offline pinning + per-overlay offline smoke). Auto-capturing the token in `profile add` (skip the
 paste) is the remaining small polish. **The larger architectural effort on deck is Phase 7
 (multi-agent provider abstraction — run Codex/others in the same hardened model; designed in
-[`docs/AGENTS.md`](docs/AGENTS.md), not started).** Tracked lower-severity items + the 2026-06-14
+[`docs/AGENTS.md`](docs/AGENTS.md), not started) — now the FIRST STAGE of the v2 line planned in
+[`docs/V2-PLAN.md`](docs/V2-PLAN.md) (2026-09-26: rename to `agentry`, a control plane, tasks,
+message threads, a manager tier, a web UI — Phases 11–17).** Tracked lower-severity items + the 2026-06-14
 critical-review backlog live in [`docs/REVIEW.md`](docs/REVIEW.md).
 
 **Operator note:** containers built before the native-install image change show stale `claude
@@ -331,10 +333,25 @@ down-payment on 7c's auth-kind divergence.)* The 3-way sync-back ENGINE, masking
 flock, audit-commit, the update semver compare, and the usage render helpers are all reused; only the
 provider's policy DATA varies._
 
-- [ ] **7a:** introduce `agents/` + a `claude` provider reproducing today's behaviour byte-for-byte (pure refactor, zero behaviour change); route the soft seams through it (spawn binary/comm, config-dir path+env, version-label key+build-arg, release URL/UA, required egress hosts, context-file name + import syntax, sync-back policy data). A unit test pins the hardened argv byte-identical (invariant 2)
-- [ ] **7b:** `Project.agent` field (default `claude`) threaded through lifecycle/runner/terminals/images; split `BASE_ALLOWLIST` into a neutral toolchain set + `provider.required_hosts`; key `schema._MANAGED_MOUNTS` on `provider.config_dir`; generalize the one-per-container comm probe
-- [ ] **7c:** a `codex` provider + image overlay, validated against the hardened floor (`image smoke`); resolve the auth-kind divergence (single bearer vs refreshable JSON cred — needs research on Codex's auth/login flow; invariant 1 must still hold). `project create --agent codex`
+- [~] **7a:** *(7a-1 LANDED 2026-09-26 — `agents/` + the claude provider; spawn/comm, config-dir+env, token env+scrub, version build-arg+label, release pointer, required hosts + the `TOOLCHAIN` split, and the cross-provider mount-dst/reserved-env guards routed; goldens pinned in `tests/test_agents.py`. 7a-2 = sync-back policy data + context/packs spec.)* introduce `agents/` + a `claude` provider reproducing today's behaviour byte-for-byte (pure refactor, zero behaviour change); route the soft seams through it (spawn binary/comm, config-dir path+env, version-label key+build-arg, release URL/UA, required egress hosts, context-file name + import syntax, sync-back policy data). A unit test pins the hardened argv byte-identical (invariant 2)
+- [x] **7b:** *(LANDED 2026-09-26)* `Project.agent` field (default `claude`) + `Profile.agent` threaded through lifecycle/runner/terminals/images/egress; the `claude-man.agent` label + AGENT column (CLI + TUI) + `project create --agent` / the create modal's Agent select; the `agent_mismatch` profile guard. (The `BASE_ALLOWLIST` split, the mount-dst denylist keyed on every provider's config dir, and the comm-probe generalisation all landed in 7a-1.) Deferred to 7c: the identity seed (`seed_project_config` still writes claude's `.claude.json`; codex gets a `config.toml` seed with `sandbox_mode`/`cli_auth_credentials_store`), the host `claude-config` state-dir name, `profile add --agent` (the mint flow is claude's setup-token until 7-auth)
+- [ ] **7c:** a `codex` provider + image overlay, validated against the hardened floor (`image smoke`); ~~resolve the auth-kind divergence~~ *(RESOLVED — the 2026-09-26 login-mode spike, `docs/AGENTS.md` § Codex: `auth.json` minted in-container by `codex login --device-auth`, self-refreshing, survives recreate = our `login` mode; `OPENAI_API_KEY` = `token` mode; install = the full `codex-package` tarball as a `bundle` (the shell tool needs `codex-code-mode-host`); seed `sandbox_mode = "danger-full-access"` since bwrap can't namespace under cap-drop ALL; JSONL fixtures in `tests/fixtures/codex/`)*. `project create --agent codex`
 - [ ] **7d:** Codex sync-back policy (adversarially reviewed, like the Claude denylist) + pack content (`AGENTS.md` vs `CLAUDE.md`, its own config taxonomy)
+
+_**Amended 2026-09-26 by [`docs/V2-PLAN.md`](docs/V2-PLAN.md) §4–5** (Phase 7 is the first stage of the
+v2 line — providers, then the control plane / tasks / manager tier / web UI as Phases 11–17). Three
+additions: **both auth modes for every provider** (`Project.auth` `token`|`login` generalised —
+Codex: an API key as `OPENAI_API_KEY` vs `codex login --device-auth` minting `$CODEX_HOME/auth.json`
+in-container; profiles become provider-scoped via `Profile.agent`; the `ANTHROPIC_*` scrub becomes a
+per-provider `forbidden_env` table — invariant 9); a **headless-run seam** (`RunSpec` + a normalised
+`AgentEvent` stream over `claude -p --output-format stream-json` / `codex exec --json` / …, exposed as
+`project run <slug> "<prompt>"` — the manager tier's primitive, shipped and tested inside Phase 7; ACP
+to be evaluated as the single transport); and a **third provider** to prove the seam. Jev (TypeSafe)
+is NOT a provider — it is a decision model and lands with the manager tier (Phase 16)._
+
+- [ ] **7-auth:** `AuthSpec` carrying both modes as data + per-provider `forbidden_env` (invariant 9); `profile add --agent codex` (API-key paste, hidden, `0600`); the `login`-mode identity verify/backfill made provider-generic
+- [ ] **7-run:** the headless seam — `RunSpec`/`AgentEvent` for claude first; `agentryctl project run <slug> "<prompt>"` (streams; `--json` raw); the ACP spike note
+- [ ] **7e:** a third provider (gemini or opencode — operator to pick) so the seam is not a two-case special
 
 ## Phase 8 — In-container dev environment (curated bash + nvim-on-start)
 **Goal:** make the in-container `shell` and `nvim` feel like the operator's host Arch/Omarchy bash —
@@ -444,6 +461,19 @@ unit-pinned); `image smoke --project` gates every selected tool under `--read-on
 - [x] **10c:** CLI `tools list [-v]`, `project tools add|rm|list`, `project create --tool`, `image build|smoke --project`; TUI Project… → `t` Tools (image)… (pending-selection checklist, Apply = set_tools + recreate; `tui/toolsview.py` pure model)
 - [x] **10d:** shipped registry: kubectl 1.37.0, helm 3.22.0, session-manager-plugin 1.2.835.0, postgresql-client, jq, python3, python3-yaml, uv 0.12.12; 2026-09-17: + aws-cli 2.36.47 (the v2 bundle via the new `install = "bundle"` kind — a zip's self-contained tree under `/opt/<name>` + symlinked bins; smoke-verified on base) + k9s 0.51.0 (requires kubectl; `K9S_CONFIG_DIR` → the .cache tmpfs)
 - [ ] **10e (follow-ups):** `image prune` for superseded `-t-` images; a "selection differs from the running container's `claude-man.tools` label → needs recreate" signal in the projects table; express the fixed overlays as registry presets (`python` = `{python3, uv}` …) so their smoke probes go data-driven
+
+## Phases 11–17 — the v2 line: rename, control plane, tasks, threads, web UI, manager tier, hosting
+
+_Planned 2026-09-26 — [`docs/V2-PLAN.md`](docs/V2-PLAN.md). Order: **Phase 7 first** (above), then
+these. Detailed as each phase opens; the operator's task-layer backlog folds into 13/14._
+
+- [ ] **Phase 11 — Rename to `agentry`** (V2-PLAN §2): `agentry` / `agentryctl` / `agentryd`, `agentry.*` labels (+ a read-side shim for the old prefix), `agentry:<overlay>` images, `agentry-<slug>` containers, `~/.config/agentry` + `~/.local/state/agentry` via a one-shot `agentryctl migrate`, repo rename, wordmarks. After Phase 7 so the provider refactor and the rename never land together
+- [ ] **Phase 12 — Control plane `agentryd`**: FastAPI over a unix socket + WebSocket event streams + a state-tier sqlite event log; wraps `lifecycle` (CLI/TUI stay direct callers — the registry flock already serialises); an xterm.js `docker exec` terminal endpoint; per-caller identity (operator / manager / worker — **invariant 7: no agent ever holds the docker socket or the registry**)
+- [ ] **Phase 13 — Tasks + runs**: `Task` (goal, project, agent, worktree, budget, rubric, status, artefacts) + `Run` (one headless session via the 7-run seam, events persisted, usage accounted); git worktrees + one container per concurrent run so one-agent-per-container holds; outputs = branch/PR + report; `task create|run|watch|list|show`
+- [ ] **Phase 14 — Threads (the message board)**: email-shaped messages on a task (from/to/cc, subject, body, attachments, in-reply-to, read state) between operator, managers and workers; delivered to agents as MCP tools (`inbox`/`read`/`send`/`reply`) and to the operator in the web UI + CLI — **invariant 8: everything agents say and do is persisted and attributable; no private channels**
+- [ ] **Phase 15 — Web UI v1** (`web/`, React + Vite + Tailwind, served by `agentryd`): projects table at TUI parity, container actions, live logs, terminals, tasks board, threads, approvals; localhost, no login yet. TUI frozen but kept working
+- [ ] **Phase 16 — Manager tier**: a manager = a project whose agent gets the control-plane MCP server + a manager pack (decompose / delegate / review / escalate), hardened container, no docker socket, provider-agnostic; delegation loop create task → run worker → read thread → **score via `decisions/` (Jev first, LLM-judge fallback, fake for tests)** → accept / iterate / escalate via an approval on the thread
+- [ ] **Phase 17 — Hosted access**: TLS + login (single-operator password/passkey, OIDC later), remote-host deployment; decide the TUI's future once the web UI carries the agent stack
 
 ---
 

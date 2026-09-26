@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from .. import config
+from .. import agents, config
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # An ollama model ref: ``name[:tag]`` (namespaced ``ns/name`` allowed). SHAPE-only — a since-removed
@@ -84,8 +84,9 @@ _MOUNT_FORBIDDEN_DST_EXACT = (
     "/", "/etc", "/usr", "/bin", "/sbin", "/lib",
     config.CONTAINER_HOME,                       # /home/agent (read-only rootfs anchor)
     config.CONTAINER_WORKSPACE,                  # /workspace (would shadow the repos bind)
-    config.CONTAINER_CLAUDE_CONFIG,              # /home/agent/.claude (never inject auth)
-    config.CONTAINER_CLAUDE_CONFIG + ".json",    # /home/agent/.claude.json (identity sibling)
+    # EVERY agent provider's config dir + its `.json` identity sibling (/home/agent/.claude +
+    # /home/agent/.claude.json for claude) — never inject auth into any agent's config (Phase 7a seam).
+    *(p for d in agents.config_dirs() for p in (d, d + ".json")),
     config.CONTAINER_CACHE,                      # /home/agent/.cache (bare tmpfs)
     "/tmp",                                       # bare tmpfs
     config.CONTAINER_SSH_DIR,                    # /home/agent/.ssh (ssh tmpfs)
@@ -97,7 +98,7 @@ _MOUNT_FORBIDDEN_DST_EXACT = (
 # lifecycle._ensure_workspace_mountpoints pre-creating it operator-owned before create. Bare
 # /workspace stays blocked (you can't replace the whole repos bind).
 _MOUNT_FORBIDDEN_DST_PREFIXES = (
-    config.CONTAINER_CLAUDE_CONFIG + "/",   # /home/agent/.claude/  (config bind; the creds attack)
+    *(d + "/" for d in agents.config_dirs()),   # /home/agent/.claude/  (config bind; the creds attack)
     config.CONTAINER_CACHE + "/",           # /home/agent/.cache/  (tmpfs)
     config.CONTAINER_SSH_DIR + "/",         # /home/agent/.ssh/  (no binding a private key in — agent-forward)
     config.CONTAINER_HOME + "/.local/",     # /home/agent/.local/  (the baked claude install + launcher)
@@ -385,6 +386,9 @@ class Repo:
 @dataclass(frozen=True)
 class Project:
     slug: str
+    agent: str = agents.DEFAULT_ID       # the coding-agent provider ("claude" | (7c) "codex") — Phase 7b.
+    #                                      Fixed at create (the config bind + profile are agent-scoped);
+    #                                      resolved via ``agents.resolve`` (docs/AGENTS.md)
     profile: str | None = None          # None -> inherit the default profile
     overlay: str = config.DEFAULT_OVERLAY
     egress: str = config.DEFAULT_EGRESS  # "open" | "strict"
@@ -422,6 +426,10 @@ class Project:
         if not _SLUG_RE.match(self.slug):
             raise ValidationError(
                 f"invalid slug {self.slug!r}: must match {_SLUG_RE.pattern}"
+            )
+        if self.agent not in agents.ids():
+            raise ValidationError(
+                f"invalid agent {self.agent!r}: one of {agents.ids()}"
             )
         # Pack/language names share the slug shape (they become directory names). Validated by
         # SHAPE only — never against the live library, so a registry entry naming a since-removed
@@ -484,6 +492,11 @@ class Project:
         built from it instead — resolved (library read + render) by ``lifecycle.resolve_image``
         and handed to the runner explicitly, since this dataclass stays IO-free."""
         return config.image_tag(self.overlay)
+
+    @property
+    def provider(self):
+        """The resolved ``AgentProvider`` for this project (validated above, so never KeyError)."""
+        return agents.resolve(self.agent)
 
     @property
     def container(self) -> str:
@@ -588,6 +601,8 @@ class ProfileSeed:
 @dataclass(frozen=True)
 class Profile:
     name: str
+    agent: str = agents.DEFAULT_ID       # the provider this account/token belongs to (Phase 7b) —
+    #                                      a project's profile must match its agent
     display_name: str = ""
     account_email: str = ""
     default: bool = False
@@ -603,3 +618,5 @@ class Profile:
             raise ValidationError(
                 f"invalid profile name {self.name!r}: must match {_SLUG_RE.pattern}"
             )
+        if self.agent not in agents.ids():
+            raise ValidationError(f"invalid agent {self.agent!r}: one of {agents.ids()}")

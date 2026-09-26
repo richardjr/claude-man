@@ -99,10 +99,14 @@ uv run claudemanctl project create demo --profile work --overlay python --langua
 #   --tool <name>                approved tool baked as a layer ON TOP of the overlay (repeatable;
 #                                `claudemanctl tools list` — see Approved tools below)
 #   --language <tier>            curated-pack tier whose defaults apply (see Curated packs below)
+#   --agent   claude             the coding-agent provider run in the container (default claude — the
+#                                only one registered today; codex lands with Phase 7c, docs/AGENTS.md).
+#                                Fixed at create; the profile must belong to the same agent
 #   --egress  open|strict        network policy         (default: open; strict = allowlist egress proxy)
 
 uv run claudemanctl project up demo         # create-if-needed + start
-uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug)
+uv run claudemanctl project status [demo]   # live state JOINed with the registry (all, or one slug);
+                                            # the AGENT column is the project's provider (registry-sourced)
 uv run claudemanctl project stop demo       # stop the container (project + workspace are kept)
 uv run claudemanctl project shell demo      # open a shell in a new terminal
 uv run claudemanctl project claude demo     # run claude in a new terminal

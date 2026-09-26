@@ -28,7 +28,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
+from .. import agents, config
 
 TOOL_META = "tool.toml"
 KINDS = ("apt", "release")
@@ -44,8 +44,7 @@ _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 # A [env] entry must never touch the container's identity/auth/path plumbing — those are the
 # runner's (invariant 1 + the baked floor env), not a tool's.
-_RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "CLAUDE_CONFIG_DIR", "XDG_CACHE_HOME",
-                           "XDG_STATE_HOME"})
+_RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "XDG_CACHE_HOME", "XDG_STATE_HOME"}) | agents.config_dir_envs()
 
 
 class LibraryError(ValueError):

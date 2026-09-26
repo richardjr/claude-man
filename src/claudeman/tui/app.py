@@ -58,7 +58,7 @@ from .screens.update_confirm import UpdateConfirmScreen
 from ..registry import settings as settings_registry
 from . import splash as splash_mod
 
-_COLUMNS = ("Project", "Status", "Profile", "Egress", "Model", "Repos", "Version", "Detail")
+_COLUMNS = ("Project", "Status", "Agent", "Profile", "Egress", "Model", "Repos", "Version", "Detail")
 _REPO_COLUMNS = ("Dir", "Branch", "State", "↑/↓", "Last commit")
 # Per-project network panel. Traffic = whole-container NetIO since start (docker stats). Blocked/Allowed
 # = distinct destinations from the squid access log — locked projects only (open ones have no sidecar).
@@ -329,7 +329,7 @@ class ClaudeManApp(App):
             # not a parser — claude refs never carry a colon, ollama tags usually do, but a bare
             # local name ("devstral") is legal; `project model show` names the kind exactly.
             (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
-             p.auth)
+             p.auth, p.agent)
             for p in projects.list_projects()
         ]
         return status.join(defined, status.query_containers())
@@ -369,7 +369,7 @@ class ClaudeManApp(App):
             # A login-mode project badges its Profile cell — the auth posture must never be
             # silent (invariant 1's login amendment), and the badge avoids a ninth column.
             profile_cell = f"{row.profile} [login]" if row.auth == "login" else row.profile
-            cells = [row.slug, row.kind, profile_cell, row.egress, row.model or "-",
+            cells = [row.slug, row.kind, row.agent, profile_cell, row.egress, row.model or "-",
                      self._repos_cell(row), row.version or "-", row.status_text or "-"]
             cells_map[row.slug] = cells
             # Colour the Project name with its gradient tint, and the Status cell green = UP /
@@ -1152,16 +1152,17 @@ class ClaudeManApp(App):
     def _on_new_project(self, data: NewProject | None) -> None:
         if not data:
             return  # cancelled
-        slug, profile, overlay, egress, language, ssh_auto_trust, tools = data
+        slug, profile, overlay, egress, language, ssh_auto_trust, tools, agent = data
         if not self._reserve(slug, "create"):
             return
-        self._log(f"creating {slug} …" + (f" (tools: {', '.join(tools)})" if tools else ""))
-        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust, tools)
+        self._log(f"creating {slug} ({agent}) …" + (f" (tools: {', '.join(tools)})" if tools else ""))
+        self._create_project_worker(slug, profile, overlay, egress, language, ssh_auto_trust, tools,
+                                    agent)
 
     @work(thread=True, group="create")
     def _create_project_worker(
         self, slug: str, profile: str | None, overlay: str, egress: str, language: str,
-        ssh_auto_trust: bool = False, tools: tuple[str, ...] = (),
+        ssh_auto_trust: bool = False, tools: tuple[str, ...] = (), agent: str = "claude",
     ) -> None:
         """Run the blocking create (image build + registry write + seed + `docker create`) off the
         UI thread, streaming build progress to the log.
@@ -1176,7 +1177,8 @@ class ClaudeManApp(App):
         try:
             res = lifecycle.create_project(
                 slug, profile=profile, overlay=overlay, egress=egress, language=language or None,
-                ssh_auto_trust=ssh_auto_trust, tools=tools, on_progress=self._thread_log,
+                ssh_auto_trust=ssh_auto_trust, tools=tools, agent=agent,
+                on_progress=self._thread_log,
             )
         except schema.ValidationError as exc:
             res = lifecycle.Result(False, f"invalid project {slug!r}: {exc}")

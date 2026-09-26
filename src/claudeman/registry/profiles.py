@@ -23,7 +23,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from .. import config
+from .. import agents, config
 from .schema import Profile, ProfileSeed, ValidationError
 
 
@@ -42,6 +42,7 @@ def _parse(data: dict, name_hint: str | None = None) -> Profile:
     )
     return Profile(
         name=name,
+        agent=str(p.get("agent", agents.DEFAULT_ID) or agents.DEFAULT_ID),
         display_name=p.get("display_name", ""),
         account_email=p.get("account_email", ""),
         default=bool(p.get("default", False)),
@@ -103,6 +104,8 @@ def save(profile: Profile, *, make_default: bool = False) -> Path:
     doc = tomlkit.document()
     p = tomlkit.table()
     p["name"] = profile.name
+    if profile.agent != agents.DEFAULT_ID:  # the claude default stays absent
+        p["agent"] = profile.agent
     if profile.display_name:
         p["display_name"] = profile.display_name
     if profile.account_email:
@@ -152,6 +155,7 @@ def _clear_other_defaults(except_name: str) -> None:
         save(
             Profile(
                 name=other.name,
+                agent=other.agent,
                 display_name=other.display_name,
                 account_email=other.account_email,
                 default=False,

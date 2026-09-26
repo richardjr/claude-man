@@ -21,7 +21,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import config
+from . import agents, config
+from .agents import AgentProvider
 
 _TIMEOUT_S = 4.0
 
@@ -94,14 +95,19 @@ def is_newer(target: str, current: str) -> bool:
 # ---------------------------------------------------------------------------
 # Network (needs a socket; not unit-tested)
 # ---------------------------------------------------------------------------
-def resolve_channel(channel: str = config.DEFAULT_CLAUDE_CHANNEL, *, timeout: float = _TIMEOUT_S) -> ReleaseCheck:
-    """GET the plain-text version for ``channel``. NEVER raises — folds every failure into a note so
-    the caller fails open (proceeds on the existing image)."""
-    if channel not in config.CLAUDE_CHANNELS:
+def resolve_channel(channel: str = config.DEFAULT_CLAUDE_CHANNEL, *, timeout: float = _TIMEOUT_S,
+                    provider: AgentProvider = agents.DEFAULT) -> ReleaseCheck:
+    """GET the plain-text version for ``channel`` from ``provider``'s release pointer (the Phase 7a
+    update seam). NEVER raises — folds every failure into a note so the caller fails open (proceeds
+    on the existing image); a provider with no update channel (``updates is None``) fails open too."""
+    spec = provider.updates
+    if spec is None:
+        return ReleaseCheck(None, f"{provider.id} has no release channel")
+    if channel not in spec.channels:
         return ReleaseCheck(None, f"bad channel {channel!r}")
     req = urllib.request.Request(
-        f"{config.RELEASES_BASE_URL}/{channel}",
-        headers={"User-Agent": config.CLAUDE_CODE_USER_AGENT},  # a generic UA is rate-limited harder
+        f"{spec.releases_url}/{channel}",
+        headers={"User-Agent": spec.user_agent},  # a generic UA is rate-limited harder
         method="GET",
     )
     try:

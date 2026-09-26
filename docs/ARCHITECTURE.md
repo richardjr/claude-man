@@ -583,6 +583,20 @@ tuning loop). The per-destination CLI readout stays at `project egress-log`.
   `[project] workdir`, else **`/workspace`** (the uniform anchor since Phase 6 — the lone-repo auto-cd
   was dropped so the pack-injected workspace `CLAUDE.md` is what you land on).
 
+## Agent providers (Phase 7a — the seam)
+
+`agents/` holds one frozen `AgentProvider` per supported coding agent (today: `claude`) and
+`agents.resolve(id)` is the only way the rest of the code reaches agent-specific policy: the
+in-container binary + the `/proc` comm the one-per-container probe looks for, the config dir and the
+env var that points the agent at it, the auth token env + the scrub set, the image version build-arg
++ label key, the release pointer for the on-start update, and the egress hosts a locked container must
+always allow. Consumers (`runner`, `labels`, `images`, `updates`, `allowlist`, `terminals`, the schema
+mount-dst denylist, the tool reserved-env) take a `provider` argument defaulting to the claude
+provider, so the rendered output is byte-identical to the pre-seam code (pinned by
+`tests/test_agents.py`). A provider parameterises BEHAVIOUR, never SECURITY — invariants 1–3 are
+enforced by the layer for every provider. Full design + the remaining seams: `docs/AGENTS.md`;
+the v2 line this starts: `docs/V2-PLAN.md`.
+
 ## Open risks
 
 See [`docs/SECURITY.md`](SECURITY.md) for the threat model. Top risks: plaintext long-lived tokens

@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import (
+    agents,
     assets,
     config,
     env_secrets,
@@ -303,6 +304,10 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
 
     profile = effective_profile(project)
     profile_name = profile.name if profile else "none"
+    provider = project.provider
+    mismatch = agent_mismatch(project, profile)
+    if mismatch:
+        return Result(False, mismatch)
     # Login mode (invariant 1's opt-in amendment): resolve token=None DELIBERATELY — no
     # CLAUDE_CODE_OAUTH_TOKEN env is rendered, and the in-container /login-minted credential in
     # the claude-config bind is the auth instead (a fully-minted profile token is ignored).
@@ -339,7 +344,8 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                 if m.kind == "env" and not m.error and m.name in stored}
     # Stamp the container's version label with the image's ACTUAL baked claude (the source of truth),
     # not the build-time DEFAULT — so the Version column stays truthful after an on-start image rebuild.
-    version = images.image_claude_version(project.overlay) or config.DEFAULT_CLAUDE_VERSION
+    version = (images.image_claude_version(project.overlay, provider=provider)
+               or provider.image.default_version)
     settings = settings_registry.load()
     # Persistent shell history (opt-in; default off keeps the hardened floor byte-identical). When on,
     # ensure the per-project state dir exists 0700 (current uid == container uid 1000) so the agent can
@@ -371,7 +377,7 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                        git_env=gitconfig.container_env(), version=version,
                        shell_history_host_dir=shell_hist_dir, hybrid_header=hybrid_header,
                        tint=settings.terminal_tint, memory=settings.container_memory,
-                       image=config.image_tag(image_name))
+                       image=config.image_tag(image_name), provider=provider)
     if cp.returncode != 0:
         return Result(False, f"docker create failed: {cp.stderr.strip() or cp.stdout.strip()}")
 
@@ -381,7 +387,7 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
         if note:
             notes.append(note)
     elif not token:
-        notes.append("no token — in-container `claude` won't authenticate "
+        notes.append(f"no token — in-container `{provider.binary}` won't authenticate "
                      "(mint one with `claude setup-token` → "
                      f"{config.profile_token_path(profile_name)})" if profile
                      else "no profile/token — define one with `claudemanctl profile add`")
@@ -440,7 +446,8 @@ def check_update(project: Project) -> UpdateCheck:
         return UpdateCheck(note="config unreadable — skipping update check")
     if not settings.image_update_check:
         return UpdateCheck(note="update check disabled")
-    current = images.image_claude_version(project.overlay) or ""
+    provider = project.provider
+    current = images.image_claude_version(project.overlay, provider=provider) or ""
     # Resolve the target: a per-project pin wins, then the global pin, else the tracked channel.
     pin = (project.claude_version or settings.claude_version_pin or "").strip()
     if pin:
@@ -450,7 +457,7 @@ def check_update(project: Project) -> UpdateCheck:
             return UpdateCheck(current=current, target=pin, note=f"pinned {pin} (image current)")
         # Image drifted off the pin — offer to rebuild to it (an explicit pin wins, up or down).
         return UpdateCheck(current=current, target=pin, prompt=True, note=f"pinned {pin}")
-    rc = updates.resolve_channel(settings.claude_channel)
+    rc = updates.resolve_channel(settings.claude_channel, provider=provider)
     if not rc.version:
         return UpdateCheck(current=current, note=rc.note or "offline")  # fail open
     target = rc.version
@@ -500,7 +507,8 @@ def _maybe_rebuild_for_update(project: Project, version: str, *, on_progress: Pr
         if on_progress:
             on_progress(f"[update] {img_err}; starting on the existing image")
         return
-    rb = images.rebuild_chain(image_name, claude_version=version, on_line=on_progress)
+    rb = images.rebuild_chain(image_name, claude_version=version, on_line=on_progress,
+                              provider=project.provider)
     if not rb.ok:
         if on_progress:
             on_progress(f"[update] rebuild failed: {rb.detail}; starting on the existing image")
@@ -904,6 +912,15 @@ def _verify_login_identity(project: Project) -> str:
     return ""
 
 
+def agent_mismatch(project: Project, profile: Profile | None) -> str:
+    """Pure: a refusal message when ``profile`` belongs to a different agent provider than the
+    project (a claude setup-token can't authenticate codex and vice versa — Phase 7b), else ''."""
+    if profile is None or profile.agent == project.agent:
+        return ""
+    return (f"profile {profile.name!r} is a {profile.agent} profile but project {project.slug!r} "
+            f"runs {project.agent} — pick a {project.agent} profile (`--profile`) or create one")
+
+
 def account_mismatch(project: Project, profile: Profile | None) -> str | None:
     """Return the existing seeded email if it conflicts with ``profile``'s account, else None.
 
@@ -1182,9 +1199,12 @@ def create_project(
     ssh_auto_trust: bool = False,
     auth: str | None = None,
     tools: tuple[str, ...] = (),
+    agent: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Result:
     """Write (or load) the project definition, then create the container.
+
+    ``agent`` (Phase 7b) picks the coding-agent provider (default claude); validated by the schema.
 
     ``tools`` (an approved-tool selection, docs/TOOLS.md) is validated against the registry up front
     so a typo fails before anything is written or built.
@@ -1209,6 +1229,7 @@ def create_project(
                 on_progress(f"pack library unreadable — no default packs applied: {exc}")
         project = Project(
             slug=slug,
+            agent=agent or agents.DEFAULT_ID,
             profile=profile,
             overlay=overlay or config.DEFAULT_OVERLAY,
             egress=egress or config.DEFAULT_EGRESS,

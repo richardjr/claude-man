@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, SelectionList
 
-from ... import config
+from ... import agents, config
 from ...packs import library as packs_library
 from ...tools import library as tools_library
 from ...registry import profiles as profiles_registry
@@ -37,7 +37,7 @@ from ...registry.schema import _SLUG_RE
 # What the screen hands back to the app: (slug, profile|None, overlay, egress, language,
 # ssh_auto_trust, tools), or None on cancel. language == "" means common-tier packs only; tools
 # is the approved-tool selection (empty = the plain overlay image).
-NewProject = tuple[str, "str | None", str, str, str, bool, tuple[str, ...]]
+NewProject = tuple[str, "str | None", str, str, str, bool, tuple[str, ...], str]
 
 _SUGGESTION_CONSUMED = object()  # sentinel: no programmatic language echo pending
 
@@ -106,6 +106,11 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
             yield Label("Slug")
             yield Input(placeholder="lowercase, digits, hyphens (e.g. landarna-api)", id="slug")
             yield Label("", id="slug-error")
+            yield Label("Agent (coding-agent provider — the profile must match)")
+            yield Select(
+                [(agents.resolve(i).display_name, i) for i in agents.ids()],
+                value=agents.DEFAULT_ID, allow_blank=False, id="agent",
+            )
             yield Label("Profile (account)")
             yield Select(self._profile_options, value="", allow_blank=False, id="profile")
             yield Label("Overlay (image)")
@@ -189,6 +194,7 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
         if projects.exists(slug):
             err.update(f"project {slug!r} already exists")
             return
+        agent = self.query_one("#agent", Select).value
         profile = self.query_one("#profile", Select).value or None
         overlay = self.query_one("#overlay", Select).value
         egress = self.query_one("#egress", Select).value
@@ -199,4 +205,4 @@ class NewProjectScreen(ModalScreen["NewProject | None"]):
             # Registry order (not tick order) so the stored selection is stable.
             ticked = set(self.query_one("#tools", SelectionList).selected)
             tools = tuple(name for name in self._tools if name in ticked)
-        self.dismiss((slug, profile, overlay, egress, language, ssh_auto_trust, tools))
+        self.dismiss((slug, profile, overlay, egress, language, ssh_auto_trust, tools, agent))

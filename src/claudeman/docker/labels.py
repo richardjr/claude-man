@@ -7,11 +7,13 @@ TOML; only a count goes in a label. On divergence the registry wins.
 
 from __future__ import annotations
 
-from .. import config
+from .. import agents, config
+from ..agents import AgentProvider
 from ..registry.schema import Project
 
 # Fully-qualified label keys
 SLUG = f"{config.LABEL_PREFIX}.slug"
+AGENT = f"{config.LABEL_PREFIX}.agent"       # the provider id (a container self-describes its agent, invariant 4)
 PROFILE = f"{config.LABEL_PREFIX}.profile"
 OVERLAY = f"{config.LABEL_PREFIX}.overlay"
 TOOLS = f"{config.LABEL_PREFIX}.tools"       # the approved-tool selection baked into its image (csv)
@@ -21,10 +23,17 @@ REPOS = f"{config.LABEL_PREFIX}.repos"
 VERSION = f"{config.LABEL_PREFIX}.version"
 CREATED = f"{config.LABEL_PREFIX}.created"
 
-# IMAGE (not container) label: the claude version baked at build time (set by images/base/Dockerfile;
-# overlays inherit it from their base). Distinct from VERSION above, which is STAMPED on a container at
-# create time. Read off `docker image inspect` to decide the on-start update (images.image_claude_version).
-IMAGE_VERSION = f"{config.LABEL_PREFIX}.claude-version"
+
+
+def image_version_label(provider: AgentProvider = agents.DEFAULT) -> str:
+    """The IMAGE (not container) label carrying the agent version baked at build time (set by the
+    provider's Dockerfile fragment — ``claude-man.claude-version`` for claude; overlays inherit it
+    from their base). Distinct from VERSION above, which is STAMPED on a container at create time.
+    Read off `docker image inspect` to decide the on-start update (images.image_claude_version)."""
+    return f"{config.LABEL_PREFIX}.{provider.image.version_label}"
+
+
+IMAGE_VERSION = image_version_label()   # the default (claude) provider's key
 
 # Filter that selects every claude-man container regardless of slug.
 SELECTOR = f"label={SLUG}"
@@ -34,6 +43,7 @@ def build(project: Project, *, profile: str, version: str, created_iso: str) -> 
     """Build the label dict stamped onto a container at create time."""
     return {
         SLUG: project.slug,
+        AGENT: project.agent,
         PROFILE: profile,
         OVERLAY: project.overlay,
         TOOLS: ",".join(project.tools),

@@ -446,7 +446,7 @@ class StatusBarLaunchTest(_IsolatedConfig):
 
     def test_spawn_claude_reattaches_only_to_a_bar_session(self) -> None:
         calls: list[tuple] = []
-        with mock.patch.object(terminals, "claude_already_running", lambda slug: True), \
+        with mock.patch.object(terminals, "claude_already_running", lambda slug, **kw: True), \
              mock.patch.object(terminals, "spawn", lambda *a, **k: calls.append((a, k)) or "handle"):
             with mock.patch.object(terminals, "claude_session_exists", lambda slug: False):
                 with self.assertRaises(RuntimeError):      # a claude OUTSIDE the bar -> refused

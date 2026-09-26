@@ -43,7 +43,8 @@ import tomllib
 from dataclasses import dataclass
 from typing import IO, NamedTuple
 
-from .. import config, hostplatform, statusbar
+from .. import agents, config, hostplatform, statusbar
+from ..agents import AgentProvider
 from ..registry import profiles, projects
 from ..registry import settings as settings_registry
 from ..registry.schema import ValidationError, validate_slug
@@ -91,18 +92,18 @@ def _inner_exec(slug: str, program: str, *, keep_open: bool, workdir: str,
     validate_slug(slug)
     container = config.container_name(slug)
     wd = ["-w", workdir] if workdir else []
-    if bar is not None and program in ("claude", "bash"):
+    if bar is not None and (_is_agent(program) or program == "bash"):
         # Status bar (issue #37): exec the baked tmux launcher instead of the bare program, with the
         # rendered bar strings as EXEC-time env (never argv to tmux — the conf/launcher read them from
         # the environment). Both programs take the keep-open wrapper shape so the printf stamps the
         # OUTER window's title/tint — tmux swallows the in-pane bashrc's OSC. Only claude keeps the
         # window open after exit (a shell exiting closes it, as before). tmux's socket is the only
         # write, on the /tmp tmpfs — no runner change, floor byte-identical (invariant 2).
-        session = statusbar.CLAUDE_SESSION if program == "claude" else statusbar.SHELL_SESSION
+        session = statusbar.CLAUDE_SESSION if _is_agent(program) else statusbar.SHELL_SESSION
         env = " ".join(f"-e {shlex.quote(f'{k}={v}')}" for k, v in bar.env().items())
         wdq = f"-w {shlex.quote(workdir)} " if workdir else ""
         prog = shlex.join([statusbar.LAUNCHER, session, program, *args])
-        tail = "; exec bash" if (keep_open and program == "claude") else ""
+        tail = "; exec bash" if (keep_open and _is_agent(program)) else ""
         return ["bash", "-lc",
                 f"{_window_osc(slug, tint_hex)}docker exec -it {env} {wdq}{container} {prog}{tail}"]
     if keep_open and program != "bash":
@@ -445,7 +446,7 @@ def bar_spec(slug: str, program: str) -> statusbar.BarSpec:
     a model/profile/auth change shows on the next window — no recreate). Fails OPEN to a slug-only
     bar for an unknown/malformed project (corrupt TOML raises ``TOMLDecodeError``, not
     ``ValidationError`` — both count) — a registry hiccup must not block opening a window."""
-    session = statusbar.CLAUDE_SESSION if program == "claude" else statusbar.SHELL_SESSION
+    session = statusbar.CLAUDE_SESSION if _is_agent(program) else statusbar.SHELL_SESSION
     try:
         project = projects.load(slug)
     except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError, OSError):
@@ -476,7 +477,7 @@ def _bar_for(slug: str, program: str) -> tuple[statusbar.BarSpec | None, str]:
     WITH ``BAR_UNAVAILABLE_NOTE`` when the bar was wanted but the image lacks the launcher (probed —
     fail-open to the launch that always works, but never silently: the operator would otherwise
     see "no difference" and not know why)."""
-    if program not in ("claude", "bash") or not _bar_enabled():
+    if not (_is_agent(program) or program == "bash") or not _bar_enabled():
         return None, ""
     if not bar_available(slug):
         return None, BAR_UNAVAILABLE_NOTE
@@ -518,27 +519,50 @@ def spawn_nvim(slug: str) -> SpawnHandle:
     return spawn(slug, "nvim", workdir=launch_workdir(slug))
 
 
-# One `claude` per container (CLAUDE.md invariant 6 / review SEC-3): a second claude in the same
+# One agent per container (CLAUDE.md invariant 6 / review SEC-3): a second claude in the same
 # container races on `.claude.json`/session writes. The probe walks /proc comm names inside the
-# container (no procps dependency); the image's native install runs as a process named `claude`.
-_CLAUDE_PROBE_SH = (
-    'for c in /proc/[0-9]*/comm; do '
-    'read -r n < "$c" 2>/dev/null && [ "$n" = claude ] && exit 0; '
-    'done; exit 1'
-)
+# container (no procps dependency) looking for the provider's ``proc_comm`` (the image's native
+# claude install runs as a process named `claude`). The comm is validated by ``AgentProvider`` to a
+# plain token, so it is safe to interpolate into the `sh -c` string.
+def _probe_sh(comm: str) -> str:
+    return (
+        'for c in /proc/[0-9]*/comm; do '
+        f'read -r n < "$c" 2>/dev/null && [ "$n" = {comm} ] && exit 0; '
+        'done; exit 1'
+    )
 
 
-def build_claude_probe_argv(slug: str) -> list[str]:
-    """Pure: argv probing for a running ``claude`` process inside the container (rc 0 = running)."""
-    validate_slug(slug)
-    return ["docker", "exec", config.container_name(slug), "sh", "-c", _CLAUDE_PROBE_SH]
+def _is_agent(program: str) -> bool:
+    """True if ``program`` is an agent binary (vs a shell / nvim) — the windows that take the
+    keep-open wrapper + the `claude` tmux session."""
+    return program in agents.binaries()
 
 
-def claude_already_running(slug: str) -> bool:
-    """True if a ``claude`` process is already live in the container. Fails OPEN (False) on any
-    probe error — a wedged daemon must not lock the operator out of their own project."""
+def provider_for(slug: str) -> AgentProvider:
+    """The project's agent provider, read fresh from the registry at LAUNCH (like ``launch_workdir``).
+    Fails OPEN to the default (claude) provider for an unknown/malformed project — a registry hiccup
+    must not block opening a window (corrupt TOML raises ``TOMLDecodeError``, not ``ValidationError``
+    — both count)."""
     try:
-        cp = subprocess.run(build_claude_probe_argv(slug), capture_output=True, timeout=10)
+        return projects.load(slug).provider
+    except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError, OSError):
+        return agents.DEFAULT
+
+
+def build_claude_probe_argv(slug: str, *, provider: AgentProvider = agents.DEFAULT) -> list[str]:
+    """Pure: argv probing for a running agent process (``provider.proc_comm``) inside the container
+    (rc 0 = running)."""
+    validate_slug(slug)
+    return ["docker", "exec", config.container_name(slug), "sh", "-c", _probe_sh(provider.proc_comm)]
+
+
+def claude_already_running(slug: str, *, provider: AgentProvider | None = None) -> bool:
+    """True if the project's agent process (``provider.proc_comm``; the registry's provider when
+    ``provider`` is None) is already live in the container. Fails OPEN (False) on any probe error —
+    a wedged daemon must not lock the operator out of their own project."""
+    try:
+        cp = subprocess.run(build_claude_probe_argv(slug, provider=provider or provider_for(slug)),
+                            capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     return cp.returncode == 0
@@ -557,16 +581,18 @@ def claude_model_args(slug: str) -> tuple[str, ...]:
     return ("--model", model) if model else ()
 
 
-def spawn_claude(slug: str) -> SpawnHandle:
+def spawn_claude(slug: str, *, provider: AgentProvider | None = None) -> SpawnHandle:
     # Invariant-6 amendment (issue #37): a claude running INSIDE the bar's tmux session is re-attached
     # (the launcher's `new-session -A`) rather than refused — closing the window never killed it. A
     # claude running anywhere else is still a second-claude race, and is refused as before.
-    if claude_already_running(slug) and not (_bar_enabled() and claude_session_exists(slug)):
+    provider = provider or provider_for(slug)   # the project's agent (registry; fail-open claude)
+    if (claude_already_running(slug, provider=provider)
+            and not (_bar_enabled() and claude_session_exists(slug))):
         raise RuntimeError(
-            f"claude is already running in {slug!r} — one claude per container (a second races "
-            f"on .claude.json/session writes). Use the existing window, or open a shell instead."
+            f"{provider.binary} is already running in {slug!r} — one agent per container (a second "
+            f"races on its config/session writes). Use the existing window, or open a shell instead."
         )
-    return spawn(slug, "claude", workdir=launch_workdir(slug), args=claude_model_args(slug))
+    return spawn(slug, provider.binary, workdir=launch_workdir(slug), args=claude_model_args(slug))
 
 
 # ---------------------------------------------------------------------------

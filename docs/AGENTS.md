@@ -1,7 +1,25 @@
 # Multi-agent provider abstraction (Phase 7 design)
 
-Status: **planned / not started.** This is a design — no code exists yet. Tracking:
-[`ROADMAP.md`](../ROADMAP.md) Phase 7. The goal is a seam that lets claude-man run a *different*
+Status: **7a-1 landed 2026-09-26** (branch `feat/7a-agent-provider-seam`): `src/claudeman/agents/`
+exists — `base.py` (the `AgentProvider` + `AuthSpec`/`ImageSpec`/`UpdateSpec` value objects below,
+validated), `claude.py` (the reference provider), `resolve()`. Routed through it, byte-identical
+(`tests/test_agents.py` pins pre-seam goldens of the create argv, build argv, probe argv, base
+allowlist, image label and exec strings): seams 2 (build-arg + label key), 3 (binary + comm), 4
+(release URL/UA/channels), 6 (config dir + env pointer; the mount-dst denylist and the tool
+reserved-env now cover EVERY provider's config dir), 9 (`required_hosts` + the neutral `TOOLCHAIN`
+split — `allowlist.base_allowlist(provider)`), and the token env / scrub set of seam 1 (runner +
+the host verify). Still to route: seam 7 (sync-back policy data), 8 (context file + packs), 5
+(usage), the smoke probes, the host mint flow (7-auth), and the headless `RunSpec` (7-run). The
+interface below is the design; the shipped sub-specs are the subset 7a-1 needed (the others land
+with their seams). **7b landed the same day:** `Project.agent` / `Profile.agent` (schema-validated
+against the registry, terse-default TOML), `Project.provider`, the `claude-man.agent` label, the
+AGENT column in both surfaces, `project create --agent` + the create modal's Agent select, the
+`agent_mismatch` profile guard, and the provider threaded through lifecycle → runner / images /
+updates / egress (squid allowlist) / terminals (`provider_for`). Tracking:
+[`ROADMAP.md`](../ROADMAP.md) Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
+modes per provider (`AuthSpec` as data, provider-scoped profiles, a per-provider `forbidden_env` scrub),
+a new **headless-run seam** (`RunSpec` → normalised `AgentEvent` stream; `project run`), a third
+provider, and the PR breakdown. Phase 7 is the first stage of the v2 (agentry) line. The goal is a seam that lets claude-man run a *different*
 coding agent (e.g. the OpenAI Codex CLI) inside the same hardened-container model, without forking
 the project and without weakening any security invariant.
 
@@ -109,12 +127,11 @@ refactor before any second-agent code exists.
 
 ## Hard problems to resolve before 7c
 
-1. **Auth model divergence.** The whole profile model assumes `claude setup-token` → a single,
-   non-refreshable bearer in one env var (`CLAUDE_CODE_OAUTH_TOKEN`), with the file mtime as token
-   age. Codex likely uses a refreshable JSON credential. So `AuthSpec` needs an **auth-kind** enum,
-   not just a renamed var — and invariant 1 must still hold (never inject a key that mis-bills, never
-   copy a working credentials file into the container). *Needs research on the Codex CLI's actual
-   auth/login flow before 7c.*
+1. **Auth model divergence — RESOLVED by the 2026-09-26 spike (below).** Codex has both shapes:
+   an API key (`OPENAI_API_KEY` / `CODEX_API_KEY` env = our `token` mode) and a ChatGPT login that
+   mints a refreshable JSON credential (`$CODEX_HOME/auth.json` = our `login` mode, the same
+   in-container-minted doctrine as claude's `/login`). No new auth-kind enum is needed: `Project.auth`
+   `token`|`login` already models it; `AuthSpec` carries the env name(s) + the credential file name.
 2. **Sync-back is the deepest coupling.** The engine is reusable; only the policy data (which files
    and JSON keys in the config dir are secret/machine-local) and the MCP-apply strategy are
    agent-specific — `SyncbackPolicy` isolates exactly that. Getting a Codex denylist wrong is a
@@ -124,6 +141,28 @@ refactor before any second-agent code exists.
    were removed — so this seam is low-stakes.)
 4. **Pack library content is Claude-flavoured** (skills/, `CLAUDE.md` fragments). Codex needs its own
    content or a translation layer; the materializer machinery itself carries over unchanged.
+
+## Codex — verified by the login-mode spike (2026-09-26, codex-cli 0.157.1)
+
+Run by hand in a container created with the EXACT hardened floor (`build_create_argv`'s flags:
+read-only, cap-drop ALL, no-new-privileges, uid 1000, pids 1024, the two tmpfs, 16g cap) plus a
+`codex-config` bind at `/home/agent/.codex` and `CODEX_HOME` pointing at it. Findings, each one a
+design input for 7c:
+
+| Question | Verified answer |
+|---|---|
+| Install artefact | The **`codex-package-<arch>-unknown-linux-musl.tar.gz`** tarball (147 MB, static musl, the only asset with a `codex-package_SHA256SUMS` entry + a sigstore bundle), NOT the single `codex-<arch>` binary. Layout (`codex-package.json`): `bin/codex` + `bin/codex-code-mode-host`, `codex-resources/{bwrap,zsh,voice}`, `codex-path/rg`. Installed whole to `/opt/codex` with `bin/*` symlinked into `/usr/local/bin` — exactly the tool registry's `install = "bundle"` shape (the AWS CLI v2 precedent), so the provider's image fragment IS a registry-style entry |
+| Why the whole package | Codex 0.157's shell tool runs through a **code-mode host** (`codex-code-mode-host`, looked up next to the `codex` executable). With the single binary every command fails `Code Mode is unavailable … host executable was not found` and the model answers from imagination. With the package tree `command_execution` items run as uid 1000 with `aggregated_output` + `exit_code` |
+| Codex's own sandbox | Bundled **bubblewrap**; under `--cap-drop ALL` it fails `No permissions to create a new namespace` (docker's seccomp blocks user namespaces). Our container IS the sandbox, so the provider seeds **`sandbox_mode = "danger-full-access"`** into `$CODEX_HOME/config.toml` (verified: a plain `codex exec` then runs commands with no flag) and the headless `RunSpec` also passes `--sandbox danger-full-access`. Never a floor relaxation |
+| Login mode | `codex login --device-auth` prints a URL + one-time code (15-min window, polls; needs device-code auth enabled in the ChatGPT account's security settings) and, on success, mints **`auth.json` `0600`** in the bind: `{auth_mode: "chatgpt", last_refresh, tokens: {access_token, refresh_token, id_token, account_id}, OPENAI_API_KEY: null}`. Self-refreshing (`last_refresh`). **Survived a container recreate** (it lives in the bind). `codex login status` → `Logged in using ChatGPT`. `cli_auth_credentials_store = "file"` seeded so it never tries a keyring |
+| Token mode | `OPENAI_API_KEY` env (API-billed) — also `printenv OPENAI_API_KEY \| codex login --with-api-key` writes it INTO `auth.json`; `codex exec` additionally honours `CODEX_API_KEY`. Both names go in the provider's scrub set (invariant 9) and only the chosen profile's key is injected pass-through |
+| Headless run | `codex exec --json [--ephemeral] [--skip-git-repo-check] "<prompt>"` → JSONL: `thread.started{thread_id}` → `turn.started` → `item.started/completed{item:{type: agent_message\|command_execution\|error, …}}` → `turn.completed{usage}` \| `turn.failed{error}`. Final message alone on stdout without `--json`. Refuses outside a git repo unless `--skip-git-repo-check` (a repo under /workspace passes). Fixtures: `tests/fixtures/codex/` |
+| Config dir contents (sync-back denylist input) | `auth.json` (SECRET), `config.toml`, `installation_id`, `models_cache.json`, `*.sqlite` + `-shm`/`-wal` (goals/logs/memories/queue/state — machine-local state, some of it conversation content), `log/`, `tmp/`, `.tmp/`, `cache/`, `plugins/`, `shell_snapshots/`, `.sandbox_migration`, `skills/` (the one syncable artefact tree, like claude's) |
+| Required egress hosts | `auth.openai.com` (device auth + refresh), `api.openai.com` (`/v1/responses`), `chatgpt.com` — to confirm under lock at 7c via `egress-log` |
+| Subscription lane | The exec runs billed to the ChatGPT plan (`auth_mode: chatgpt`, no API key) — the same posture as claude's login mode |
+
+Interactive (tty) use and `codex logout`'s exact file removal are not yet exercised — both are 7c
+smoke items. The spike's bind (with the minted credential) is in the session scratchpad only.
 
 ## Non-goals
 

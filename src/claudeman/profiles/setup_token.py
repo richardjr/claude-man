@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 
-from .. import config
+from .. import agents, config
 from ..registry import profiles as registry
 from ..registry.schema import Profile
 
@@ -149,9 +149,10 @@ def account_info(token: str) -> dict:
     env = dict(os.environ)
     for key in config.SCRUBBED_ENV_KEYS:
         env.pop(key, None)
-    env[config.OAUTH_TOKEN_ENV] = token
+    provider = agents.CLAUDE   # this IS the claude setup-token flow (7-auth generalises the mint)
+    env[provider.auth.token_env] = token
     with tempfile.TemporaryDirectory(prefix="claude-man-verify-") as tmp:
-        env["CLAUDE_CONFIG_DIR"] = tmp
+        env[provider.config_dir_env] = tmp
         cp = subprocess.run(
             ["claude", "auth", "status", "--json"],
             env=env, capture_output=True, text=True, check=False,

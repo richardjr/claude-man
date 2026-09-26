@@ -30,7 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .. import config
+from .. import agents, config
+from ..agents import AgentProvider
 from . import labels
 
 # A progress sink: each docker-output (or milestone) line is handed to it. The TUI forwards to its
@@ -70,8 +71,12 @@ def build_chain(overlay: str) -> list[str]:
     return ["base", overlay]
 
 
-def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION) -> list[str]:
+def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION, *,
+               provider: AgentProvider = agents.DEFAULT) -> list[str]:
     """Pure renderer for the ``docker build`` argv (no daemon, no IO) — unit-testable.
+
+    ``provider`` names the build-arg the Dockerfile takes the agent version through
+    (``CLAUDE_VERSION`` for claude — the Phase 7a image-bake seam).
 
     Uses absolute paths for the Dockerfile and build context so the command is CWD-independent. The
     base Dockerfile ``COPY``s ``images/...`` (nvim config, bash rc, the forge known_hosts) from the
@@ -81,7 +86,7 @@ def build_argv(overlay: str, claude_version: str = config.DEFAULT_CLAUDE_VERSION
     return [
         "docker", "build",
         "-f", str(config.image_dockerfile(overlay)),
-        "--build-arg", f"CLAUDE_VERSION={claude_version}",
+        "--build-arg", f"{provider.image.version_build_arg}={claude_version}",
         "-t", config.image_tag(overlay),
         str(config.image_build_context()),
     ]
@@ -101,8 +106,9 @@ def image_exists(overlay: str) -> bool:
     ).returncode == 0
 
 
-def image_claude_version(overlay: str) -> str | None:
-    """The claude version baked into ``claude-man:<overlay>`` (its ``claude-man.claude-version`` label),
+def image_claude_version(overlay: str, *, provider: AgentProvider = agents.DEFAULT) -> str | None:
+    """The agent version baked into ``claude-man:<overlay>`` (its ``claude-man.claude-version`` label
+    for claude — ``labels.image_version_label(provider)``),
     or ``None`` if the image / label / docker is absent.
 
     The label is the source of truth for "what claude a container created from this image runs".
@@ -113,7 +119,7 @@ def image_claude_version(overlay: str) -> str | None:
         return None
     cp = subprocess.run(
         ["docker", "image", "inspect", config.image_tag(overlay),
-         "--format", '{{ index .Config.Labels "%s" }}' % labels.IMAGE_VERSION],
+         "--format", '{{ index .Config.Labels "%s" }}' % labels.image_version_label(provider)],
         capture_output=True, text=True, check=False,
     )
     if cp.returncode != 0:
@@ -185,6 +191,7 @@ def build_one(
     claude_version: str = config.DEFAULT_CLAUDE_VERSION,
     dry_run: bool = False,
     on_line: ProgressFn | None = None,
+    provider: AgentProvider = agents.DEFAULT,
 ) -> int:
     """Build exactly ``claude-man:<overlay>`` (always, even if it already exists). Returns the rc.
 
@@ -192,7 +199,7 @@ def build_one(
     (BuildKit auto-selects plain, line-oriented output when stdout isn't a TTY). Without it, docker
     inherits the parent stdio so an interactive operator keeps the normal progress UI.
     """
-    argv = build_argv(overlay, claude_version)
+    argv = build_argv(overlay, claude_version, provider=provider)
     emit = on_line or print
     emit("+ " + " ".join(argv))
     if dry_run:
@@ -214,6 +221,7 @@ def ensure_chain(
     *,
     claude_version: str = config.DEFAULT_CLAUDE_VERSION,
     on_line: ProgressFn | None = None,
+    provider: AgentProvider = agents.DEFAULT,
 ) -> BuildResult:
     """Build any *missing* or *stale* image in the base→``overlay`` chain; leave current ones untouched.
 
@@ -245,7 +253,7 @@ def ensure_chain(
                 on_line(f"image {config.image_tag(ov)} not built — building it now "
                         f"(one-time, may take a minute) …")
             parent = ov
-            rc = build_one(ov, claude_version=claude_version, on_line=on_line)
+            rc = build_one(ov, claude_version=claude_version, on_line=on_line, provider=provider)
             if rc != 0:
                 return BuildResult(
                     False, built,
@@ -263,6 +271,7 @@ def rebuild_chain(
     *,
     claude_version: str,
     on_line: ProgressFn | None = None,
+    provider: AgentProvider = agents.DEFAULT,
 ) -> BuildResult:
     """Force-rebuild the base→``overlay`` chain pinned to ``claude_version`` — even when the images
     already exist (unlike ``ensure_chain``, which only builds *missing* ones).
@@ -278,8 +287,8 @@ def rebuild_chain(
     with _BUILD_LOCK:
         for ov in build_chain(overlay):
             if on_line:
-                on_line(f"rebuilding {config.image_tag(ov)} → claude {claude_version} …")
-            rc = build_one(ov, claude_version=claude_version, on_line=on_line)
+                on_line(f"rebuilding {config.image_tag(ov)} → {provider.id} {claude_version} …")
+            rc = build_one(ov, claude_version=claude_version, on_line=on_line, provider=provider)
             if rc != 0:
                 return BuildResult(
                     False, built,

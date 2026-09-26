@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, config
+from . import agents, __version__, config
 from .docker import status
 from .registry import profiles, projects
 from .tui import terminals
@@ -178,7 +178,7 @@ def cmd_project_status(args) -> int:
         # pin (mutually exclusive in the schema). Display hint only — a bare local name is legal,
         # so the cell doesn't encode the kind; `project model show <slug>` does.
         (p.slug, p.profile or "(default)", p.egress, len(p.repos), p.model or p.claude_model,
-         p.auth)
+         p.auth, p.agent)
         for p in projects.list_projects()
     ]
     rows = status.join(defined, status.query_containers())
@@ -187,11 +187,11 @@ def cmd_project_status(args) -> int:
         if not rows:
             print(f"no project {args.slug!r}", file=sys.stderr)
             return 1
-    print(f"{'SLUG':<20} {'STATE':<8} {'PROFILE':<12} {'EGRESS':<7} {'AUTH':<6} {'REPOS':<5} "
-          f"{'VERSION':<10} MODEL")
+    print(f"{'SLUG':<20} {'STATE':<8} {'AGENT':<7} {'PROFILE':<12} {'EGRESS':<7} {'AUTH':<6} "
+          f"{'REPOS':<5} {'VERSION':<10} MODEL")
     for r in rows:
-        print(f"{r.slug:<20} {r.kind:<8} {r.profile:<12} {r.egress:<7} {r.auth:<6} {r.repos:<5} "
-              f"{(r.version or '-'):<10} {r.model or '-'}")
+        print(f"{r.slug:<20} {r.kind:<8} {r.agent:<7} {r.profile:<12} {r.egress:<7} {r.auth:<6} "
+              f"{r.repos:<5} {(r.version or '-'):<10} {r.model or '-'}")
     # For a single project, also show its published ports (config — registry-only, recreate to apply)
     # and, in login mode, whether the in-container-minted credential exists (never silent).
     if args.slug and projects.exists(args.slug):
@@ -271,7 +271,7 @@ def cmd_project_create(args) -> int:
     res = lifecycle.create_project(
         args.slug, profile=args.profile, overlay=args.overlay, egress=args.egress,
         language=args.language, ssh_auto_trust=args.ssh_auto_trust, auth=args.auth,
-        tools=tuple(args.tool or ()),
+        tools=tuple(args.tool or ()), agent=args.agent,
     )
     print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
     return 0 if res.ok else 1
@@ -1643,6 +1643,9 @@ def build_parser() -> argparse.ArgumentParser:
     proj = sub.add_parser("project", help="projects").add_subparsers(dest="cmd", required=True)
     pc = proj.add_parser("create", help="create a project + container")
     pc.add_argument("slug", type=_slug_arg)
+    pc.add_argument("--agent", choices=agents.ids(),
+                    help="the coding-agent provider to run in the container (default claude; "
+                         "docs/AGENTS.md). The profile must belong to the same agent")
     pc.add_argument("--profile", type=_slug_arg)
     pc.add_argument("--overlay", choices=config.OVERLAYS)
     pc.add_argument("--egress", choices=config.EGRESS_MODES)
