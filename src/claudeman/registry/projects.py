@@ -34,6 +34,7 @@ from uuid import uuid4
 
 from .. import agents, config
 from .schema import (
+    default_sync as schema_default_sync,
     DEFAULT_SYNC_CLAUDE,
     DEFAULT_SYNC_WORKSPACE,
     EnvMount,
@@ -243,7 +244,7 @@ def save(project: Project) -> Path:
         proj["ports"] = parr
 
     # Emit [project.sync] only when it diverges from the defaults (keep copied templates clean).
-    default_sync = Sync()
+    default_sync = schema_default_sync(project.provider)   # the PROVIDER's defaults (7d)
     if project.sync != default_sync:
         synct = tomlkit.table()
         if not project.sync.enabled:

@@ -377,6 +377,13 @@ class Sync:
                 raise ValidationError(f"sync entry {rel!r} must not contain a '..' component")
 
 
+def default_sync(provider) -> Sync:
+    """The ``Sync`` a project of ``provider`` gets by default: its context file + the pack fragments
+    dir on the workspace side, its syncable config-dir trees on the config side (claude = ``Sync()``)."""
+    return Sync(workspace=(provider.context.file, DEFAULT_SYNC_WORKSPACE[1]),
+                claude=tuple(provider.context.config_entries))
+
+
 @dataclass(frozen=True)
 class Repo:
     url: str
@@ -443,6 +450,10 @@ class Project:
             raise ValidationError(
                 f"invalid agent {self.agent!r}: one of {agents.ids()}"
             )
+        # A non-claude project whose TOML carries no [project.sync] gets ITS provider's defaults
+        # (AGENTS.md + skills for codex), not claude's — the stored default stays absent either way.
+        if self.agent != agents.DEFAULT_ID and self.sync == Sync():
+            object.__setattr__(self, "sync", default_sync(agents.resolve(self.agent)))
         # Pack/language names share the slug shape (they become directory names). Validated by
         # SHAPE only — never against the live library, so a registry entry naming a since-removed
         # pack still loads (materialize skips it with a note).

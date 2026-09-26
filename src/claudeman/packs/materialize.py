@@ -83,6 +83,28 @@ def block_lines(selection: tuple[str, ...], lib: dict[str, library.Pack]) -> lis
     return lines
 
 
+def inline_lines(selection: tuple[str, ...], lib: dict[str, library.Pack]) -> list[str]:
+    """The fragment CONTENTS for the fenced block (a provider whose context file has no import
+    syntax — codex's AGENTS.md), in selection order: each fragment as a titled section, so the
+    block is self-contained. Unreadable/unknown fragments contribute nothing (never an error)."""
+    lines: list[str] = []
+    for name in selection:
+        pack = lib.get(name)
+        if pack is None:
+            continue
+        for frag in pack.fragments:
+            try:
+                body = (pack.path / library.CLAUDE_MD_DIR / frag).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            lines.append(f"<!-- {FRAGMENTS_DIR}/{pack.name}/{frag} -->")
+            lines.extend(body.rstrip("\n").splitlines())
+            lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def desired_files(selection: tuple[str, ...], lib: dict[str, library.Pack]) -> tuple[dict[str, Path], tuple[str, ...]]:
     """Map every file the selection wants materialized: manifest key -> library source path.
 
@@ -220,7 +242,9 @@ def refresh(project: Project, *, root: Path | None = None,
             if on_progress:
                 on_progress(f"packs: removed {key}")
 
-    note = _patch_claude_md(project, block_lines(project.packs, lib))
+    ctx = project.provider.context
+    lines = block_lines(project.packs, lib) if ctx.link else inline_lines(project.packs, lib)
+    note = _patch_claude_md(project, lines)
     if note:
         notes.append(note)
     if new_manifest != manifest:
@@ -266,8 +290,9 @@ def _patch_claude_md(project: Project, lines: list[str]) -> str | None:
     the operator's file on the next asset-wins ``sync_in``. Both missing -> a stub is created
     (with the block) so the imports always have a host. Returns a note or None."""
     slug = project.slug
-    asset = config.project_assets_workspace_dir(slug) / "CLAUDE.md"
-    bind = config.workspace_dir(slug) / "CLAUDE.md"
+    ctx_file = project.provider.context.file   # CLAUDE.md (claude) / AGENTS.md (codex)
+    asset = config.project_assets_workspace_dir(slug) / ctx_file
+    bind = config.workspace_dir(slug) / ctx_file
     try:
         if not asset.exists() and bind.is_file():
             asset.parent.mkdir(parents=True, exist_ok=True)
@@ -275,7 +300,7 @@ def _patch_claude_md(project: Project, lines: list[str]) -> str | None:
         if asset.exists():
             text = asset.read_text(encoding="utf-8")
         elif lines:
-            text = f"# CLAUDE.md — project: {slug}\n"
+            text = f"# {ctx_file} — project: {slug}\n"
         else:
             return None  # no file anywhere and nothing to link — leave it absent
         patched = patch_block(text, lines)
@@ -283,7 +308,7 @@ def _patch_claude_md(project: Project, lines: list[str]) -> str | None:
             asset.parent.mkdir(parents=True, exist_ok=True)
             asset.write_text(patched, encoding="utf-8")
     except OSError as exc:
-        return f"CLAUDE.md block patch failed: {exc}"
+        return f"{ctx_file} block patch failed: {exc}"
     return None
 
 

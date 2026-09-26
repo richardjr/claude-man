@@ -15,7 +15,39 @@ container IS the sandbox (invariant 2 unchanged). No sync-back policy yet (7d) �
 from __future__ import annotations
 
 from . import run
-from .base import AgentProvider, AuthSpec, ImageSpec, RunSpec
+from .base import AgentProvider, AuthSpec, ContextSpec, ImageSpec, RunSpec, SyncbackPolicy
+
+# The codex sync-back policy (7d), drawn from the REAL config-dir tree a login + a headless run leave
+# behind (docs/AGENTS.md § Codex). Everything below is secret, machine-local or conversation state;
+# the ONE syncable artifact is the authored `skills/` tree (codex's own bundled `.system` skills
+# excluded). Names match at ANY depth, so a denied basename smuggled under skills/ is caught too.
+SYNCBACK_DENY = (
+    "auth.json",                 # the login-minted credential (SECRET) — never read
+    "config.toml",               # per-project, machine-local (the sandbox setting) — never synced
+    "installation_id",
+    "models_cache.json",
+    "*.sqlite", "*.sqlite-shm", "*.sqlite-wal",   # goals/logs/memories/queue/state/thread_history
+    "sessions", "sessions/*",    # rollouts = conversation transcripts
+    "log", "log/*", "logs", "logs/*",
+    "cache", "cache/*",
+    "tmp", "tmp/*", ".tmp", ".tmp/*",
+    "plugins", "plugins/*",
+    "shell_snapshots", "shell_snapshots/*",
+    "thread-writer-locks", "thread-writer-locks/*",
+    "*.lock", ".sandbox_migration",
+    "history*", "memories*",
+    ".system",                   # codex's bundled system skills (skills/.system) — not authored
+)
+
+SYNCBACK = SyncbackPolicy(
+    host_dir="~/.codex",
+    deny_paths=SYNCBACK_DENY,
+    artifacts=(("skills", "tree-symlink"),),
+    # no settings_file: config.toml is TOML (the json-keys kind doesn't apply) and machine-local;
+    # no mcp: codex's MCP servers live in config.toml
+    deny_json_keys=("account_id",),
+    deny_json_key_prefixes=("last", "cached", "telemetry"),
+)
 
 REQUIRED_HOSTS = (
     ".openai.com",     # auth.openai.com (device auth + refresh), api.openai.com (/v1/responses)
@@ -59,5 +91,8 @@ PROVIDER = AgentProvider(
     required_hosts=REQUIRED_HOSTS,
     run=RunSpec(argv=run.codex_argv, parse=run.codex_parse),
     config_seed=CONFIG_SEED,
-    syncback=False,
+    syncback=SYNCBACK,
+    # codex reads a plain AGENTS.md at the workspace root — no import syntax, so pack fragments are
+    # INLINED into the managed block; its config dir has skills/ but no agents/ or commands/
+    context=ContextSpec(file="AGENTS.md", link=False, config_entries=("skills",)),
 )

@@ -64,12 +64,13 @@ def change_diff(slug: str, change: object) -> list[str]:
     is harmless (this is display only)."""
     kind = getattr(change, "kind", "")
     rel = getattr(change, "rel", "")
-    art = _artifact(getattr(change, "artifact", ""))
+    policy = artifacts.policy_for(slug)
+    art = _artifact(getattr(change, "artifact", ""), policy)
     if art is None:
         return []
     # Defence-in-depth: detect only ever produces clean, denylist-filtered rels, but re-assert here so
     # a future caller that hand-builds a Change can't make change_diff read a denied/escaping path.
-    if rel and any(denylist.is_denied_path(seg) for seg in rel.split("/")):
+    if rel and any(denylist.is_denied_path(seg, policy) for seg in rel.split("/")):
         return []
     if kind in ("tree", "tree-symlink", "file"):
         host_root = Path(art.host_target)
@@ -80,17 +81,19 @@ def change_diff(slug: str, change: object) -> list[str]:
         return file_diff(_read_text(host), _read_text(cont), path=f"{art.name}/{rel}" if rel else art.name)
     if kind == "json-keys":
         host = _pick(_read_json(Path(art.host_target)), rel)
-        cont = _pick(_read_json(config.claude_config_dir(slug) / "settings.json"), rel)
-        return json_key_diff(host, cont, path=f"settings.json:{rel}")
+        settings = policy.settings_file if policy is not None else "settings.json"
+        cont = _pick(_read_json(config.claude_config_dir(slug) / settings), rel)
+        return json_key_diff(host, cont, path=f"{settings}:{rel}")
     if kind == "mcp":
+        mcp_file = policy.mcp_file if policy is not None else ".claude.json"
         host = _pick(baseline.read_mcp_servers(Path(art.host_target)), rel)
-        cont = _pick(baseline.read_mcp_servers(config.claude_config_dir(slug) / ".claude.json"), rel)
+        cont = _pick(baseline.read_mcp_servers(config.claude_config_dir(slug) / mcp_file), rel)
         return json_key_diff(host, cont, path=f"mcp:{rel}")
     return []
 
 
-def _artifact(name: str) -> artifacts.Artifact | None:
-    return next((a for a in artifacts.default_artifacts() if a.name == name), None)
+def _artifact(name: str, policy=None) -> artifacts.Artifact | None:
+    return next((a for a in artifacts.default_artifacts(policy) if a.name == name), None)
 
 
 def _pick(obj: dict, key: str) -> dict:

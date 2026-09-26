@@ -112,15 +112,16 @@ _SECRET_VALUE_RES: tuple[re.Pattern[str], ...] = (
 )
 
 
-def is_denied_path(rel_path: str) -> bool:
-    """True if ``rel_path`` (relative to the config dir) must never be read/synced.
+def is_denied_path(rel_path: str, policy=None) -> bool:
+    """True if ``rel_path`` (relative to the config dir) must never be read/synced. ``policy`` (an
+    ``agents.SyncbackPolicy``) supplies another provider's ``deny_paths``; None = these (claude's).
 
     A denied NAME is matched at ANY depth, not just the first segment — so a denied basename smuggled
     inside an allowlisted tree (``skills/foo/.credentials.json``, ``agents/sessions/x``) is caught.
     The git-staging re-assert (``merge._audit_commit``) relies on this nested matching."""
     rel = rel_path.lstrip("/")
     segments = rel.split("/")
-    for pattern in DENY_PATHS:
+    for pattern in (policy.deny_paths if policy is not None else DENY_PATHS):
         if rel == pattern or fnmatch.fnmatch(rel, pattern):
             return True
         if any(seg == pattern or fnmatch.fnmatch(seg, pattern) for seg in segments):
@@ -128,11 +129,18 @@ def is_denied_path(rel_path: str) -> bool:
     return False
 
 
-def is_denied_json_key(key: str) -> bool:
+def is_denied_json_key(key: str, policy=None) -> bool:
+    keys = policy.deny_json_keys if policy is not None else DENY_JSON_KEYS
+    prefixes = policy.deny_json_key_prefixes if policy is not None else DENY_JSON_KEY_PREFIXES
     low = key.lower()
-    if any(low == d.lower() for d in DENY_JSON_KEYS):  # case-insensitive: OauthAccount / userId evade exact
+    if any(low == d.lower() for d in keys):  # case-insensitive: OauthAccount / userId evade exact
         return True
-    return any(low.startswith(p) for p in DENY_JSON_KEY_PREFIXES)
+    return any(low.startswith(p) for p in prefixes)
+
+
+def immune_keys(policy=None) -> tuple[str, ...]:
+    """The settings keys a merge never overwrites — the policy's, else claude's."""
+    return policy.immune_keys if policy is not None else STRUCTURAL_IMMUNE_KEYS
 
 
 def is_secret_key(key: str) -> bool:

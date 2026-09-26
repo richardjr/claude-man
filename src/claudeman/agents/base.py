@@ -126,6 +126,52 @@ class RunSpec:
 
 
 @dataclass(frozen=True)
+class SyncbackPolicy:
+    """The sync-back seam (invariant 5; docs/AGENTS.md seam 7): the policy DATA the Phase-5 engine
+    applies for one provider — WHICH files/keys in the config dir are secret or machine-local
+    (``deny_paths`` names/globs matched at ANY depth; ``deny_json_keys`` + prefixes), WHICH
+    artifacts are syncable (``(rel, kind)`` — kinds tree | tree-symlink | json-keys | mcp | file;
+    ``__mcp__`` is the narrow MCP read), WHERE they land on the host (``host_dir``), and the
+    settings/MCP files (``""`` = the provider has none). The 3-way merge, masking, backup-first,
+    flock and audit-commit are the engine's and identical for every provider."""
+    host_dir: str
+    deny_paths: tuple[str, ...]
+    artifacts: tuple[tuple[str, str], ...]
+    settings_file: str = ""          # the json-keys artifact's file name (claude: settings.json)
+    mcp_file: str = ""               # the identity file read NARROWLY for mcpServers in the bind
+    mcp_host_file: str = ""          # … and its host-side twin ("~/.claude.json")
+    deny_json_keys: tuple[str, ...] = ()
+    deny_json_key_prefixes: tuple[str, ...] = ()
+    immune_keys: tuple[str, ...] = ()   # settings keys a merge never overwrites (host-structural)
+
+    def __post_init__(self) -> None:
+        if not self.host_dir.startswith("~/"):
+            raise ValueError("SyncbackPolicy.host_dir must be a ~/-relative host path")
+        for rel, kind in self.artifacts:
+            if kind not in ("tree", "tree-symlink", "json-keys", "mcp", "file"):
+                raise ValueError(f"artifact {rel!r}: unknown kind {kind!r}")
+            if kind == "json-keys" and rel != self.settings_file:
+                raise ValueError("a json-keys artifact must be the policy's settings_file")
+            if kind == "mcp" and not (self.mcp_file and self.mcp_host_file):
+                raise ValueError("an mcp artifact needs mcp_file + mcp_host_file")
+
+
+@dataclass(frozen=True)
+class ContextSpec:
+    """The context-file seam (seam 8): the project-instructions file the agent reads at the
+    workspace root, whether pack fragments are LINKED into it (claude's ``@path`` imports) or must
+    be INLINED (codex reads a plain AGENTS.md), and which config-dir asset trees are syncable
+    (the assets default-DENY allowlist)."""
+    file: str = "CLAUDE.md"
+    link: bool = True
+    config_entries: tuple[str, ...] = ("skills", "agents", "commands")
+
+    def __post_init__(self) -> None:
+        if not re.match(r"^[A-Za-z][A-Za-z0-9._-]*\.md$", self.file):
+            raise ValueError(f"context file {self.file!r} must be a plain .md basename")
+
+
+@dataclass(frozen=True)
 class AgentProvider:
     id: str                       # "claude" | (7c) "codex" | …
     display_name: str
@@ -141,9 +187,10 @@ class AgentProvider:
     config_seed: tuple[tuple[str, str], ...] = ()   # (relpath, content) files written into the config
     #                               bind at seed time IF ABSENT (codex: config.toml with the sandbox
     #                               off + file credential store); never overwrites operator edits
-    syncback: bool = True         # False -> no sync-back for this provider (no reviewed denylist /
-    #                               policy yet — codex until 7d): no baseline, no pending note,
-    #                               `sync plan/review` refused. Never a silent partial sync
+    syncback: SyncbackPolicy | None = None   # the sync-back policy; None -> no sync-back for this
+    #                               provider at all (no baseline, no pending note, `sync plan/review`
+    #                               refused — never a silent partial sync)
+    context: ContextSpec = field(default_factory=ContextSpec)   # the context-file seam
 
     def __post_init__(self) -> None:
         if not _ID_RE.match(self.id):

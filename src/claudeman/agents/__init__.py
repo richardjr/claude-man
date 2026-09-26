@@ -6,7 +6,8 @@ provider's policy data. Registry: ``claude`` (the reference, baked into the base
 from __future__ import annotations
 
 from .. import config
-from .base import PERMISSIONS, AgentEvent, AgentProvider, AuthSpec, ImageSpec, RunRequest, RunSpec, UpdateSpec
+from .base import (PERMISSIONS, AgentEvent, AgentProvider, AuthSpec, ContextSpec, ImageSpec, RunRequest,
+                   RunSpec, SyncbackPolicy, UpdateSpec)
 from .claude import PROVIDER as CLAUDE
 from .codex import PROVIDER as CODEX
 
@@ -67,6 +68,7 @@ def is_forbidden_env_name(name: str) -> bool:
 
 
 __all__ = ["AgentProvider", "AuthSpec", "ImageSpec", "UpdateSpec", "RunSpec", "RunRequest",
+           "SyncbackPolicy", "ContextSpec",
            "AgentEvent", "PERMISSIONS", "CLAUDE", "CODEX", "DEFAULT",
            "DEFAULT_ID", "PROVIDERS", "resolve", "ids", "binaries", "config_dirs", "config_dir_envs",
            "credential_env_names", "is_forbidden_env_name"]

@@ -957,7 +957,8 @@ class CodexProviderTest(unittest.TestCase):
         self.assertEqual(c.image.tools, ("codex",))
         self.assertEqual(c.image.version_label, "codex-version")
         self.assertIsNone(c.updates)
-        self.assertFalse(c.syncback)
+        self.assertIsNotNone(c.syncback)
+        self.assertEqual(c.syncback.host_dir, "~/.codex")
         self.assertIn(".openai.com", c.required_hosts)
         assert c.run is not None
         self.assertIs(c.run.parse, run_mod.codex_parse)
@@ -1041,18 +1042,19 @@ class CodexProviderTest(unittest.TestCase):
             seed_mod.seed_project_config(Project(slug="cx", agent="codex"), None, overwrite_identity=True)
             self.assertEqual(conf.read_text(), "model = \"o3\"\n")
 
-    def test_syncback_gated_off_for_codex(self) -> None:
+    def test_syncback_gated_off_for_a_provider_without_a_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": tmp + "/cfg",
-                                             "CLAUDE_MAN_STATE_HOME": tmp + "/state"}):
-            projects_registry.save(Project(slug="cx", agent="codex"))
-            self.assertEqual(lifecycle.sync_plan("cx").changes, ())
-            res = lifecycle.sync_apply("cx", {})
+                                             "CLAUDE_MAN_STATE_HOME": tmp + "/state"}), \
+                _with_fake():
+            projects_registry.save(Project(slug="fk", agent="fake"))   # FAKE has syncback=None
+            self.assertEqual(lifecycle.sync_plan("fk").changes, ())
+            res = lifecycle.sync_apply("fk", {})
             self.assertFalse(res.ok)
             self.assertIn("no sync-back policy", res.detail)
-            self.assertEqual(lifecycle._pending_syncback_note("cx"), "")
-            lifecycle._write_baseline_if_absent("cx")
-            self.assertFalse(config.baseline_path("cx").exists())
+            self.assertEqual(lifecycle._pending_syncback_note("fk"), "")
+            lifecycle._write_baseline_if_absent("fk")
+            self.assertFalse(config.baseline_path("fk").exists())
 
     def test_spawn_passes_no_claude_model_pin_to_codex(self) -> None:
         spawned: list[tuple] = []
@@ -1117,3 +1119,191 @@ class TarBundleToolTest(unittest.TestCase):
         self.assertEqual([t.name for t in tools_library.resolve(("codex",), lib)], ["codex"])
         self.assertTrue(all(len(r.sha256) == 64 for r in codex.release.values()))
         self.assertTrue(set(agents.CODEX.required_hosts) <= set(codex.allowlist) | set(agents.CODEX.required_hosts))
+
+
+# ---------------------------------------------------------------------------
+# Phase 7d — the codex sync-back policy (seam 7) + the context-file seam (8)
+# ---------------------------------------------------------------------------
+from claudeman import assets as assets_mod  # noqa: E402
+from claudeman import scratch as scratch_mod  # noqa: E402
+from claudeman.packs import materialize  # noqa: E402
+from claudeman.syncback import artifacts as sb_artifacts  # noqa: E402
+from claudeman.syncback import baseline as sb_baseline  # noqa: E402
+from claudeman.syncback import denylist as sb_denylist  # noqa: E402
+from claudeman.syncback import detect as sb_detect  # noqa: E402
+from claudeman.syncback import merge as sb_merge  # noqa: E402
+
+# Every entry the REAL codex config dir held after a device login + a headless run (2026-09-26),
+# minus the one syncable tree. Each must be denied at any depth.
+CODEX_TREE_DENIED = (
+    "auth.json", "config.toml", "installation_id", "models_cache.json", ".sandbox_migration",
+    "goals_1.sqlite", "goals_1.sqlite-shm", "goals_1.sqlite-wal", "logs_2.sqlite", "memories_1.sqlite",
+    "queue_1.sqlite", "state_5.sqlite", "thread_history_1.sqlite",
+    "cache", "cache/codex_apps_tools", "log", "log/codex-login.log", "plugins", "plugins/cache",
+    "sessions", "sessions/2026", "shell_snapshots", "thread-writer-locks",
+    "thread-writer-locks/.coordination.lock", "tmp", "tmp/arg0", ".tmp", ".tmp/plugins.sync.lock",
+    "skills/.system", "skills/.system/foo/SKILL.md",   # codex's bundled system skills, not authored
+    "skills/mine/auth.json",                          # a credential smuggled under the syncable tree
+)
+
+
+class CodexSyncbackPolicyTest(unittest.TestCase):
+    def test_policy_denies_the_real_tree(self) -> None:
+        pol = agents.CODEX.syncback
+        assert pol is not None
+        for rel in CODEX_TREE_DENIED:
+            self.assertTrue(sb_denylist.is_denied_path(rel, pol), rel)
+        self.assertFalse(sb_denylist.is_denied_path("skills/mine/SKILL.md", pol))
+        self.assertFalse(sb_denylist.is_denied_path("skills", pol))
+        # claude's policy is byte-for-byte the audited denylist constants
+        cl = agents.CLAUDE.syncback
+        self.assertEqual(cl.deny_paths, sb_denylist.DENY_PATHS)
+        self.assertEqual(dict(cl.artifacts), sb_denylist.SYNC_ARTIFACTS)
+        self.assertEqual(sb_denylist.immune_keys(cl), sb_denylist.STRUCTURAL_IMMUNE_KEYS)
+        self.assertEqual(sb_denylist.immune_keys(pol), ())
+        self.assertTrue(sb_denylist.is_denied_json_key("account_id", pol))
+        self.assertTrue(sb_denylist.is_denied_json_key("lastSeen", pol))
+
+    def test_artifacts_per_policy(self) -> None:
+        with mock.patch.object(sb_artifacts, "user_home", lambda: Path("/h")):
+            cx = sb_artifacts.default_artifacts(agents.CODEX.syncback)
+            self.assertEqual([(a.name, a.kind, a.host_target) for a in cx],
+                             [("skills", "tree-symlink", "/h/.codex/skills")])
+            cl = sb_artifacts.default_artifacts(agents.CLAUDE.syncback)
+            self.assertEqual([a.name for a in cl], [a.name for a in sb_artifacts.default_artifacts()])
+            self.assertEqual([a.host_target for a in cl], [a.host_target for a in sb_artifacts.default_artifacts()])
+            self.assertIn("/h/.claude.json", [a.host_target for a in cl if a.kind == "mcp"])
+
+    def test_policy_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            agents.SyncbackPolicy(host_dir="/abs", deny_paths=(), artifacts=())
+        with self.assertRaises(ValueError):
+            agents.SyncbackPolicy(host_dir="~/.x", deny_paths=(), artifacts=(("a", "blob"),))
+        with self.assertRaises(ValueError):
+            agents.SyncbackPolicy(host_dir="~/.x", deny_paths=(), artifacts=(("s.json", "json-keys"),))
+        with self.assertRaises(ValueError):
+            agents.SyncbackPolicy(host_dir="~/.x", deny_paths=(), artifacts=(("__mcp__", "mcp"),))
+        with self.assertRaises(ValueError):
+            agents.ContextSpec(file="notes.txt")
+
+
+class CodexSyncbackEngineTest(unittest.TestCase):
+    """The real engine over a codex bind: only the authored skill is ever fingerprinted, detected,
+    diffed and merged; auth.json / sqlite / sessions / .system never are (invariant 5)."""
+
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        self.home = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": self.cfg.name,
+                                                "CLAUDE_MAN_STATE_HOME": self.state.name,
+                                                "HOME": self.home.name})
+        self.env.start()
+        for t in (self.cfg, self.state, self.home):
+            self.addCleanup(t.cleanup)
+        self.addCleanup(self.env.stop)
+        self.slug = "cx"
+        projects_registry.save(Project(slug=self.slug, agent="codex"))
+        self.bind = config.claude_config_dir(self.slug)
+        for rel in ("auth.json", "config.toml", "state_5.sqlite", "sessions/2026/r.jsonl",
+                    "skills/.system/sys/SKILL.md", "skills/mine/SKILL.md", "skills/mine/auth.json"):
+            p = self.bind / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("SECRET" if "auth" in rel else "content")
+        (Path(self.home.name) / ".codex" / "skills").mkdir(parents=True)
+
+    def test_snapshot_detect_diff_merge(self) -> None:
+        pol = sb_artifacts.policy_for(self.slug)
+        self.assertIs(pol, agents.CODEX.syncback)
+        snap = sb_baseline.snapshot_container(self.slug, pol)
+        self.assertEqual(list(snap), ["skills"])
+        self.assertEqual(list(snap["skills"]["files"]), ["mine/SKILL.md"])   # .system + auth.json gone
+        changes = sb_detect.detect_changes(self.slug)
+        self.assertEqual([(c.artifact, c.rel, c.change_type, c.default_decision) for c in changes],
+                         [("skills", "mine/SKILL.md", "added", "accept")])
+        manifest = json.loads(config.baseline_path(self.slug).read_text())
+        self.assertNotIn("SECRET", json.dumps(manifest))
+        self.assertNotIn("auth.json", json.dumps(manifest))
+        diff = sb_detect and __import__("claudeman.syncback.diff", fromlist=["x"]).change_diff(self.slug, changes[0])
+        self.assertTrue(any("content" in line for line in diff))
+        rep = sb_merge.apply_accepted(self.slug, {changes[0].label: "accept"})
+        self.assertTrue(rep.ok, rep.notes)
+        host_skill = Path(self.home.name) / ".codex" / "skills" / "mine" / "SKILL.md"
+        self.assertEqual(host_skill.read_text(), "content")
+        self.assertFalse((Path(self.home.name) / ".codex" / "skills" / "mine" / "auth.json").exists())
+        self.assertFalse((Path(self.home.name) / ".claude").exists())   # never the claude host dir
+        self.assertEqual(sb_detect.detect_changes(self.slug), [])         # baseline refreshed
+
+    def test_lifecycle_entry_points_run_for_codex(self) -> None:
+        lifecycle._write_baseline_if_absent(self.slug)
+        self.assertTrue(config.baseline_path(self.slug).exists())
+        (self.bind / "skills" / "new" / "SKILL.md").parent.mkdir(parents=True)
+        (self.bind / "skills" / "new" / "SKILL.md").write_text("x")
+        self.assertIn("1 sync-back change(s) pending", lifecycle._pending_syncback_note(self.slug))
+        plan = lifecycle.sync_plan(self.slug)
+        self.assertEqual([c.change.rel for c in plan.changes], ["new/SKILL.md"])
+
+
+class ContextSpecTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cfg = tempfile.TemporaryDirectory()
+        self.state = tempfile.TemporaryDirectory()
+        self.lib = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": self.cfg.name,
+                                                "CLAUDE_MAN_STATE_HOME": self.state.name})
+        self.env.start()
+        for t in (self.cfg, self.state, self.lib):
+            self.addCleanup(t.cleanup)
+        self.addCleanup(self.env.stop)
+        root = Path(self.lib.name) / "common" / "guardrails"
+        (root / "claude-md").mkdir(parents=True)
+        (root / "pack.toml").write_text('description = "g"\ndefault = true\n')
+        (root / "claude-md" / "no-secrets.md").write_text("# No secrets\n\nNever commit them.\n")
+        self.root = Path(self.lib.name)
+
+    def test_defaults_follow_the_provider(self) -> None:
+        self.assertEqual(agents.CLAUDE.context.file, "CLAUDE.md")
+        self.assertEqual(agents.CODEX.context, agents.ContextSpec("AGENTS.md", False, ("skills",)))
+        cx = Project(slug="cx", agent="codex")
+        self.assertEqual(cx.sync.workspace, ("AGENTS.md", ".claude-man"))
+        self.assertEqual(cx.sync.claude, ("skills",))
+        self.assertEqual(Project(slug="cl").sync, schema.Sync())
+        path = projects_registry.save(cx)
+        self.assertNotIn("[project.sync]", path.read_text())          # the provider default stays terse
+        self.assertEqual(projects_registry.load("cx").sync, cx.sync)
+
+    def test_codex_packs_inline_into_agents_md(self) -> None:
+        rep = materialize.refresh(Project(slug="cx", agent="codex", packs=("guardrails",)), root=self.root)
+        self.assertTrue(rep.ok, rep.detail)
+        ws = config.project_assets_workspace_dir("cx")
+        self.assertFalse((ws / "CLAUDE.md").exists())
+        text = (ws / "AGENTS.md").read_text()
+        self.assertIn(materialize.BLOCK_START, text)
+        self.assertIn("Never commit them.", text)                       # inlined body
+        self.assertIn("<!-- .claude-man/guardrails/no-secrets.md -->", text)
+        self.assertNotIn("@.claude-man", text)                          # no import syntax for codex
+        # claude keeps the @-import form
+        rep = materialize.refresh(Project(slug="cl", packs=("guardrails",)), root=self.root)
+        self.assertTrue(rep.ok)
+        cl = (config.project_assets_workspace_dir("cl") / "CLAUDE.md").read_text()
+        self.assertIn("@.claude-man/guardrails/no-secrets.md", cl)
+        self.assertNotIn("Never commit them.", cl)
+
+    def test_scratch_note_and_bootstrap_use_the_context_file(self) -> None:
+        self.assertEqual(scratch_mod.ensure_note(Project(slug="cx", agent="codex")), "")
+        ws = config.workspace_dir("cx")
+        self.assertTrue((ws / "AGENTS.md").exists())
+        self.assertFalse((ws / "CLAUDE.md").exists())
+        self.assertIn("/workspace/scratch/", (ws / "AGENTS.md").read_text())
+        note = assets_mod.bootstrap(Project(slug="cx2", agent="codex"))
+        self.assertIn("AGENTS.md", note)
+        stub = (config.project_assets_workspace_dir("cx2") / "AGENTS.md").read_text()
+        self.assertIn("OpenAI Codex", stub)
+        self.assertIn("/home/agent/.codex", stub)
+        self.assertNotIn("agents/", stub.split("Drop assets under")[1])
+
+    def test_assets_config_entries_follow_the_provider(self) -> None:
+        proj = Project(slug="cx", agent="codex", sync=schema.Sync(claude=("skills", "agents")))
+        rep = assets_mod.sync_in(proj)
+        self.assertTrue(any("claude/agents: refused" in n and "skills are syncable" in n for n in rep.notes),
+                        rep.notes)

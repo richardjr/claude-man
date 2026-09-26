@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config
+from . import agents, config
 from .checkout.repos import is_within
 from .registry.schema import Project
 from .syncback import denylist, fsmerge
@@ -71,15 +71,17 @@ def bootstrap(project: Project) -> str | None:
 # `projects` is NOT denylisted (only `projects/*/*.jsonl` is) yet holds session transcripts, and
 # `settings.json` carries machine-local perms/hooks. So anything not in this set is refused outright;
 # nested entries inside an allowed tree get a second basename-denylist + symlink pass in fsmerge.copy_dir_filtered.
-_CLAUDE_SAFE_ENTRIES = frozenset({"skills", "agents", "commands"})
+_CLAUDE_SAFE_ENTRIES = frozenset({"skills", "agents", "commands"})   # claude's (the provider's
+#                                                                       ContextSpec.config_entries wins)
 
 
-def _safe_claude_entries(entries: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split claude-side entries into (safe, dropped) by the default-deny allowlist above."""
+def _safe_claude_entries(entries: tuple[str, ...], allowed=_CLAUDE_SAFE_ENTRIES
+                         ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split config-side entries into (safe, dropped) by the provider's default-deny allowlist."""
     safe: list[str] = []
     dropped: list[str] = []
     for rel in entries:
-        (safe if rel in _CLAUDE_SAFE_ENTRIES else dropped).append(rel)
+        (safe if rel in allowed else dropped).append(rel)
     return tuple(safe), tuple(dropped)
 
 
@@ -100,9 +102,13 @@ def _sync(project: Project, *, reverse: bool, on_progress: ProgressFn | None) ->
         if note:
             notes.append(note)
 
-    safe_claude, dropped = _safe_claude_entries(project.sync.claude)
+    provider = project.provider
+    allowed = frozenset(provider.context.config_entries)
+    policy = provider.syncback   # None → the gated walk falls back to claude's denylist (safer)
+    safe_claude, dropped = _safe_claude_entries(project.sync.claude, allowed)
     for rel in dropped:
-        notes.append(f"claude/{rel}: refused (only skills/agents/commands are syncable artifacts)")
+        notes.append(f"claude/{rel}: refused (only {'/'.join(sorted(allowed))} are syncable artifacts "
+                     f"for {provider.id})")
 
     specs = (
         ("workspace", config.project_assets_workspace_dir(slug),
@@ -114,7 +120,7 @@ def _sync(project: Project, *, reverse: bool, on_progress: ProgressFn | None) ->
         src_root, dst_root = (bind_root, asset_root) if reverse else (asset_root, bind_root)
         for rel in entries:
             tag = f"{root_name}/{rel}"
-            if gate and denylist.is_denied_path(rel):  # defence-in-depth (already filtered above)
+            if gate and denylist.is_denied_path(rel, policy):  # defence-in-depth (already filtered above)
                 continue
             src, dst = src_root / rel, dst_root / rel
             if not is_within(dst, dst_root):  # destination containment guard
@@ -123,7 +129,7 @@ def _sync(project: Project, *, reverse: bool, on_progress: ProgressFn | None) ->
             if not src.exists():
                 continue  # nothing to copy this direction (incl. a broken symlink)
             if src.is_symlink():  # a top-level symlink: refuse if it escapes or targets a denied path
-                note = fsmerge.check_symlink(src, tag, src_root=src_root, gate=gate)
+                note = fsmerge.check_symlink(src, tag, src_root=src_root, gate=gate, policy=policy)
                 if note:
                     notes.append(note)
                     continue
@@ -139,7 +145,7 @@ def _sync(project: Project, *, reverse: bool, on_progress: ProgressFn | None) ->
                     continue
                 backed_up.append(tag)
             try:
-                sub = _copy_tree_or_file(src, dst, root_rel=rel, src_root=src_root, gate=gate)
+                sub = _copy_tree_or_file(src, dst, root_rel=rel, src_root=src_root, gate=gate, policy=policy)
             except (OSError, shutil.Error) as exc:  # best-effort: one bad entry never aborts the rest
                 notes.append(f"{tag}: copy failed ({exc})")
                 continue
@@ -176,7 +182,8 @@ def _dirs_differ(a: Path, b: Path) -> bool:
     return any(_dirs_differ(a / sub, b / sub) for sub in cmp.common_dirs)
 
 
-def _copy_tree_or_file(src: Path, dst: Path, *, root_rel: str, src_root: Path, gate: bool) -> list[str]:
+def _copy_tree_or_file(src: Path, dst: Path, *, root_rel: str, src_root: Path, gate: bool,
+                       policy=None) -> list[str]:
     """Copy one allowlist entry. Dir entries are copied via a FILTERED recursive walk (not a blind
     ``shutil.copytree``) so the denylist + symlink-escape guards apply to EVERY nested entry, not just
     the top-level one (invariants 1 & 5). Dir entries MERGE into an existing dst (overwrite same-named,
@@ -184,7 +191,8 @@ def _copy_tree_or_file(src: Path, dst: Path, *, root_rel: str, src_root: Path, g
     if src.is_dir() and not src.is_symlink():
         if dst.exists() and not (dst.is_dir() and not dst.is_symlink()):
             fsmerge.remove_path(dst)  # dst was a file/symlink where src is a dir — replace
-        return fsmerge.copy_dir_filtered(src, dst, root_rel=root_rel, src_root=src_root, gate=gate)
+        return fsmerge.copy_dir_filtered(src, dst, root_rel=root_rel, src_root=src_root, gate=gate,
+                                         policy=policy)
     # file / vetted in-tree symlink — read TOCTOU-safe (all-O_NOFOLLOW walk anchored at src_root)
     fsmerge.replace_with_file(dst, anchor=src_root, rel_parts=tuple(root_rel.split("/")))
     return []
@@ -197,32 +205,36 @@ def _bootstrap_claude_md(project: Project) -> str | None:
     """Write a minimal stub CLAUDE.md into the asset source iff CLAUDE.md is a synced workspace
     entry and exists in NEITHER the asset source nor the workspace bind. Returns a note or None."""
     slug = project.slug
-    if "CLAUDE.md" not in project.sync.workspace:
+    ctx = project.provider.context
+    if ctx.file not in project.sync.workspace:
         return None
-    asset = config.project_assets_workspace_dir(slug) / "CLAUDE.md"
-    bind = config.workspace_dir(slug) / "CLAUDE.md"
+    asset = config.project_assets_workspace_dir(slug) / ctx.file
+    bind = config.workspace_dir(slug) / ctx.file
     if asset.exists() or bind.exists():
         return None
     try:
         asset.parent.mkdir(parents=True, exist_ok=True)
-        asset.write_text(_stub_claude_md(slug), encoding="utf-8")
+        asset.write_text(_stub_claude_md(slug, project), encoding="utf-8")
     except OSError as exc:
-        return f"bootstrap CLAUDE.md failed: {exc}"
+        return f"bootstrap {ctx.file} failed: {exc}"
     return f"bootstrapped {asset}"
 
 
-def _stub_claude_md(slug: str) -> str:
-    aw = config.project_assets_workspace_dir(slug) / "CLAUDE.md"
+def _stub_claude_md(slug: str, project: Project | None = None) -> str:
+    provider = project.provider if project is not None else agents.DEFAULT
+    ctx = provider.context
+    aw = config.project_assets_workspace_dir(slug) / ctx.file
     ac = config.project_assets_claude_dir(slug)
+    trees = ", ".join(f"{ac}/{e}/" for e in ctx.config_entries)
     return (
-        f"# CLAUDE.md — project: {slug}\n\n"
+        f"# {ctx.file} — project: {slug}\n\n"
         "<!--\n"
-        f"Project instructions for Claude Code in the claude-man `{slug}` container.\n\n"
+        f"Project instructions for {provider.display_name} in the claude-man `{slug}` container.\n\n"
         f"Synced from: {aw}\n"
-        "Edit it here on the host, or in-container at /workspace/CLAUDE.md — changes sync back out\n"
-        "when the container stops. Drop skills/agents under\n"
-        f"  {ac}/skills/ , {ac}/agents/\n"
-        "to have them appear under ~/.claude inside the container.\n"
+        f"Edit it here on the host, or in-container at /workspace/{ctx.file} — changes sync back out\n"
+        "when the container stops. Drop assets under\n"
+        f"  {trees}\n"
+        f"to have them appear under {provider.config_dir} inside the container.\n"
         "-->\n"
     )
 

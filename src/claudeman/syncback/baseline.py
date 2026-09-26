@@ -36,8 +36,9 @@ MANIFEST_VERSION = 1
 # Public API
 # ---------------------------------------------------------------------------
 def write_baseline(slug: str) -> None:
-    """Snapshot the container bind + the real host targets to ``config.baseline_path(slug)``."""
-    _write_manifest(slug, build_manifest(slug))
+    """Snapshot the container bind + the real host targets to ``config.baseline_path(slug)`` — under
+    the project's PROVIDER policy (a provider without one snapshots nothing)."""
+    _write_manifest(slug, build_manifest(slug, artifacts.policy_for(slug)))
 
 
 def write_manifest(slug: str, container: dict, host: dict) -> None:
@@ -72,34 +73,37 @@ def read_baseline(slug: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def build_manifest(slug: str) -> dict:
-    """Build (without writing) the three-way manifest for ``slug``."""
+def build_manifest(slug: str, policy=None) -> dict:
+    """Build (without writing) the three-way manifest for ``slug`` under ``policy`` (None = claude's)."""
     return {
         "version": MANIFEST_VERSION,
         "slug": slug,
         "created": _now_iso(),
-        "container": snapshot_container(slug),
-        "host": snapshot_host(),
+        "container": snapshot_container(slug, policy),
+        "host": snapshot_host(policy),
     }
 
 
-def snapshot_container(slug: str) -> dict:
+def snapshot_container(slug: str, policy=None) -> dict:
     """Fingerprint each allowlisted artifact in the project's container config bind."""
     root = config.claude_config_dir(slug)
-    return {art.name: _entry_for(art, _container_path(art, root)) for art in artifacts.default_artifacts()}
+    return {art.name: _entry_for(art, _container_path(art, root, policy), policy)
+            for art in artifacts.default_artifacts(policy)}
 
 
-def snapshot_host() -> dict:
-    """Fingerprint each allowlisted artifact in the operator's real host ``~/.claude``."""
-    return {art.name: _entry_for(art, Path(art.host_target)) for art in artifacts.default_artifacts()}
+def snapshot_host(policy=None) -> dict:
+    """Fingerprint each allowlisted artifact in the operator's real host config dir (the policy's
+    ``host_dir`` — ``~/.claude`` for claude, ``~/.codex`` for codex)."""
+    return {art.name: _entry_for(art, Path(art.host_target), policy)
+            for art in artifacts.default_artifacts(policy)}
 
 
-def snapshot_tree(root: Path, kind: str = "tree") -> dict:
+def snapshot_tree(root: Path, kind: str = "tree", policy=None) -> dict:
     """Public: fingerprint an arbitrary tree the same way a tree artifact is fingerprinted.
 
     Used by ``detect`` to build the no-baseline implicit reference from the asset/pack SOURCE dir
     (so genuinely agent-authored files show as adds while claude-man's own synced files don't)."""
-    return _tree_entry(root, kind)
+    return _tree_entry(root, kind, policy)
 
 
 def read_mcp_servers(path: Path) -> dict:
@@ -120,11 +124,11 @@ def read_mcp_servers(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Per-kind entry builders
 # ---------------------------------------------------------------------------
-def _entry_for(art: artifacts.Artifact, path: Path) -> dict:
+def _entry_for(art: artifacts.Artifact, path: Path, policy=None) -> dict:
     if art.kind in ("tree", "tree-symlink"):
-        return _tree_entry(path, art.kind)
+        return _tree_entry(path, art.kind, policy)
     if art.kind == "json-keys":
-        return _json_keys_entry(path)
+        return _json_keys_entry(path, policy)
     if art.kind == "mcp":
         return _mcp_entry(path)
     if art.kind == "file":
@@ -132,39 +136,39 @@ def _entry_for(art: artifacts.Artifact, path: Path) -> dict:
     return {"kind": art.kind}
 
 
-def _container_path(art: artifacts.Artifact, container_root: Path) -> Path:
+def _container_path(art: artifacts.Artifact, container_root: Path, policy=None) -> Path:
     if art.kind == "mcp":
-        return container_root / ".claude.json"
+        return container_root / (policy.mcp_file if policy is not None else ".claude.json")
     return container_root / art.container_rel
 
 
-def _tree_entry(root: Path, kind: str) -> dict:
+def _tree_entry(root: Path, kind: str, policy=None) -> dict:
     """``{kind, files:{relpath: 'sha256:…' | 'symlink:…' | 'symlink-blocked'}}`` — denylist + symlink
     escape guard applied per nested entry (SYNC-3), so a denied basename or an escaping/denied-target
     symlink is never fingerprinted by content (it's skipped or recorded as a stable blocked marker)."""
     files: dict[str, str] = {}
     if root.is_dir() and not root.is_symlink():
-        _walk_tree(root, root, files)
+        _walk_tree(root, root, files, policy)
     return {"kind": kind, "files": files}
 
 
-def _walk_tree(base: Path, current: Path, out: dict[str, str]) -> None:
+def _walk_tree(base: Path, current: Path, out: dict[str, str], policy=None) -> None:
     for entry in sorted(current.iterdir()):
         name = entry.name
-        if name in fsmerge.TREE_EXCLUDE_NAMES or denylist.is_denied_path(name):
+        if name in fsmerge.TREE_EXCLUDE_NAMES or denylist.is_denied_path(name, policy):
             continue
         rel = entry.relative_to(base).as_posix()
         if entry.is_symlink():
-            note = fsmerge.check_symlink(entry, rel, src_root=base, gate=True)
+            note = fsmerge.check_symlink(entry, rel, src_root=base, gate=True, policy=policy)
             out[rel] = "symlink-blocked" if note else "symlink:" + os.readlink(entry)
             continue  # never recurse/deref a symlink (escape + cycle safety)
         if entry.is_dir():
-            _walk_tree(base, entry, out)
+            _walk_tree(base, entry, out, policy)
         elif entry.is_file():
             out[rel] = "sha256:" + _sha256(entry)
 
 
-def _json_keys_entry(path: Path) -> dict:
+def _json_keys_entry(path: Path, policy=None) -> dict:
     """``{kind:'json-keys', keys:{topkey: canonical-hash}}`` — ``is_denied_json_key`` AND the
     structurally-immune ``hooks``/``statusLine`` keys excluded, so they never even become a detectable
     change (the merge refuses them anyway; keeping them out of the fingerprint avoids a confusing
@@ -173,7 +177,7 @@ def _json_keys_entry(path: Path) -> dict:
     data = _load_json(path)
     if isinstance(data, dict):
         for key, value in data.items():
-            if denylist.is_denied_json_key(key) or key in denylist.STRUCTURAL_IMMUNE_KEYS:
+            if denylist.is_denied_json_key(key, policy) or key in denylist.immune_keys(policy):
                 continue
             keys[key] = _canonical_hash(value)
     return {"kind": "json-keys", "keys": keys}

@@ -45,9 +45,12 @@ class Change:
 
 
 def detect_changes(slug: str) -> list[Change]:
-    """Classify every agent-authored change in ``slug``'s container config vs the baseline."""
-    container = baseline.snapshot_container(slug)
-    host_now = baseline.snapshot_host()
+    """Classify every agent-authored change in ``slug``'s container config vs the baseline, under
+    the project's PROVIDER policy (no policy → no artifacts → nothing detected)."""
+    policy = artifacts.policy_for(slug)
+    arts = artifacts.default_artifacts(policy)
+    container = baseline.snapshot_container(slug, policy)
+    host_now = baseline.snapshot_host(policy)
     base = baseline.read_baseline(slug)
     have_baseline = bool(base)
     if have_baseline:
@@ -58,12 +61,12 @@ def detect_changes(slug: str) -> list[Change]:
         # claude-man itself wrote (asset/pack source for trees; current for settings/MCP), and the
         # host is its own reference (no drift). Persisting THIS (not the current agent-edited state)
         # keeps the agent's changes detectable on a follow-up apply that re-detects.
-        base_container = {a.name: _implicit_baseline(slug, a, container.get(a.name, {}))
-                          for a in artifacts.default_artifacts()}
+        base_container = {a.name: _implicit_baseline(slug, a, container.get(a.name, {}), policy)
+                          for a in arts}
         base_host = host_now
 
     changes: list[Change] = []
-    for art in artifacts.default_artifacts():
+    for art in arts:
         changes += _diff_artifact(
             slug, art,
             container.get(art.name, {}), base_container.get(art.name, {}),
@@ -78,13 +81,13 @@ def detect_changes(slug: str) -> list[Change]:
     return changes
 
 
-def _implicit_baseline(slug: str, art: artifacts.Artifact, cur: dict) -> dict:
+def _implicit_baseline(slug: str, art: artifacts.Artifact, cur: dict, policy=None) -> dict:
     """No-baseline reference for one artifact: the asset/pack SOURCE for trees (so claude-man's own
     synced files aren't flagged as agent adds), else the CURRENT container value for settings.json /
     MCP (don't add-flood the one-shot degraded path — those default to reject anyway)."""
     if art.kind in ("tree", "tree-symlink"):
         src = config.project_assets_claude_dir(slug) / art.container_rel
-        return baseline.snapshot_tree(src, art.kind)
+        return baseline.snapshot_tree(src, art.kind, policy)
     return cur
 
 

@@ -33,16 +33,36 @@ def user_home() -> Path:
     return Path.home()
 
 
-def default_artifacts() -> list[Artifact]:
-    """The user-scope artifact set seeded from ``denylist.SYNC_ARTIFACTS``.
+def policy_for(slug: str):
+    """The ``agents.SyncbackPolicy`` for ``slug``'s provider (registry-read), or None when the
+    provider has no sync-back (the lifecycle gates every entry point on that; here it is a
+    defence-in-depth: no policy → no artifacts → nothing is ever read)."""
+    from ..registry import projects as projects_registry
+    try:
+        return projects_registry.load(slug).provider.syncback
+    except (FileNotFoundError, ValueError, OSError):
+        return None
 
-    Memory + CLAUDE.md are project-scoped and resolved per-project at detect time.
+
+def default_artifacts(policy=None) -> list[Artifact]:
+    """The user-scope artifact set for ``policy`` (default: claude's ``denylist.SYNC_ARTIFACTS``,
+    targeting ``~/.claude``). Host targets are the policy's ``host_dir`` (``~``-expanded).
+
+    Memory + the context file are project-scoped and resolved per-project at detect time.
     """
     home = user_home()
+    if policy is None:
+        pairs = tuple(denylist.SYNC_ARTIFACTS.items())
+        host_dir, mcp_host = home / ".claude", home / ".claude.json"
+    else:
+        pairs = policy.artifacts
+        host_dir = home / policy.host_dir[2:]
+        mcp_host = home / policy.mcp_host_file[2:] if policy.mcp_host_file else None
     out: list[Artifact] = []
-    for rel, kind in denylist.SYNC_ARTIFACTS.items():
-        if rel == "__mcp__":
-            out.append(Artifact("mcp", "mcp", "", str(home / ".claude.json"), "user"))
+    for rel, kind in pairs:
+        if rel == "__mcp__" or kind == "mcp":
+            if mcp_host is not None:
+                out.append(Artifact("mcp", "mcp", "", str(mcp_host), "user"))
             continue
-        out.append(Artifact(rel, kind, rel, str(home / ".claude" / rel), "user"))
+        out.append(Artifact(rel, kind, rel, str(host_dir / rel), "user"))
     return out

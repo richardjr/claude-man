@@ -38,7 +38,20 @@ selection + the provider's); the version is read off the resolved image; `update
 the channel check; `config_seed` writes `config.toml` (sandbox off + file credential store) if
 absent; `syncback=False` gates the baseline / pending note / `sync plan|review` off until 7d; `image
 smoke --project` runs the codex probes with the provider's env; `project agent` aliases `project
-claude`; the `--model` pin argv is claude-only at spawn. Tracking: [`ROADMAP.md`](../ROADMAP.md)
+claude`; the `--model` pin argv is claude-only at spawn. **7d + 7a-2 (same day):** the last two
+seams. Seam 7: `SyncbackPolicy` on the provider (host dir, deny paths, artifacts, settings/MCP files,
+JSON-key policy, immune keys) — claude's IS the audited `syncback/denylist.py` constants; the engine
+(`artifacts.policy_for(slug)` → baseline / detect / diff / merge / fsmerge / the assets gate) takes
+the policy per call, byte-identical for claude; codex's policy (drawn from the REAL post-login tree)
+syncs ONLY the authored `skills/` tree to `~/.codex/skills` and denies `auth.json`, `config.toml`,
+every sqlite + WAL, `sessions/`, logs, caches, plugins, locks and codex's bundled `skills/.system`.
+Verified live: an authored skill in the codex bind was detected, reviewed and merged into the host
+`~/.codex/skills` with an audit commit, and the baseline never contained `auth.json`. Seam 8:
+`ContextSpec` (file, link, config_entries) — claude `CLAUDE.md` + `@`-imports + skills/agents/commands;
+codex `AGENTS.md` with the pack fragments INLINED (`materialize.inline_lines`) + skills only; the
+scratch note, the assets bootstrap/allowlist and a project's default `[project.sync]` follow it
+(`schema.default_sync(provider)`, applied at construction so an existing TOML needs no migration).
+Tracking: [`ROADMAP.md`](../ROADMAP.md)
 Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
 modes per provider (`AuthSpec` as data, provider-scoped profiles, a per-provider `forbidden_env` scrub),
 a new **headless-run seam** (`RunSpec` → normalised `AgentEvent` stream; `project run`), a third
@@ -155,10 +168,10 @@ refactor before any second-agent code exists.
    mints a refreshable JSON credential (`$CODEX_HOME/auth.json` = our `login` mode, the same
    in-container-minted doctrine as claude's `/login`). No new auth-kind enum is needed: `Project.auth`
    `token`|`login` already models it; `AuthSpec` carries the env name(s) + the credential file name.
-2. **Sync-back is the deepest coupling.** The engine is reusable; only the policy data (which files
-   and JSON keys in the config dir are secret/machine-local) and the MCP-apply strategy are
-   agent-specific — `SyncbackPolicy` isolates exactly that. Getting a Codex denylist wrong is a
-   credential-leak risk, so it gets the same adversarial review the Claude denylist did.
+2. **Sync-back is the deepest coupling — DONE (7d).** The engine is reused; `SyncbackPolicy` holds
+   the per-provider data. The Codex denylist was drawn from the real post-login tree and is pinned
+   by a test that asserts every entry of that tree (plus a credential smuggled under `skills/`) is
+   denied at any depth.
 3. **Usage is optional.** Codex's transcript format differs; `usage=None` drops the feature cleanly.
    (The only usage surface is the transcript token-totals — the per-account subscription-usage bars
    were removed — so this seam is low-stakes.)

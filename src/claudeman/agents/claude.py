@@ -8,8 +8,23 @@ and this object is how the rest of the code REACHES them without hard-coding "cl
 from __future__ import annotations
 
 from .. import config
+from ..syncback import denylist
 from . import run
-from .base import AgentProvider, AuthSpec, ImageSpec, RunSpec, UpdateSpec
+from .base import AgentProvider, AuthSpec, ContextSpec, ImageSpec, RunSpec, SyncbackPolicy, UpdateSpec
+
+# The claude sync-back policy IS the reviewed denylist (syncback/denylist.py keeps the constants —
+# they are the audited source; this object is how the engine reaches them per provider).
+SYNCBACK = SyncbackPolicy(
+    host_dir="~/.claude",
+    deny_paths=denylist.DENY_PATHS,
+    artifacts=tuple(denylist.SYNC_ARTIFACTS.items()),
+    settings_file="settings.json",
+    mcp_file=".claude.json",
+    mcp_host_file="~/.claude.json",
+    deny_json_keys=denylist.DENY_JSON_KEYS,
+    deny_json_key_prefixes=denylist.DENY_JSON_KEY_PREFIXES,
+    immune_keys=denylist.STRUCTURAL_IMMUNE_KEYS,
+)
 
 # Anthropic / Claude egress a LOCKED container must always reach (invariant 3). `.anthropic.com`
 # (wildcard) covers api.anthropic.com + statsig.anthropic.com — listing those bare too would make
@@ -52,4 +67,6 @@ PROVIDER = AgentProvider(
     ),
     required_hosts=REQUIRED_HOSTS,
     run=RunSpec(argv=run.claude_argv, parse=run.claude_parse),
+    syncback=SYNCBACK,
+    context=ContextSpec(file="CLAUDE.md", link=True, config_entries=("skills", "agents", "commands")),
 )

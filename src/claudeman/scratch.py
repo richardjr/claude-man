@@ -52,8 +52,8 @@ _NOTE_LINES = [
 
 # Minimal CLAUDE.md created when a project has none (so the note always has a host, even with asset
 # sync disabled — the agent reads /workspace/CLAUDE.md regardless of claude-man's sync settings).
-def _stub(slug: str) -> str:
-    return f"# CLAUDE.md — project: {slug}\n"
+def _stub(slug: str, file: str = "CLAUDE.md") -> str:
+    return f"# {file} — project: {slug}\n"
 
 
 def clear(slug: str) -> str:
@@ -98,15 +98,16 @@ def ensure_note(project: Project) -> str:
     the agent reads). Unconditional — independent of pack/sync settings — so the agent is always told
     about the scratch dir. Best-effort; returns a note ('' = quiet / unchanged). Creates a minimal
     CLAUDE.md when the project has none so the note has a host."""
-    path = config.workspace_dir(project.slug) / "CLAUDE.md"
+    ctx_file = project.provider.context.file   # CLAUDE.md for claude, AGENTS.md for codex
+    path = config.workspace_dir(project.slug) / ctx_file
     existed = path.exists()
     try:
-        text = path.read_text(encoding="utf-8") if existed else _stub(project.slug)
+        text = path.read_text(encoding="utf-8") if existed else _stub(project.slug, ctx_file)
         patched = claudemd.patch_block(text, _NOTE_LINES, begin=_BEGIN, end=_END,
                                        begin_prefix=_BEGIN_PREFIX, end_prefix=_END_PREFIX)
         if not existed or patched != text:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(patched, encoding="utf-8")
     except OSError as exc:
-        return f"scratch: CLAUDE.md note patch failed ({exc})"
+        return f"scratch: {ctx_file} note patch failed ({exc})"
     return ""
