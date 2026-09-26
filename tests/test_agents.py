@@ -249,15 +249,10 @@ CREATE_ARGV_MIN = ['docker',
  'sleep',
  'infinity']
 
-BUILD_ARGV = ['docker',
- 'build',
- '-f',
- '/home/richard/Work/claude-man/images/overlays/node.Dockerfile',
- '--build-arg',
- 'CLAUDE_VERSION=2.1.170',
- '-t',
- 'claude-man:node',
- '/home/richard/Work/claude-man']
+# The build argv golden is path-INDEPENDENT (the Dockerfile + context are absolute paths of the
+# checkout, which differ per machine/CI runner) — only the provider-owned token pair is pinned.
+BUILD_ARGV_SHAPE = ['docker', 'build', '-f', '<dockerfile>', '--build-arg', 'CLAUDE_VERSION=2.1.170',
+                    '-t', 'claude-man:node', '<context>']
 PROBE_ARGV = ['docker',
  'exec',
  'claude-man-demo',
@@ -322,7 +317,10 @@ class ByteIdentityTest(unittest.TestCase):
                          runner.build_create_argv(Project(slug="demo"), provider=agents.CLAUDE, **kw))
 
     def test_build_argv_byte_identical(self) -> None:
-        self.assertEqual(images.build_argv("node", "2.1.170"), BUILD_ARGV)
+        expected = [str(config.image_dockerfile("node")) if t == '<dockerfile>'
+                    else str(config.image_build_context()) if t == '<context>' else t
+                    for t in BUILD_ARGV_SHAPE]
+        self.assertEqual(images.build_argv("node", "2.1.170"), expected)
         self.assertIn(f"CLAUDE_VERSION={config.DEFAULT_CLAUDE_VERSION}", images.build_argv("base"))
 
     def test_probe_argv_byte_identical(self) -> None:
