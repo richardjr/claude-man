@@ -1,6 +1,6 @@
 """Agent providers (Phase 7a — docs/AGENTS.md): ``resolve(id)`` is the ONE way to reach a
-provider's policy data. Today the registry holds the ``claude`` provider only; ``Project.agent``
-(7b) selects per project, ``codex`` (7c) is the second entry.
+provider's policy data. Registry: ``claude`` (the reference, baked into the base image) and
+``codex`` (7c — installed via the tool registry); ``Project.agent`` selects per project.
 """
 
 from __future__ import annotations
@@ -8,10 +8,11 @@ from __future__ import annotations
 from .. import config
 from .base import PERMISSIONS, AgentEvent, AgentProvider, AuthSpec, ImageSpec, RunRequest, RunSpec, UpdateSpec
 from .claude import PROVIDER as CLAUDE
+from .codex import PROVIDER as CODEX
 
 DEFAULT_ID = CLAUDE.id
 
-PROVIDERS: dict[str, AgentProvider] = {CLAUDE.id: CLAUDE}
+PROVIDERS: dict[str, AgentProvider] = {CLAUDE.id: CLAUDE, CODEX.id: CODEX}
 
 DEFAULT: AgentProvider = CLAUDE
 
@@ -66,6 +67,6 @@ def is_forbidden_env_name(name: str) -> bool:
 
 
 __all__ = ["AgentProvider", "AuthSpec", "ImageSpec", "UpdateSpec", "RunSpec", "RunRequest",
-           "AgentEvent", "PERMISSIONS", "CLAUDE", "DEFAULT",
+           "AgentEvent", "PERMISSIONS", "CLAUDE", "CODEX", "DEFAULT",
            "DEFAULT_ID", "PROVIDERS", "resolve", "ids", "binaries", "config_dirs", "config_dir_envs",
            "credential_env_names", "is_forbidden_env_name"]

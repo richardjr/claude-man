@@ -1534,6 +1534,7 @@ def cmd_image_build(args) -> int:
 
 
 def cmd_image_smoke(args) -> int:
+    from . import lifecycle
     from .docker import smoke as smoke_mod
 
     if bool(args.overlay) == bool(args.project):
@@ -1544,7 +1545,8 @@ def cmd_image_smoke(args) -> int:
         if err:
             print(err, file=sys.stderr)
             return 1
-        result = smoke_mod.smoke(project.overlay, image=name, tools=project.tools)
+        result = smoke_mod.smoke(project.overlay, image=name, tools=lifecycle.image_tools(project),
+                                 provider=project.provider)
     else:
         result = smoke_mod.smoke(args.overlay)
     for line in result.lines:
@@ -1754,7 +1756,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("sync-repos", cmd_project_sync_repos, "git fetch each repo"),
         ("pull", cmd_project_pull, "fast-forward each repo (ff-only; skips dirty/diverged)"),
         ("shell", cmd_project_shell, "open a shell in a new terminal"),
-        ("claude", cmd_project_claude, "run claude in a new terminal"),
+        ("claude", cmd_project_claude, "run the project's agent (claude/codex) in a new terminal"),
+        ("agent", cmd_project_claude, "alias of `claude` — run the project's agent in a new terminal"),
         ("nvim", cmd_project_nvim, "open neovim in a new terminal"),
         ("run", cmd_project_run, "run ONE headless agent session (prompt → normalised event stream)"),
         ("lock", cmd_project_lock, "switch to strict egress (allowlist proxy; recreates)"),

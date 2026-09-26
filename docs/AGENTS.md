@@ -29,8 +29,17 @@ model) → `RunSpec.argv`, and `RunSpec.parse` normalising the provider stream t
 (`agents/run.py`: claude stream-json + codex exec JSONL, both pinned by real captured fixtures);
 `lifecycle.run` streams a `docker exec -i` session (one-agent guard, timeout, `RunOutcome` with the
 final text/session/usage); `project run` + the TUI Run prompt… modal. Verified live: a claude
-session with a Bash tool call ran as uid 1000 in a hardened container. Tracking:
-[`ROADMAP.md`](../ROADMAP.md) Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
+session with a Bash tool call ran as uid 1000 in a hardened container. **7c (same day):**
+`agents/codex.py` — the second provider, registered; installed through the approved-tool registry
+(`library/tools/codex/tool.toml`: the full `codex-package` tar.gz as a bundle with `tree = "."`,
+both bins symlinked, `version_label = "codex-version"` stamped on the layer) and pulled into a
+codex project's image automatically via `ImageSpec.tools` (`lifecycle.image_tools` = the operator's
+selection + the provider's); the version is read off the resolved image; `updates=None` short-circuits
+the channel check; `config_seed` writes `config.toml` (sandbox off + file credential store) if
+absent; `syncback=False` gates the baseline / pending note / `sync plan|review` off until 7d; `image
+smoke --project` runs the codex probes with the provider's env; `project agent` aliases `project
+claude`; the `--model` pin argv is claude-only at spawn. Tracking: [`ROADMAP.md`](../ROADMAP.md)
+Phase 7. **Amended 2026-09-26 by [`V2-PLAN.md`](V2-PLAN.md) §4–5:** both auth
 modes per provider (`AuthSpec` as data, provider-scoped profiles, a per-provider `forbidden_env` scrub),
 a new **headless-run seam** (`RunSpec` → normalised `AgentEvent` stream; `project run`), a third
 provider, and the PR breakdown. Phase 7 is the first stage of the v2 (agentry) line. The goal is a seam that lets claude-man run a *different*

@@ -1,0 +1,51 @@
+# OpenAI Codex CLI — the `codex` agent provider's binary (docs/AGENTS.md § Codex). A project with
+# `agent = "codex"` pulls this entry in AUTOMATICALLY (the provider's ImageSpec.tools); it is also
+# selectable on a claude project that wants `codex` available as a second tool (one agent per
+# container still applies — only the project's agent gets launched/guarded).
+#
+# The artefact is the FULL `codex-package` tarball (static musl; the only asset with a
+# codex-package_SHA256SUMS entry + a sigstore bundle), NOT the single `codex` binary: Codex 0.157's
+# shell tool runs through a sibling `codex-code-mode-host` binary looked up next to the executable,
+# and without it every command fails "Code Mode is unavailable" (the 2026-09-26 spike). The tree
+# root IS the package (bin/, codex-resources/{bwrap,zsh,voice}, codex-path/rg), so `tree = "."`.
+# The bundled bubblewrap sandbox cannot create namespaces under the hardened floor (cap-drop ALL);
+# the provider seeds `sandbox_mode = "danger-full-access"` — our container IS the sandbox.
+# To bump: the latest rust-vX.Y.Z tag on github.com/openai/codex, `codex-package_SHA256SUMS`.
+description = "OpenAI Codex CLI (codex) — the codex agent provider's full package"
+kind = "release"
+version = "0.157.1"
+install = "bundle"
+tree = "."
+bins = ["bin/codex", "bin/codex-code-mode-host"]
+version_label = "codex-version"
+note = "pulled in automatically by agent = \"codex\"; needs a ChatGPT login or an OpenAI API key"
+# Runtime egress (strict mode): device-code auth + token refresh, the Responses API, ChatGPT.
+allowlist = [".openai.com", ".chatgpt.com"]
+
+[release.amd64]
+url = "https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-package-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "0e211868c9fd73cb49ad35ac675b5eafdf6b9f453df8a493df980c59a590fe5f"
+
+[release.arm64]
+url = "https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-package-aarch64-unknown-linux-musl.tar.gz"
+sha256 = "499fe70d70f4e4904b6a5a4ec1b1edf6c4a1a47a075ea7e2ec2b5262ba47b471"
+
+# No [env]: CODEX_HOME (the config bind) is provider plumbing injected by the runner, never a tool
+# env (the registry rejects it as reserved). Probes are OFFLINE — auth + egress are exercised by the
+# live `project run` path, not the image gate.
+[[smoke]]
+name = "codex --version"
+argv = ["codex", "--version"]
+expect = "codex-cli 0.157.1"
+
+[[smoke]]
+name = "code-mode host beside the binary (the shell tool's runtime)"
+argv = ["sh", "-lc", "test -x /opt/codex/bin/codex-code-mode-host && test -x /usr/local/bin/codex-code-mode-host && echo ok"]
+expect = "ok"
+
+# CORE op under the floor: `codex login status` opens the config dir (sqlite state) and must report
+# unauthenticated cleanly (rc 1) rather than EROFS/panic — the bind at CODEX_HOME takes the writes.
+[[smoke]]
+name = "codex login status runs under the floor (unauthenticated)"
+argv = ["sh", "-lc", "out=$(codex login status 2>&1); echo \"$out\" | grep -q 'Not logged in' && echo ok"]
+expect = "ok"

@@ -360,10 +360,11 @@ class ClaudeProviderTest(unittest.TestCase):
     def test_registry(self) -> None:
         self.assertIs(agents.resolve(), agents.CLAUDE)
         self.assertIs(agents.resolve("claude"), agents.CLAUDE)
-        self.assertEqual(agents.ids(), ("claude",))
+        self.assertIs(agents.resolve("codex"), agents.CODEX)
+        self.assertEqual(agents.ids(), ("claude", "codex"))
         self.assertEqual(agents.DEFAULT_ID, "claude")
         with self.assertRaises(KeyError):
-            agents.resolve("codex")   # 7c
+            agents.resolve("gemini")
 
     def test_claude_values_match_the_constants(self) -> None:
         p = agents.CLAUDE
@@ -378,9 +379,9 @@ class ClaudeProviderTest(unittest.TestCase):
         self.assertEqual(p.image.default_version, config.DEFAULT_CLAUDE_VERSION)
 
     def test_derived_sets(self) -> None:
-        self.assertEqual(agents.binaries(), frozenset({"claude"}))
-        self.assertEqual(agents.config_dirs(), ("/home/agent/.claude",))
-        self.assertEqual(agents.config_dir_envs(), frozenset({"CLAUDE_CONFIG_DIR"}))
+        self.assertEqual(agents.binaries(), frozenset({"claude", "codex"}))
+        self.assertEqual(agents.config_dirs(), ("/home/agent/.claude", "/home/agent/.codex"))
+        self.assertEqual(agents.config_dir_envs(), frozenset({"CLAUDE_CONFIG_DIR", "CODEX_HOME"}))
 
     def test_baked_env_pointer_follows_home(self) -> None:
         env = list(runner._baked_env(agents.CLAUDE).items())
@@ -501,9 +502,10 @@ class ProjectAgentFieldTest(unittest.TestCase):
 
     def test_unknown_agent_rejected(self) -> None:
         with self.assertRaises(ValidationError):
-            Project(slug="demo", agent="codex")     # 7c registers it; until then it is invalid
+            Project(slug="demo", agent="gemini")
         with self.assertRaises(ValidationError):
             Profile(name="work", agent="gemini")
+        self.assertIs(Project(slug="demo", agent="codex").provider, agents.CODEX)
 
     def test_profile_default_is_claude(self) -> None:
         self.assertEqual(Profile(name="work").agent, "claude")
@@ -518,8 +520,11 @@ class ProjectAgentFieldTest(unittest.TestCase):
             ppath = profiles_registry.save(Profile(name="work"))
             self.assertNotIn("agent =", ppath.read_text())     # ("agents/" in seed.include is not it)
             self.assertEqual(profiles_registry.load("work").agent, "claude")
-            # An explicit non-default agent id in the TOML is rejected at load until 7c registers it
+            # A non-default agent id round-trips; an unregistered one is rejected at load
             path.write_text(path.read_text().replace('slug = "demo"', 'slug = "demo"\nagent = "codex"'))
+            self.assertEqual(projects_registry.load("demo").agent, "codex")
+            self.assertIn('agent = "codex"', projects_registry.save(projects_registry.load("demo")).read_text())
+            path.write_text(path.read_text().replace('agent = "codex"', 'agent = "gemini"'))
             with self.assertRaises(ValidationError):
                 projects_registry.load("demo")
 
@@ -551,8 +556,9 @@ class ProjectAgentFieldTest(unittest.TestCase):
         ns = parser.parse_args(["project", "create", "demo", "--agent", "claude"])
         self.assertEqual(ns.agent, "claude")
         self.assertIsNone(parser.parse_args(["project", "create", "demo"]).agent)
+        self.assertEqual(parser.parse_args(["project", "create", "demo", "--agent", "codex"]).agent, "codex")
         with self.assertRaises(SystemExit):
-            parser.parse_args(["project", "create", "demo", "--agent", "codex"])
+            parser.parse_args(["project", "create", "demo", "--agent", "gemini"])
 
     def test_terminals_provider_for_fails_open(self) -> None:
         with mock.patch.object(terminals.projects, "load", side_effect=FileNotFoundError):
@@ -908,3 +914,206 @@ class LifecycleRunTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["project", "run", "demo", "x", "--permission", "yolo"])
 
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 7c — the codex provider: installed via the tool registry (tar.gz bundle, version label),
+# config seed, no sync-back yet, the wiring through image resolution / update / smoke / spawn
+# ---------------------------------------------------------------------------
+from claudeman.docker import smoke as smoke_mod  # noqa: E402
+from claudeman.tools import render as tools_render  # noqa: E402
+
+TAR_BUNDLE_TOOL = """
+description = "Fake tar bundle"
+kind = "release"
+version = "1.2.3"
+install = "bundle"
+tree = "."
+bins = ["bin/fake", "bin/fake-host"]
+version_label = "fake-version"
+[release.amd64]
+url = "https://example.com/fake-x86_64.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+[release.arm64]
+url = "https://example.com/fake-aarch64.tar.gz"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+[[smoke]]
+name = "fake --version"
+argv = ["fake", "--version"]
+"""
+
+
+class CodexProviderTest(unittest.TestCase):
+    def test_values(self) -> None:
+        c = agents.CODEX
+        self.assertEqual((c.binary, c.proc_comm, c.config_dir, c.config_dir_env),
+                         ("codex", "codex", "/home/agent/.codex", "CODEX_HOME"))
+        self.assertEqual(c.auth.token_env, "OPENAI_API_KEY")
+        self.assertIn("CODEX_API_KEY", c.auth.scrub_env)
+        self.assertEqual((c.auth.credential_file, c.auth.identity_file, c.auth.token_kind),
+                         ("auth.json", "", "api-key"))
+        self.assertIn("--device-auth", c.auth.login_hint)
+        self.assertEqual(c.image.tools, ("codex",))
+        self.assertEqual(c.image.version_label, "codex-version")
+        self.assertIsNone(c.updates)
+        self.assertFalse(c.syncback)
+        self.assertIn(".openai.com", c.required_hosts)
+        assert c.run is not None
+        self.assertIs(c.run.parse, run_mod.codex_parse)
+        self.assertEqual(c.config_seed[0][0], "config.toml")
+        self.assertIn('sandbox_mode = "danger-full-access"', c.config_seed[0][1])
+        self.assertIn('cli_auth_credentials_store = "file"', c.config_seed[0][1])
+
+    def test_invariant_9_now_covers_openai_keys(self) -> None:
+        self.assertTrue(agents.is_forbidden_env_name("OPENAI_API_KEY"))
+        self.assertTrue(agents.is_forbidden_env_name("codex_api_key"))
+        with self.assertRaises(ValidationError):
+            Project(slug="demo", env={"OPENAI_API_KEY": "sk-x"})
+        with self.assertRaises(ValidationError):
+            EnvMount(kind="file", src="/h/auth.json", dst="/home/agent/.codex/auth.json")
+        self.assertTrue(runner._is_scrubbed("OPENAI_API_KEY", agents.CLAUDE))
+        self.assertTrue(runner._is_scrubbed("CLAUDE_CODE_OAUTH_TOKEN", agents.CODEX))
+
+    def test_create_argv_for_a_codex_project(self) -> None:
+        p = Project(slug="cx", agent="codex")
+        argv = runner.build_create_argv(p, profile_name="oa", created_iso="c", claude_config_path="/c",
+                                        workspace_path="/w", provider=p.provider)
+        self.assertIn("CODEX_HOME=/home/agent/.codex", argv)
+        self.assertIn("/c:/home/agent/.codex", argv)
+        self.assertEqual(argv[argv.index("-e") + 1], "HOME=/home/agent")
+        self.assertIn("OPENAI_API_KEY", argv)              # token mode: pass-through name only
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", argv)
+        self.assertNotIn("CLAUDE_CONFIG_DIR=/home/agent/.claude", argv)
+        self.assertEqual(argv[argv.index("--label") + 1], "claude-man.slug=cx")
+        self.assertIn("claude-man.agent=codex", argv)
+        # the floor is byte-identical between the two providers (only provider tokens differ)
+        base = runner.build_create_argv(Project(slug="cx"), profile_name="oa", created_iso="c",
+                                        claude_config_path="/c", workspace_path="/w")
+        self.assertEqual([a for a in argv if a.startswith("--")], [a for a in base if a.startswith("--")])
+
+    def test_image_tools_union_and_allowlist(self) -> None:
+        self.assertEqual(lifecycle.image_tools(Project(slug="cx", agent="codex")), ("codex",))
+        self.assertEqual(lifecycle.image_tools(Project(slug="cx", agent="codex", tools=("jq", "codex"))),
+                         ("jq", "codex"))
+        self.assertEqual(lifecycle.image_tools(Project(slug="cl", tools=("jq",))), ("jq",))
+        al = allowlist.build_allowlist((), provider=agents.CODEX)
+        self.assertIn(".openai.com", al)
+        self.assertNotIn("claude.ai", al)
+        self.assertIn("registry.npmjs.org", al)          # the neutral toolchain set is shared
+
+    def test_resolve_image_materializes_the_codex_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": tmp + "/cfg",
+                                             "CLAUDE_MAN_STATE_HOME": tmp + "/state"}):
+            name, err = lifecycle.resolve_image(Project(slug="cx", agent="codex"))
+            self.assertEqual(err, "")
+            self.assertTrue(name.startswith("base-t-"), name)
+            df = config.tools_dockerfile_path(name).read_text()
+            self.assertIn("FROM claude-man:base", df)
+            self.assertIn("codex-package-x86_64-unknown-linux-musl.tar.gz", df)
+            self.assertIn("tar -xzf", df)
+            self.assertIn('cp -a "/tmp/claude-man-tool-codex.x/." /opt/codex', df.replace("\\\n", ""))
+            self.assertIn('claude-man.codex-version="0.157.1"', df)
+            self.assertIn("/usr/local/bin/codex-code-mode-host", df)
+            self.assertNotIn("unzip", df)
+            # a plain claude project on base still resolves to the overlay itself
+            self.assertEqual(lifecycle.resolve_image(Project(slug="cl")), ("base", ""))
+
+    def test_update_check_skips_a_provider_without_a_channel(self) -> None:
+        with mock.patch.object(lifecycle.settings_registry, "load",
+                               return_value=mock.Mock(image_update_check=True)):
+            chk = lifecycle.check_update(Project(slug="cx", agent="codex"))
+        self.assertFalse(chk.prompt)
+        self.assertEqual(chk.build_to, "")
+        self.assertIn("pinned by its tool entry", chk.note)
+
+    def test_seed_writes_config_seed_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": tmp + "/cfg",
+                                             "CLAUDE_MAN_STATE_HOME": tmp + "/state"}):
+            cfg = seed_mod.seed_project_config(Project(slug="cx", agent="codex"), Profile(name="oa", agent="codex"))
+            conf = cfg / "config.toml"
+            self.assertIn("danger-full-access", conf.read_text())
+            self.assertFalse((cfg / ".claude.json").exists())
+            self.assertFalse((cfg / "settings.json").exists())   # no claude profile-seed copy
+            conf.write_text("model = \"o3\"\n")                       # operator edit survives a re-seed
+            seed_mod.seed_project_config(Project(slug="cx", agent="codex"), None, overwrite_identity=True)
+            self.assertEqual(conf.read_text(), "model = \"o3\"\n")
+
+    def test_syncback_gated_off_for_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLAUDE_MAN_CONFIG_HOME": tmp + "/cfg",
+                                             "CLAUDE_MAN_STATE_HOME": tmp + "/state"}):
+            projects_registry.save(Project(slug="cx", agent="codex"))
+            self.assertEqual(lifecycle.sync_plan("cx").changes, ())
+            res = lifecycle.sync_apply("cx", {})
+            self.assertFalse(res.ok)
+            self.assertIn("no sync-back policy", res.detail)
+            self.assertEqual(lifecycle._pending_syncback_note("cx"), "")
+            lifecycle._write_baseline_if_absent("cx")
+            self.assertFalse(config.baseline_path("cx").exists())
+
+    def test_spawn_passes_no_claude_model_pin_to_codex(self) -> None:
+        spawned: list[tuple] = []
+        with mock.patch.object(terminals, "spawn", lambda slug, program, **kw: spawned.append((program, kw.get("args")))), \
+                mock.patch.object(terminals, "claude_already_running", lambda slug, **kw: False), \
+                mock.patch.object(terminals, "launch_workdir", lambda slug: "/workspace"), \
+                mock.patch.object(terminals, "claude_model_args", lambda slug: ("--model", "opus")):
+            terminals.spawn_claude("cx", provider=agents.CODEX)
+            terminals.spawn_claude("cl", provider=agents.CLAUDE)
+        self.assertEqual(spawned, [("codex", ()), ("claude", ("--model", "opus"))])
+        self.assertEqual(terminals.build_claude_probe_argv("cx", provider=agents.CODEX)[-1].count("= codex"), 1)
+
+    def test_smoke_signature_takes_provider(self) -> None:
+        import inspect
+        self.assertIn("provider", inspect.signature(smoke_mod.smoke).parameters)
+
+
+class TarBundleToolTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _mk(self, name: str, text: str) -> None:
+        d = self.root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "tool.toml").write_text(text)
+
+    def test_parses_tar_bundle_with_root_tree_and_version_label(self) -> None:
+        self._mk("fake", TAR_BUNDLE_TOOL)
+        t = tools_library.discover(self.root)["fake"]
+        self.assertEqual((t.install, t.tree, t.bins), ("bundle", ".", ("bin/fake", "bin/fake-host")))
+        self.assertEqual(t.archive_kind, "tar")
+        self.assertEqual(t.version_label, "fake-version")
+        self.assertEqual(t.build_deps, ())                 # tar needs no unzip
+        df = tools_render.render_dockerfile("base", (t,))
+        self.assertIn("tar -xzf", df)
+        self.assertNotIn("unzip", df)
+        self.assertIn("mkdir -p /opt/fake", df)
+        self.assertIn('/opt/fake/bin/fake-host" "/usr/local/bin/fake-host"', df)
+        self.assertIn('claude-man.fake-version="1.2.3"', df)
+
+    def test_validation(self) -> None:
+        for bad, msg in (
+            (TAR_BUNDLE_TOOL.replace("fake-x86_64.tar.gz", "fake-x86_64.zip"), "must all be zips or all tar.gz"),
+            (TAR_BUNDLE_TOOL.replace(".tar.gz", ".zip"), 'build_deps = ["unzip"]'),
+            (TAR_BUNDLE_TOOL.replace('version_label = "fake-version"', 'version_label = "Bad Label"'),
+             "version_label"),
+            (TAR_BUNDLE_TOOL.replace('tree = "."', 'tree = ".."'), "needs a valid archive `tree`"),
+        ):
+            self._mk("x", bad)
+            with self.assertRaises(tools_library.LibraryError, msg=msg) as ctx:
+                tools_library.discover(self.root)
+            self.assertIn(msg, str(ctx.exception))
+
+    def test_shipped_codex_entry(self) -> None:
+        lib = tools_library.discover()
+        codex = lib["codex"]
+        self.assertEqual(codex.version, agents.CODEX.image.default_version)
+        self.assertEqual(codex.version_label, agents.CODEX.image.version_label)
+        self.assertEqual(codex.archive_kind, "tar")
+        self.assertEqual([t.name for t in tools_library.resolve(("codex",), lib)], ["codex"])
+        self.assertTrue(all(len(r.sha256) == 64 for r in codex.release.values()))
+        self.assertTrue(set(agents.CODEX.required_hosts) <= set(codex.allowlist) | set(agents.CODEX.required_hosts))

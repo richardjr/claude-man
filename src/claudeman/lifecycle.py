@@ -269,16 +269,25 @@ def _has_ssh_mount(project: Project) -> bool:
     return any(m.kind == "ssh" for m in project.env_mount)
 
 
+def image_tools(project: Project) -> tuple[str, ...]:
+    """PURE: the tool selection a project's image bakes — its ``tools`` plus the provider's own
+    ``image.tools`` (order-preserving, deduped)."""
+    return tuple(dict.fromkeys((*project.tools, *project.provider.image.tools)))
+
+
 def resolve_image(project: Project) -> tuple[str, str]:
     """The image NAME a project's container runs on: its overlay, or — with a ``tools`` selection —
     the content-addressed tools-layer name (docs/TOOLS.md), whose Dockerfile is rendered + written
     to the state tier here so the build chain can reach it. Returns ``(name, error)``; ``error``
     is set (and ``name`` empty) when the selection names a tool the registry no longer has — an
     image must never be built with a selected tool silently missing."""
-    if not project.tools:
+    # The provider's own install (codex = the `codex` registry entry) rides the SAME tools layer as
+    # the operator's selection — implicit, never something the operator has to select.
+    selection = image_tools(project)
+    if not selection:
         return project.overlay, ""
     try:
-        return tools_render.materialize(project.overlay, project.tools), ""
+        return tools_render.materialize(project.overlay, selection), ""
     except (tools_library.LibraryError, OSError) as exc:
         return "", (f"{project.slug}: cannot render the tools layer: {exc} — fix the selection "
                     f"(`claudemanctl project tools rm {project.slug} <name>`)")
@@ -344,7 +353,9 @@ def ensure_created(project: Project, *, on_progress: ProgressFn | None = None) -
                 if m.kind == "env" and not m.error and m.name in stored}
     # Stamp the container's version label with the image's ACTUAL baked claude (the source of truth),
     # not the build-time DEFAULT — so the Version column stays truthful after an on-start image rebuild.
-    version = (images.image_claude_version(project.overlay, provider=provider)
+    # Read the version off the RESOLVED image (a codex project's version label lives on its tools
+    # layer; claude's overlays/layers inherit the base label, so this is equivalent for claude).
+    version = (images.image_claude_version(image_name, provider=provider)
                or provider.image.default_version)
     settings = settings_registry.load()
     # Persistent shell history (opt-in; default off keeps the hardened floor byte-identical). When on,
@@ -447,6 +458,10 @@ def check_update(project: Project) -> UpdateCheck:
     if not settings.image_update_check:
         return UpdateCheck(note="update check disabled")
     provider = project.provider
+    if provider.updates is None:
+        # No release pointer (codex: pinned by its registry entry) — the claude channel/pin settings
+        # must not be applied to it. Fail open: start on the existing image.
+        return UpdateCheck(note=f"{provider.id}: version pinned by its tool entry (no channel check)")
     current = images.image_claude_version(project.overlay, provider=provider) or ""
     # Resolve the target: a per-project pin wins, then the global pin, else the tracked channel.
     pin = (project.claude_version or settings.claude_version_pin or "").strip()
@@ -734,6 +749,8 @@ def _write_baseline_if_absent(slug: str, *, on_progress: ProgressFn | None = Non
     refreshed only after a successful merge. Best-effort — never raises (a baseline fault must never
     block a container start)."""
     try:
+        if not projects_registry.load(slug).provider.syncback:
+            return   # no sync-back policy for this provider (codex until 7d) — never a partial sync
         if config.baseline_path(slug).exists():
             return
         syncback_baseline.write_baseline(slug)
@@ -751,6 +768,8 @@ def _pending_syncback_note(slug: str) -> str:
     SYNC-2), so claude never auto-syncs config out; this stop-time nudge is the only prompt the
     operator gets to review what the agent changed."""
     try:
+        if not projects_registry.load(slug).provider.syncback:
+            return ""
         n = len(syncback_detect.detect_changes(slug))
     except Exception:  # noqa: BLE001 - a detect fault must not make a stop look failed
         return ""
@@ -781,8 +800,8 @@ def sync_plan(slug: str) -> SyncPlan:
 
     Read-only EXCEPT for writing a fresh baseline when none exists yet (the documented no-baseline
     degradation in ``detect.detect_changes``)."""
-    if not projects_registry.exists(slug):
-        return SyncPlan(slug, ())
+    if not projects_registry.exists(slug) or not projects_registry.load(slug).provider.syncback:
+        return SyncPlan(slug, ())   # no policy for this provider → nothing is ever offered
     rows = [
         SyncChange(c, tuple(syncback_diff.change_diff(slug, c)))
         for c in syncback_detect.detect_changes(slug)
@@ -796,6 +815,10 @@ def sync_apply(slug: str, decisions: dict[str, str]) -> Result:
     ``decisions`` maps a change label (``artifact/unit``) → ``accept`` / ``reject`` / ``skip``."""
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
+    project = projects_registry.load(slug)
+    if not project.provider.syncback:
+        return Result(False, f"{slug}: {project.provider.display_name} has no sync-back policy yet "
+                             f"(docs/AGENTS.md 7d) — nothing is synced back for it")
     try:
         rep = syncback_merge.apply_accepted(slug, decisions)
     except Exception as exc:  # noqa: BLE001 - surface as a red Result, never crash the caller

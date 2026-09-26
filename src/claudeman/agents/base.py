@@ -60,6 +60,9 @@ class ImageSpec:
     version_build_arg: str
     version_label: str
     default_version: str
+    tools: tuple[str, ...] = ()   # approved-tool registry entries that INSTALL this agent — pulled
+    #                               into every project of this agent automatically (codex: ("codex",));
+    #                               () = baked into the base image (claude)
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,12 @@ class AgentProvider:
     updates: UpdateSpec | None    # None -> the provider has no release-pointer update check
     required_hosts: tuple[str, ...]   # squid dstdomains a LOCKED container must always allow
     run: RunSpec | None = None    # the headless-run seam (7-run); None -> no non-interactive mode
+    config_seed: tuple[tuple[str, str], ...] = ()   # (relpath, content) files written into the config
+    #                               bind at seed time IF ABSENT (codex: config.toml with the sandbox
+    #                               off + file credential store); never overwrites operator edits
+    syncback: bool = True         # False -> no sync-back for this provider (no reviewed denylist /
+    #                               policy yet — codex until 7d): no baseline, no pending note,
+    #                               `sync plan/review` refused. Never a silent partial sync
 
     def __post_init__(self) -> None:
         if not _ID_RE.match(self.id):

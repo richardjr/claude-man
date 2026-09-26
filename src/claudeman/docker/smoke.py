@@ -20,6 +20,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .. import agents, config
+from ..agents import AgentProvider
 from ..registry import profiles as profiles_registry
 from ..registry.schema import Project
 from ..tools import library as tools_library
@@ -52,7 +53,7 @@ class SmokeResult:
     lines: list[str] = field(default_factory=list)
 
 
-def _base_probes() -> list[Probe]:
+def _base_probes(provider: AgentProvider = agents.DEFAULT) -> list[Probe]:
     return [
         # claude must resolve AND execute as the agent user (catches IMG-1: the binary
         # stranded under root-only /root, unreachable by uid 1000).
@@ -62,8 +63,10 @@ def _base_probes() -> list[Probe]:
         # ripgrep must be the apt binary on the read-only path, not an extracted temp copy.
         Probe("ripgrep is /usr/bin/rg", ["sh", "-lc", "command -v rg"], required=True,
               expect="/usr/bin/rg"),
-        # writable surfaces actually accept writes (the .claude bind + the state tmpfs).
-        Probe("writable .claude bind", ["sh", "-lc", "touch /home/agent/.claude/.smoke && echo ok"],
+        # writable surfaces actually accept writes (the agent's config bind + the state tmpfs) —
+        # the bind is the PROVIDER's config dir (~/.claude for claude, ~/.codex for codex).
+        Probe(f"writable {provider.config_dir.rsplit('/', 1)[-1]} bind",
+              ["sh", "-lc", f"touch {provider.config_dir}/.smoke && echo ok"],
               required=True, expect="ok"),
         # the .cache tmpfs must be agent-WRITABLE (XDG_CACHE_HOME + claude's XDG_STATE_HOME live here,
         # and node/corepack mkdir ~/.cache/node) — a root:root 755 tmpfs fails this with EACCES.
@@ -249,7 +252,8 @@ def _resolve_token() -> str | None:
     return token or None
 
 
-def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = ()) -> SmokeResult:
+def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = (),
+          provider: AgentProvider = agents.DEFAULT) -> SmokeResult:
     """Create a throwaway hardened container from ``claude-man:<overlay>`` and probe it.
 
     For a project's tools-layer image pass ``image`` (its ``<overlay>-t-<hex>`` name) + ``tools``
@@ -274,11 +278,11 @@ def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = ()) -> Smok
         return res
 
     slug = f"smoke-{name}"
-    project = Project(slug=slug, overlay=overlay, tools=tools)
+    project = Project(slug=slug, overlay=overlay, tools=tools, agent=provider.id)
     container = project.container
-    token = _resolve_token()
+    token = _resolve_token() if provider is agents.CLAUDE else None
 
-    probes = _base_probes() + _overlay_probes(overlay) + tool_probes
+    probes = _base_probes(provider) + _overlay_probes(overlay) + tool_probes
     if token:
         probes.append(Probe("one-shot claude -p (auth+egress)",
                             ["claude", "-p", "reply with the single word ok"],
@@ -292,7 +296,7 @@ def smoke(overlay: str, *, image: str = "", tools: tuple[str, ...] = ()) -> Smok
         argv = runner.build_create_argv(
             project, profile_name="smoke", created_iso="smoke",
             claude_config_path=cfg_dir, workspace_path=ws_dir,
-            inject_token=bool(token), image=tag,
+            inject_token=bool(token), image=tag, provider=provider,
         )
         env = dict(os.environ)
         for key in (*config.SCRUBBED_ENV_KEYS, *agents.credential_env_names()):

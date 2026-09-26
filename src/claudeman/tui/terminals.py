@@ -592,7 +592,8 @@ def spawn_claude(slug: str, *, provider: AgentProvider | None = None) -> SpawnHa
             f"{provider.binary} is already running in {slug!r} — one agent per container (a second "
             f"races on its config/session writes). Use the existing window, or open a shell instead."
         )
-    return spawn(slug, provider.binary, workdir=launch_workdir(slug), args=claude_model_args(slug))
+    args = claude_model_args(slug) if provider is agents.CLAUDE else ()   # `--model` is claude's flag shape
+    return spawn(slug, provider.binary, workdir=launch_workdir(slug), args=args)
 
 
 # ---------------------------------------------------------------------------

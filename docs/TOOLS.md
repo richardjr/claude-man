@@ -77,7 +77,9 @@ timeout = 15
 Validation (`tools/library.py`, lint-tested against the shipped tree): names are slug-shaped;
 both arches are required; URLs are plain https with no shell metacharacters (they are quoted into
 a generated `RUN`); sha256 is 64 hex; tar members and a bundle's `tree`/`bins` can't escape (`..`/absolute) and carry
-no shell metacharacters; a bundle must list `unzip` in `build_deps`; `[env]` can't touch
+no shell metacharacters; a ZIP bundle must list `unzip` in `build_deps` (a tar.gz bundle needs
+nothing; all arches must be one kind); `tree = "."` means the archive root is the tree; an optional
+`version_label` (a release tool only) stamps `claude-man.<label>=<version>` on the layer; `[env]` can't touch
 `HOME`/`PATH`/`USER`/the claude config/XDG floor keys or any `FORBIDDEN_ENV_NAMES` (invariant 1),
 and its values are single-line strings (empty is allowed — set-but-empty, e.g. `AWS_PAGER = ""`);
 `requires` must resolve and be acyclic; two selected tools setting one env key differently is an
@@ -94,6 +96,7 @@ error (a silent last-wins would break a floor redirect).
 | aws-cli | `~/.aws/config`, `~/.aws/credentials` (credentials) | `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` → tmpfs — the terraform overlay's exact values, so the two coexist; env-var creds via a `kind="env"` env-mount preferred. No redirect exists for the STS role cache / SSO cache (`~/.aws/cli`, `~/.aws/sso`), so `aws sso login` / role-caching are unsupported. Plus `AWS_PAGER=""` (issue #41): on a TTY the CLI pages through `less`, which the image doesn't ship — empty disables the pager (pipe to `bat` for long output) |
 | k9s | `~/.config/k9s` (config, skins, per-context configs, screen dumps, benchmarks) | `K9S_CONFIG_DIR` → tmpfs (with it set, k9s puts every one of those under it; logs go to the `/tmp` tmpfs). Rides kubectl's `KUBECONFIG` via `requires` |
 | uv | caches, interpreters, tool venvs | already redirected by the baked `UV_*` env |
+| codex | `$CODEX_HOME` (sqlite state, `auth.json`, `config.toml`) | provider plumbing, not a tool `[env]`: the runner injects `CODEX_HOME=/home/agent/.codex` and binds the project's config dir there (docs/AGENTS.md § Codex). Pulled in automatically by `agent = "codex"` — the full `codex-package` tar.gz as a bundle (`tree = "."`, `bin/codex` + `bin/codex-code-mode-host` symlinked), `version_label = "codex-version"` stamped on the layer so the provider can read its version |
 | jq, python3, python3-yaml | nothing | — |
 
 The rule from CLAUDE.md applies to every new entry: **exercise the real workflow** under the floor

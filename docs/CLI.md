@@ -70,7 +70,15 @@ uv run claudemanctl profile add api  --console   # Anthropic Console (API billin
 # `--login-only` records the profile WITHOUT a token: the identity for projects that use
 # `--auth login`, where the credential is minted inside the container.
 uv run claudemanctl profile add oa --agent claude --login-only        # no token; for login-mode projects
-printenv OPENAI_API_KEY | uv run claudemanctl profile add oa --agent codex --stdin   # (7c) api-key kind
+printenv OPENAI_API_KEY | uv run claudemanctl profile add oa --agent codex --stdin   # api-key kind (API-billed)
+
+# A Codex project on a ChatGPT plan (login mode — docs/AGENTS.md § Codex):
+uv run claudemanctl profile add codex-home --agent codex --login-only   # identity only; no key
+uv run claudemanctl project create cx --agent codex --profile codex-home --auth login
+#   builds base → <overlay> → a tools layer carrying the pinned codex package (docs/TOOLS.md)
+uv run claudemanctl project shell cx                 # then, once, inside: codex login --device-auth
+uv run claudemanctl project agent cx                 # (= `project claude`) opens codex in a terminal
+uv run claudemanctl project run cx "summarise the repo"   # headless, same as a claude project
 ```
 
 `--sso`, `--login`, and `--console` all run `claude auth login` **before** `claude setup-token`,
