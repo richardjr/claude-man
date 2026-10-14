@@ -4,6 +4,8 @@ Pure: no docker, no network."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -78,10 +80,46 @@ AWS_PAGER = ""
 '''
 
 
+NPM_TOOL = """description = "mmdc"
+kind = "npm"
+package = "@scope/cli"
+version = "1.2.3"
+files = ["bin/run"]
+bins = ["bin/run"]
+[[smoke]]
+name = "v"
+argv = ["run", "--version"]
+"""
+
+
 def _mk(root: Path, name: str, text: str) -> None:
     d = root / name
     d.mkdir(parents=True)
     (d / library.TOOL_META).write_text(text)
+
+
+def _lock(deps: dict, entries: dict | None = None) -> dict:
+    """A lockfile-v3 shape for ``deps`` — every entry registry-resolved with a sha512 integrity."""
+    pk = {"": {"dependencies": deps}}
+    for dep, ver in deps.items():
+        pk[f"node_modules/{dep}"] = {"version": ver, "integrity": "sha512-x",
+                                     "resolved": f"{library.NPM_REGISTRY}{dep}/-/x-{ver}.tgz"}
+    pk.update(entries or {})
+    return {"name": "t", "lockfileVersion": 3, "requires": True, "packages": pk}
+
+
+def _mk_npm(root: Path, name: str = "mmdc", text: str = NPM_TOOL, manifest: dict | None = None,
+            lock: dict | None = None, launcher: bool = True) -> Path:
+    deps = {"@scope/cli": "1.2.3", "peer": "4.5.6"}
+    manifest = {"private": True, "dependencies": deps} if manifest is None else manifest
+    _mk(root, name, text)
+    d = root / name
+    (d / "package.json").write_text(json.dumps(manifest))
+    (d / "package-lock.json").write_text(json.dumps(_lock(deps) if lock is None else lock))
+    if launcher:
+        (d / "bin").mkdir()
+        (d / "bin" / "run").write_text("#!/bin/sh\nexec node_modules/.bin/cli \"$@\"\n")
+    return d
 
 
 class DiscoverTest(unittest.TestCase):
@@ -145,7 +183,7 @@ class DiscoverTest(unittest.TestCase):
         self._bad("x", BIN_TOOL.replace('bin = "kubectl"\n', 'bin = "kubectl"\ntree = "a"\n'),
                   "only valid for install")
         self._bad("x", BUNDLE_TOOL.replace("sha256 = ", 'members = ["a"]\nsha256 = '), "only valid for install")
-        self._bad("x", _apt('tree = "a"\n'), "only valid for kind")
+        self._bad("x", _apt('tree = "a"\n'), "not valid for kind")
 
     def test_validation_rejects_malformed_entries(self) -> None:
         self._bad("Bad Name", APT_TOOL, "invalid tool name")
@@ -153,7 +191,7 @@ class DiscoverTest(unittest.TestCase):
         self._bad("x", 'description = "d"\nkind = "snap"\n', "kind must be")
         self._bad("x", 'description = "d"\nkind = "apt"\n', "must list packages")
         self._bad("x", 'description = "d"\nkind = "apt"\npackages = ["jq; rm -rf /"]\n', "invalid apt package")
-        self._bad("x", 'description = "d"\nkind = "apt"\npackages = ["jq"]\nversion = "1"\n', "only valid for kind")
+        self._bad("x", 'description = "d"\nkind = "apt"\npackages = ["jq"]\nversion = "1"\n', "not valid for kind")
         self._bad("x", BIN_TOOL.replace('version = "1.37.0"\n', ""), "pin a version")
         self._bad("x", BIN_TOOL.replace('install = "binary"', 'install = "rpm"'), "install must be")
         self._bad("x", BIN_TOOL.replace('bin = "kubectl"\n', ""), "needs a valid `bin`")
@@ -173,6 +211,49 @@ class DiscoverTest(unittest.TestCase):
         self._bad("x", _apt('[env]\nK = "a\\nb"\n'), "single-line string")
         self._bad("x", APT_TOOL + '[[smoke]]\nname = "n"\nargv = []\n', "non-empty argv")
         self._bad("x", APT_TOOL + '[[smoke]]\nname = "n"\nargv = ["a"]\ntimeout = 0\n', "positive integer")
+
+    def test_parses_npm(self) -> None:
+        d = _mk_npm(self.root)
+        m = library.discover(self.root)["mmdc"]
+        self.assertEqual((m.kind, m.package, m.version, m.bins), ("npm", "@scope/cli", "1.2.3", ("bin/run",)))
+        self.assertEqual(m.summary, "npm 1.2.3")
+        # the manifests are always shipped, the declared extras after them; each with its sha256
+        self.assertEqual([rel for rel, _ in m.files], ["package.json", "package-lock.json", "bin/run"])
+        self.assertEqual(dict(m.files)["package-lock.json"],
+                         hashlib.sha256((d / "package-lock.json").read_bytes()).hexdigest())
+
+    def _bad_npm(self, msg: str, **kw) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            _mk_npm(Path(t), **kw)
+            with self.assertRaises(library.LibraryError, msg=msg) as ctx:
+                library.discover(Path(t))
+            self.assertIn(msg, str(ctx.exception))
+
+    def test_npm_validation(self) -> None:
+        deps = {"@scope/cli": "1.2.3", "peer": "4.5.6"}
+        self._bad_npm("exact x.y.z `version`", text=NPM_TOOL.replace('"1.2.3"', '"^1.2.3"'))
+        self._bad_npm("valid `package`", text=NPM_TOOL.replace('"@scope/cli"', '"Bad Name"'))
+        self._bad_npm("not valid for kind", text=NPM_TOOL.replace('kind = "npm"\n', 'kind = "npm"\ninstall = "tar"\n'))
+        self._bad_npm("needs `bins`", text=NPM_TOOL.replace('bins = ["bin/run"]\n', ""))
+        # a bin must be a shipped file or an npm-linked executable — never an arbitrary path
+        self._bad_npm("must be under node_modules/.bin/", text=NPM_TOOL.replace('bins = ["bin/run"]', 'bins = ["bin/other"]'))
+        self._bad_npm("missing or unsafe shipped file 'bin/run'", launcher=False)
+        self._bad_npm("unsafe shipped file", text=NPM_TOOL.replace('files = ["bin/run"]', 'files = ["../x"]'))
+        # package.json: exact pins only, the tool's own pin must match, no scripts/extra keys
+        self._bad_npm("exact x.y.z only", manifest={"dependencies": {**deps, "peer": "^4.5.6"}})
+        self._bad_npm("must pin @scope/cli = '1.2.3'", manifest={"dependencies": {**deps, "@scope/cli": "1.2.4"}})
+        self._bad_npm("only `private` + `dependencies`", manifest={"dependencies": deps, "scripts": {"x": "y"}})
+        # the lockfile must be in step with package.json and fully registry + sha512 pinned
+        self._bad_npm("stale vs package.json", lock=_lock({"@scope/cli": "1.2.3"}))
+        self._bad_npm("sha512 integrity", lock=_lock(deps, {"node_modules/x": {"version": "1.0.0",
+                      "resolved": "https://evil.example/x.tgz", "integrity": "sha512-x"}}))
+        self._bad_npm("sha512 integrity", lock=_lock(deps, {"node_modules/x": {"version": "1.0.0",
+                      "resolved": f"{library.NPM_REGISTRY}x/-/x-1.0.0.tgz", "integrity": "sha1-x"}}))
+        self._bad_npm("sha512 integrity", lock=_lock(deps, {"node_modules/x": {"link": True}}))
+        with tempfile.TemporaryDirectory() as t:
+            (_mk_npm(Path(t)) / "package-lock.json").write_text("{not json")
+            with self.assertRaises(library.LibraryError):
+                library.discover(Path(t))
 
     def test_requires_cycle_rejected(self) -> None:
         _mk(self.root, "a", _apt('requires = ["b"]\n'))
@@ -227,9 +308,28 @@ class RenderTest(unittest.TestCase):
         _mk(self.root, "ssm", BIN_TOOL.replace('install = "binary"\nbin = "kubectl"\n', 'install = "deb"\n')
             .replace('description = "kubectl"', 'description = "ssm"'))
         _mk(self.root, "aws-cli", BUNDLE_TOOL)
+        _mk_npm(self.root)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_npm_render(self) -> None:
+        name, text, _ = render.plan("base", ("mmdc", "kubectl"), root=self.root)
+        lib = library.discover(self.root)
+        # each shipped file COPYd to the same relative path under /opt/<name>, then its bytes re-verified
+        self.assertIn("COPY library/tools/mmdc/package-lock.json /opt/mmdc/package-lock.json\n", text)
+        self.assertIn("COPY library/tools/mmdc/bin/run /opt/mmdc/bin/run\n", text)
+        for rel, sha in lib["mmdc"].files:
+            self.assertIn(f"'{sha}' '{rel}'", text)
+        # lockfile-pinned install with NO package scripts run at build; the cache never ships
+        self.assertIn("npm ci --omit=dev --ignore-scripts --no-audit --no-fund --cache /tmp/claude-man-tool-mmdc.npm", text)
+        self.assertIn('ln -sfn "/opt/mmdc/bin/run" "/usr/local/bin/run"', text)
+        # npm tools install after the release tools (a release-installed runtime could serve them)
+        self.assertLess(text.index("kubectl 1.37.0 (release"), text.index("mmdc 1.2.3 (npm"))
+        # the lockfile's sha is in the text, so changing it is a new content-addressed tag
+        lock = self.root / "mmdc" / "package-lock.json"
+        lock.write_text(lock.read_text().replace('"t"', '"t2"'))
+        self.assertNotEqual(render.plan("base", ("mmdc", "kubectl"), root=self.root)[0], name)
 
     def test_dockerfile_shape(self) -> None:
         name, text, tools = render.plan("terraform", ("kubectl", "helm", "jq", "ssm", "aws-cli"),
@@ -353,6 +453,16 @@ class ShippedLibraryLintTest(unittest.TestCase):
         # k9s rides kubectl's KUBECONFIG redirect and keeps its own state off the read-only ~/.config
         self.assertEqual(lib["k9s"].requires, ("kubectl",))
         self.assertIn("K9S_CONFIG_DIR", lib["k9s"].env)
+        # mermaid (mmdr) rasterises PNG text, which needs a font the slim base doesn't have
+        self.assertEqual(lib["mermaid"].requires, ("fonts-dejavu",))
+        # mermaid-cli: the npm kind on the headless shell; Chromium has no usable sandbox under the
+        # floor, so the launcher must always hand mmdc the --no-sandbox puppeteer config
+        mmdc = lib["mermaid-cli"]
+        self.assertEqual((mmdc.kind, mmdc.requires), ("npm", ("chromium-headless-shell",)))
+        self.assertEqual(lib["chromium-headless-shell"].env["PUPPETEER_EXECUTABLE_PATH"],
+                         "/usr/bin/chromium-headless-shell")
+        self.assertIn("--no-sandbox", json.loads((mmdc.path / "puppeteer-config.json").read_text())["args"])
+        self.assertIn("-p /opt/mermaid-cli/puppeteer-config.json", (mmdc.path / "bin" / "mmdc").read_text())
 
 
 if __name__ == "__main__":

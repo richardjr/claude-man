@@ -1,0 +1,45 @@
+# Mermaid diagram renderer — `mmdr` (github.com/1jehuang/mermaid-rs-renderer, MIT): parses Mermaid
+# natively in Rust and renders SVG/PNG with NO browser, Node or Puppeteer — ~4 MB against the ~1 GB
+# of the official renderer (the `mermaid-cli` tool: mmdc driving headless Chromium). The trade: mmdr
+# is a re-implementation, so its layout differs from mermaid.js (what GitHub and mmdc render) — use
+# it to validate syntax + preview; select `mermaid-cli` when a committed render must be mermaid's
+# own. Covers 23 diagram types incl. flowchart/sequence/C4/architecture/block.
+# The sha256s are GitHub's release-asset digests, re-checked against the downloaded artefacts at pin
+# time. To bump: the latest tag on github.com/1jehuang/mermaid-rs-renderer, `gh release view -R
+# 1jehuang/mermaid-rs-renderer --json assets` for the two `*-unknown-linux-gnu.tar.gz` digests.
+description = "Mermaid diagram renderer (mmdr) — native, no browser"
+kind = "release"
+version = "0.3.1"
+install = "tar"
+requires = ["fonts-dejavu"]   # PNG text needs a font; the slim base has none
+note = "mmdr is a native re-implementation, not mermaid.js — output may differ from GitHub's render"
+
+[release.amd64]
+url = "https://github.com/1jehuang/mermaid-rs-renderer/releases/download/v0.3.1/mmdr-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "e1da47b758769bff21b82a480fad640a3b893a90fc0dc321551486f8b50c7200"
+members = ["mmdr"]
+
+[release.arm64]
+url = "https://github.com/1jehuang/mermaid-rs-renderer/releases/download/v0.3.1/mmdr-aarch64-unknown-linux-gnu.tar.gz"
+sha256 = "a74a121a2dd3bc8d30c17c954b3a036e7467a53b21532e889601a26cc6dc39d9"
+members = ["mmdr"]
+
+# No [env]: mmdr's only write is its font cache at $XDG_CACHE_HOME/mmdr (the `.cache` tmpfs —
+# already writable, ephemeral per session; it's only a speed cache). Output goes wherever -o points.
+[[smoke]]
+name = "mmdr renders a flowchart to SVG on stdout"
+argv = ["sh", "-lc", "echo 'flowchart LR; A-->B' | mmdr -e svg"]
+expect = "<svg"
+
+# CORE op under the floor: PNG rasterises text, so it needs a font (fonts-dejavu) and populates the
+# font cache — a .font entry only appears when a system font was found (no fonts = label-less PNG).
+[[smoke]]
+name = "mmdr rasterises a PNG with a font (cache on the .cache tmpfs)"
+argv = ["sh", "-lc", "echo 'flowchart LR; A-->B' | mmdr -i - -o /tmp/mmdr-smoke.png -e png && head -c 4 /tmp/mmdr-smoke.png | grep -q PNG && ls \"${XDG_CACHE_HOME:-$HOME/.cache}\"/mmdr/font-cache/*.font >/dev/null && echo ok"]
+expect = "ok"
+
+# The validation contract an agent relies on: a malformed diagram exits non-zero.
+[[smoke]]
+name = "mmdr rejects invalid syntax (non-zero exit)"
+argv = ["sh", "-lc", "echo 'flowchart LR; A-->' | mmdr -e svg >/dev/null 2>&1 || echo rejected"]
+expect = "rejected"

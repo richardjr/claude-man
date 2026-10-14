@@ -40,7 +40,7 @@ replaced by a **registry of approved tools**.
 
 ```toml
 description = "Kubernetes CLI (kubectl)"     # required
-kind = "release"                              # "apt" | "release"
+kind = "release"                              # "apt" | "release" | "npm"
 
 # kind = "apt": Debian trixie packages
 packages = ["postgresql-client"]
@@ -58,6 +58,12 @@ sha256 = "…64 hex…"
 [release.arm64]
 url = "…"
 sha256 = "…"
+
+# kind = "npm": a package pinned by the tool dir's committed package.json + package-lock.json
+# package = "@mermaid-js/mermaid-cli"
+# version = "11.17.0"                         # exact; must equal package.json's pin
+# files = ["bin/mmdc"]                        # extra tool-dir files shipped to /opt/<name>/ (the manifests are implicit)
+# bins = ["bin/mmdc"]                         # /opt/<name>-relative: a shipped file or node_modules/.bin/<x>
 
 requires = ["python3"]     # other registry tools pulled into the layer automatically
 build_deps = ["unzip"]     # apt packages needed only at build (purged after; required for a bundle)
@@ -85,6 +91,17 @@ and its values are single-line strings (empty is allowed — set-but-empty, e.g.
 `requires` must resolve and be acyclic; two selected tools setting one env key differently is an
 error (a silent last-wins would break a floor redirect).
 
+An **npm** tool carries its pin in the tool dir: `package.json` (only `private` + `dependencies`,
+exact `x.y.z` versions, the tool's own `package` at its `version`) and the `package-lock.json`
+generated from it (`npm install --package-lock-only --ignore-scripts` in the tool dir), which must
+be in step with `package.json` and resolve EVERY package from `registry.npmjs.org` with a `sha512`
+integrity — so the whole dependency tree is pinned and `npm ci` verifies every tarball. The
+renderer `COPY`s the manifests + `files` into `/opt/<name>/`, re-checks their sha256 (computed at
+discovery — the lockfile's hash is in the rendered text, so a lockfile change is a new
+content-addressed tag), then runs `npm ci --ignore-scripts` (no package code runs at build) on the
+base image's Node. npm tools install after the release tools. A `bins` entry is either a shipped
+launcher (`files`) or a `node_modules/.bin/` executable.
+
 ## Where writes go (the floor fixups the shipped entries carry)
 
 | Tool | Writes at use time | Redirect |
@@ -97,6 +114,10 @@ error (a silent last-wins would break a floor redirect).
 | k9s | `~/.config/k9s` (config, skins, per-context configs, screen dumps, benchmarks) | `K9S_CONFIG_DIR` → tmpfs (with it set, k9s puts every one of those under it; logs go to the `/tmp` tmpfs). Rides kubectl's `KUBECONFIG` via `requires` |
 | uv | caches, interpreters, tool venvs | already redirected by the baked `UV_*` env |
 | codex | `$CODEX_HOME` (sqlite state, `auth.json`, `config.toml`) | provider plumbing, not a tool `[env]`: the runner injects `CODEX_HOME=/home/agent/.codex` and binds the project's config dir there (docs/AGENTS.md § Codex). Pulled in automatically by `agent = "codex"` — the full `codex-package` tar.gz as a bundle (`tree = "."`, `bin/codex` + `bin/codex-code-mode-host` symlinked), `version_label = "codex-version"` stamped on the layer so the provider can read its version |
+| mermaid (`mmdr`) | its font cache, `$XDG_CACHE_HOME/mmdr/font-cache` | none needed — already the `.cache` tmpfs (an ephemeral speed cache). A native Rust re-implementation of Mermaid (no browser, ~4 MB); its layout differs from mermaid.js/GitHub/`mmdc`, so it's for validating syntax (a malformed diagram exits non-zero) + previewing — select `mermaid-cli` when a committed render must be mermaid's own. `mmdr -i doc.md -o <existing-dir>/ -e svg\|png` renders every ```` ```mermaid ```` block. `requires` fonts-dejavu |
+| mermaid-cli (`mmdc`) | puppeteer's temp browser profile; fontconfig's cache | none needed — the profile goes under `TMPDIR` (`/workspace/.tmp`, removed on exit), the font cache on the `.cache` tmpfs. The official renderer (mermaid.js in headless Chromium, ~1 GB with Chromium): the `npm` kind on the base image's Node 20 — hence the 11.x line (mermaid-cli 12 needs Node ≥ 22.13). `bin/mmdc` is a launcher adding the baked `--no-sandbox` puppeteer config to every call (a user `-p` replaces it — keep `--no-sandbox` in it). `requires` chromium-headless-shell |
+| chromium-headless-shell | temp profile under `TMPDIR`; fontconfig cache | none needed. The headless-only Chromium (~170 MB smaller than `chromium`, and no crashpad handler — the full build dies on the read-only `~/.config` with `chrome_crashpad_handler: --database is required`). Has NO usable sandbox under the floor (no setuid helper, no unprivileged userns), so it runs only with `--no-sandbox` — the container is the sandbox (codex's bubblewrap precedent); Debian's launcher takes no env flags, so consumers pass it. `PUPPETEER_EXECUTABLE_PATH` points puppeteer at it and `PUPPETEER_SKIP_DOWNLOAD` stops an in-container `npm i puppeteer` fetching Chrome onto the size-capped tmpfs. `requires` fonts-dejavu |
+| fonts-dejavu | nothing | — the slim base ships NO fonts, so rasterised text (mmdr's PNG) draws label-less boxes without it |
 | jq, python3, python3-yaml | nothing | — |
 
 The rule from CLAUDE.md applies to every new entry: **exercise the real workflow** under the floor
@@ -143,7 +164,7 @@ sidecar, so build URLs need no allowlist.
    directory (an embedded runtime + its libs, like the AWS CLI v2 bundle) → `bundle` — the tree
    lands whole under `/opt/<name>` and its `bins` are symlinked into `/usr/local/bin`, so the
    executables still find their sibling files (never `tar`/`unzip` single members out of such a
-   tree).
+   tree); an npm package → `kind = "npm"` with the committed `package.json` + lockfile (above).
 2. `uv run python -m unittest tests.test_tools_library` — the lint.
 3. Build + smoke it on a project (or a throwaway selection) and confirm no `EROFS`/`Permission
    denied` marker — the smoke fails any probe whose output carries one.

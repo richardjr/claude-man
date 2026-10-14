@@ -11,3 +11,5 @@
 build/
 dist/
 *.egg-info/
+# a stray `npm install` in an npm tool's dir — the render COPYs only its declared files
+library/tools/*/node_modules/
