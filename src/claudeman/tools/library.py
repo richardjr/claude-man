@@ -13,7 +13,13 @@ directory carrying a ``tool.toml`` that says HOW it is installed under the harde
   may be nested like ``bin/codex``) symlinked into ``/usr/local/bin`` by basename; a zip needs
   ``unzip`` in ``build_deps``, a tar.gz needs nothing). An optional ``version_label`` stamps
   ``<LABEL_PREFIX>.<version_label>=<version>`` on the layer — how an agent PROVIDER installed as
-  a tool (codex) exposes its version to ``images.image_claude_version``;
+  a tool (codex) exposes its version to ``images.image_claude_version``; or
+* ``kind = "npm"`` — an npm ``package`` pinned by the tool dir's committed ``package.json`` +
+  ``package-lock.json`` (exact versions; every lockfile entry resolved from the public registry
+  with a sha512 ``integrity`` that ``npm ci`` verifies; install scripts never run), installed to
+  ``/opt/<name>`` with its ``bins`` (``/opt/<name>``-relative — a ``node_modules/.bin`` entry or a
+  shipped launcher listed in ``files``) symlinked into ``/usr/local/bin``. Every shipped file's
+  sha256 is computed here so the render pins (and the build re-verifies) the exact bytes;
 
 plus the "custom config" a tool needs to actually WORK under ``--read-only`` (invariant 2):
 ``[env]`` redirects (image ENV, so a HOME-dotdir write lands on a writable surface), ``[[smoke]]``
@@ -27,6 +33,8 @@ hand-edited entry fails loud with ``LibraryError``. See docs/TOOLS.md.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -35,7 +43,7 @@ from pathlib import Path
 from .. import agents, config
 
 TOOL_META = "tool.toml"
-KINDS = ("apt", "release")
+KINDS = ("apt", "release", "npm")
 INSTALLS = ("binary", "tar", "deb", "bundle")
 ARCHES = ("amd64", "arm64")   # dpkg --print-architecture names; both are always required
 
@@ -46,6 +54,10 @@ _BIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")   # an installed executab
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
+_SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")   # npm: exact pins only, never a range
+_NPM_NAME_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+NPM_REGISTRY = "https://registry.npmjs.org/"
+NPM_MANIFESTS = ("package.json", "package-lock.json")   # always shipped by an npm tool
 # A [env] entry must never touch the container's identity/auth/path plumbing — those are the
 # runner's (invariant 1 + the baked floor env), not a tool's.
 _RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "XDG_CACHE_HOME", "XDG_STATE_HOME"}) | agents.config_dir_envs()
@@ -78,11 +90,11 @@ class Tool:
     kind: str                     # KINDS
     path: Path                    # the tool directory
     packages: tuple[str, ...] = ()        # apt: Debian packages
-    version: str = ""                     # release: the pinned upstream version
+    version: str = ""                     # release/npm: the pinned upstream version
     install: str = ""                     # release: INSTALLS
     bin: str = ""                         # release/binary: the installed name under /usr/local/bin
     tree: str = ""                        # release/bundle: the archive dir installed whole to /opt/<name>
-    bins: tuple[str, ...] = ()            # release/bundle: tree-relative executables symlinked into /usr/local/bin
+    bins: tuple[str, ...] = ()            # release/bundle + npm: /opt/<name>-relative executables symlinked into /usr/local/bin
     release: dict[str, ReleaseArch] = field(default_factory=dict)  # release: per-ARCHES artefact
     build_deps: tuple[str, ...] = ()      # apt packages needed only at build (purged after)
     requires: tuple[str, ...] = ()        # other tools pulled into the layer automatically
@@ -91,6 +103,8 @@ class Tool:
     env: dict[str, str] = field(default_factory=dict)   # image ENV (read-only-floor redirects)
     smoke: tuple[SmokeSpec, ...] = ()     # image-smoke probes (CORE ops under the floor)
     version_label: str = ""               # release: stamp `<LABEL_PREFIX>.<version_label>=<version>`
+    package: str = ""                     # npm: the package the tool is named for
+    files: tuple[tuple[str, str], ...] = ()   # npm: (tool-dir-relative path, sha256) COPYd to /opt/<name>
 
     @property
     def archive_kind(self) -> str:
@@ -100,10 +114,10 @@ class Tool:
 
     @property
     def summary(self) -> str:
-        """Compact provenance cell: ``"apt: jq"`` / ``"release 1.37.0"``."""
+        """Compact provenance cell: ``"apt: jq"`` / ``"release 1.37.0"`` / ``"npm 11.17.0"``."""
         if self.kind == "apt":
             return "apt: " + " ".join(self.packages)
-        return f"release {self.version}"
+        return f"{self.kind} {self.version}"
 
 
 def library_root() -> Path:
@@ -171,16 +185,21 @@ def _load_tool(tool_dir: Path) -> Tool:
             raise LibraryError(f"{name}: requires itself")
     allowlist = _str_list(meta, "allowlist", name)
 
-    version, install, bin_name, tree, bins, release = "", "", "", "", (), {}
+    version, install, bin_name, tree, bins, release, package, files = "", "", "", "", (), {}, "", ()
+    if kind != "apt" and packages:
+        raise LibraryError(f"{name}: 'packages' is only valid for kind = \"apt\"")
+    misplaced = {"apt": ("version", "install", "bin", "tree", "bins", "release", "package", "files"),
+                 "release": ("package", "files"),
+                 "npm": ("install", "bin", "tree", "release")}[kind]
+    for key in misplaced:
+        if key in meta:
+            raise LibraryError(f"{name}: {key!r} is not valid for kind = \"{kind}\"")
     if kind == "apt":
         if not packages:
             raise LibraryError(f"{name}: an apt tool must list packages")
-        for key in ("version", "install", "bin", "tree", "bins", "release"):
-            if key in meta:
-                raise LibraryError(f"{name}: {key!r} is only valid for kind = \"release\"")
+    elif kind == "npm":
+        package, version, bins, files = _parse_npm(name, tool_dir, meta)
     else:
-        if packages:
-            raise LibraryError(f"{name}: 'packages' is only valid for kind = \"apt\"")
         version = str(meta.get("version", "") or "")
         if not _VERSION_RE.match(version):
             raise LibraryError(f"{name}: a release tool must pin a version")
@@ -245,7 +264,7 @@ def _load_tool(tool_dir: Path) -> Tool:
                 version=version, install=install, bin=bin_name, tree=tree, bins=bins, release=release,
                 build_deps=build_deps, requires=requires,
                 note=str(meta.get("note", "") or "").strip(), allowlist=allowlist, env=env,
-                smoke=tuple(smoke), version_label=version_label)
+                smoke=tuple(smoke), version_label=version_label, package=package, files=files)
 
 
 def _is_safe_member(m: str) -> bool:
@@ -254,6 +273,68 @@ def _is_safe_member(m: str) -> bool:
     parts = m.split("/")
     return bool(m) and not m.startswith("/") and ".." not in parts \
         and not any(c in m for c in " '\"\\$`\n") and bool(_BIN_RE.match(parts[-1]))
+
+
+def _parse_npm(name: str, tool_dir: Path, meta: dict
+               ) -> tuple[str, str, tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """An npm tool's ``(package, version, bins, files)``. The pin lives in the committed manifests,
+    so they are checked against ``tool.toml`` here: exact versions only, the lockfile in step with
+    ``package.json``, and every locked package fetched from the public registry with a sha512
+    ``integrity`` (``npm ci`` refuses a tarball that doesn't match it)."""
+    package = str(meta.get("package", "") or "")
+    if not _NPM_NAME_RE.match(package):
+        raise LibraryError(f"{name}: an npm tool needs a valid `package` name")
+    version = str(meta.get("version", "") or "")
+    if not _SEMVER_RE.match(version):
+        raise LibraryError(f"{name}: an npm tool must pin an exact x.y.z `version`")
+    rels = NPM_MANIFESTS + _str_list(meta, "files", name)
+    if len(set(rels)) != len(rels):
+        raise LibraryError(f"{name}: `files` repeats an entry (package.json/package-lock.json are implicit)")
+    files = []
+    for rel in rels:
+        path = tool_dir / rel
+        if not _is_safe_member(rel) or path.is_symlink() or not path.is_file():
+            raise LibraryError(f"{name}: missing or unsafe shipped file {rel!r}")
+        files.append((rel, hashlib.sha256(path.read_bytes()).hexdigest()))
+    bins = _str_list(meta, "bins", name)
+    if not bins:
+        raise LibraryError(f"{name}: an npm tool needs `bins` (executables under /opt/{name})")
+    for b in bins:
+        if not _is_safe_member(b) or not (b.startswith("node_modules/.bin/") or b in rels):
+            raise LibraryError(f"{name}: bin {b!r} must be under node_modules/.bin/ or a shipped file")
+    manifest, lock = (_load_json(name, tool_dir / f) for f in NPM_MANIFESTS)
+    deps = manifest.get("dependencies")
+    if set(manifest) - {"private", "dependencies"} or not isinstance(deps, dict):
+        raise LibraryError(f"{name}: package.json must carry only `private` + `dependencies`")
+    for dep, ver in deps.items():
+        if not isinstance(ver, str) or not _SEMVER_RE.match(ver):
+            raise LibraryError(f"{name}: package.json pins {dep} to {ver!r} — exact x.y.z only")
+    if deps.get(package) != version:
+        raise LibraryError(f"{name}: package.json must pin {package} = {version!r}")
+    locked = lock.get("packages")
+    if (not isinstance(lock.get("lockfileVersion"), int) or lock["lockfileVersion"] < 2
+            or not isinstance(locked, dict)
+            or (locked.get("") or {}).get("dependencies") != deps
+            or (locked.get(f"node_modules/{package}") or {}).get("version") != version):
+        raise LibraryError(f"{name}: package-lock.json is stale vs package.json — regenerate it "
+                           "(`npm install --package-lock-only --ignore-scripts`)")
+    for key, entry in locked.items():
+        if key and not (isinstance(entry, dict) and not entry.get("link")
+                        and str(entry.get("resolved", "")).startswith(NPM_REGISTRY)
+                        and str(entry.get("integrity", "")).startswith("sha512-")):
+            raise LibraryError(f"{name}: package-lock.json entry {key!r} must resolve from "
+                               f"{NPM_REGISTRY} with a sha512 integrity")
+    return package, version, bins, tuple(files)
+
+
+def _load_json(name: str, path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise LibraryError(f"{name}: unreadable {path.name}: {exc}") from None
+    if not isinstance(data, dict):
+        raise LibraryError(f"{name}: {path.name} must be a JSON object")
+    return data
 
 
 def _parse_release(name: str, raw, install: str) -> dict[str, ReleaseArch]:

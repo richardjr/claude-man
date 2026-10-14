@@ -1,0 +1,48 @@
+# The official Mermaid CLI — `mmdc` (@mermaid-js/mermaid-cli): renders with mermaid.js itself in
+# headless Chromium, so the output is mermaid's own (cf. the `mermaid` tool: mmdr, a native
+# re-implementation — small and fast, but its layout differs). The heavy option: the Chromium
+# headless shell (~550 MB with its libs) + ~520 MB of node_modules.
+#
+# `kind = "npm"`: the committed package.json + package-lock.json pin the WHOLE dependency tree (271
+# packages, every one resolved from registry.npmjs.org with a sha512 integrity that `npm ci`
+# verifies). Install scripts are OFF — the only one in the tree is puppeteer's Chrome download,
+# replaced by the chromium-headless-shell tool (PUPPETEER_EXECUTABLE_PATH). It runs on the base
+# image's Debian Node 20, which is why this pins the 11.x line: mermaid-cli 12 needs Node >= 22.13
+# (+ puppeteer 25) — a bump needs a newer Node in the image first.
+#
+# bin/mmdc is a launcher that adds the baked puppeteer-config.json (`--no-sandbox` — Chromium has
+# no usable sandbox under the floor; see chromium-headless-shell) to every call.
+# Writes at use time: puppeteer's temp browser profile under TMPDIR (/workspace/.tmp, removed on
+# exit) + fontconfig's cache on the .cache tmpfs — both already writable, so no [env] redirect.
+#
+# To bump: edit the versions in package.json (puppeteer must satisfy mermaid-cli's peer range),
+# `npm install --package-lock-only --ignore-scripts` in this dir, set `version` below, then
+# `image smoke --project` a project that selects it.
+description = "Mermaid CLI (mmdc) — official mermaid.js renderer, headless Chromium"
+kind = "npm"
+package = "@mermaid-js/mermaid-cli"
+version = "11.17.0"
+files = ["puppeteer-config.json", "bin/mmdc"]
+bins = ["bin/mmdc"]
+requires = ["chromium-headless-shell"]
+note = "heavy: adds ~1 GB (Chromium + node_modules); `mermaid` (mmdr) is the light option"
+
+[[smoke]]
+name = "mmdc --version"
+argv = ["mmdc", "--version"]
+expect = "11.17.0"
+
+# CORE op under the floor: a real render launches Chromium (--no-sandbox via the launcher), writes
+# its temp profile under TMPDIR, and measures text with the system font.
+[[smoke]]
+name = "mmdc renders SVG + PNG through headless Chromium"
+argv = ["sh", "-lc", "printf 'flowchart LR\\n  A[Load balancer] --> B[(Aurora)]\\n' > /tmp/mmdc-smoke.mmd && mmdc -q -i /tmp/mmdc-smoke.mmd -o /tmp/mmdc-smoke.svg && grep -q 'Load balancer' /tmp/mmdc-smoke.svg && mmdc -q -i /tmp/mmdc-smoke.mmd -o /tmp/mmdc-smoke.png && head -c 4 /tmp/mmdc-smoke.png | grep -q PNG && echo ok"]
+expect = "ok"
+timeout = 120
+
+# The validation contract an agent relies on: a malformed diagram exits non-zero.
+[[smoke]]
+name = "mmdc rejects invalid syntax (non-zero exit)"
+argv = ["sh", "-lc", "printf 'flowchart LR; A-->\\n' > /tmp/mmdc-bad.mmd && { mmdc -q -i /tmp/mmdc-bad.mmd -o /tmp/mmdc-bad.svg >/dev/null 2>&1 || echo rejected; }"]
+expect = "rejected"
+timeout = 60

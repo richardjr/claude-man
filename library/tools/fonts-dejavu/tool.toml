@@ -1,0 +1,11 @@
+# DejaVu fonts — the slim base ships no fonts at all, so anything that RASTERISES text (mmdr's PNG
+# output) draws boxes with no labels. ~2 MB; fontconfig is not needed (renderers scan
+# /usr/share/fonts directly). SVG output never needs it (the viewer renders the text).
+description = "DejaVu fonts (text in rasterised output, e.g. PNG diagrams)"
+kind = "apt"
+packages = ["fonts-dejavu-core"]
+
+[[smoke]]
+name = "DejaVu Sans is installed"
+argv = ["sh", "-lc", "test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf && echo ok"]
+expect = "ok"

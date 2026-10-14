@@ -1,0 +1,6 @@
+#!/bin/sh
+# claude-man launcher for mmdc (library/tools/mermaid-cli). Chromium has no usable sandbox under the
+# hardened floor, so every render needs the baked puppeteer config that passes --no-sandbox (the
+# container is the sandbox). Your own `-p <file>` replaces it (the last -p wins) — keep
+# "args": ["--no-sandbox"] in it.
+exec /opt/mermaid-cli/node_modules/.bin/mmdc -p /opt/mermaid-cli/puppeteer-config.json "$@"

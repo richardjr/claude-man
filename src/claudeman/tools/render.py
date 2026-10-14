@@ -8,7 +8,9 @@ The layer is ``FROM claude-man:<overlay>`` (the project's existing overlay stays
 the terraform overlay keeps its own recipe; tools are ADDITIVE on top of any overlay, "custom" being
 simply ``base`` + a selection). Its shape mirrors the hand-written overlays: apt packages in one
 ``RUN`` (lists cleaned), each release artefact downloaded + **sha256-verified** in its own ``RUN``
-(arch-aware via ``dpkg --print-architecture``), build-only deps purged after, the tools' ``[env]``
+(arch-aware via ``dpkg --print-architecture``), each npm tool's committed manifests ``COPY``d from
+the tool dir, sha256-verified, then ``npm ci``'d (lockfile-pinned, install scripts off — after the
+release tools, so a release-installed runtime could serve it), build-only deps purged after, the tools' ``[env]``
 redirects as image ``ENV`` (overlay-scoped like the terraform overlay's — the global ``_BAKED_ENV``
 is untouched), then the ``claude-man.overlay`` / ``claude-man.tools`` labels and ``USER agent``.
 The hardened run profile is untouched — this changes only what is baked on the read-only rootfs
@@ -57,6 +59,9 @@ def render_dockerfile(overlay: str, tools: tuple[library.Tool, ...]) -> str:
     for tool in tools:
         if tool.kind == "release":
             out.append(_release_run(tool))
+    for tool in tools:
+        if tool.kind == "npm":
+            out.append(_npm_run(tool))
     if build_deps:
         out.append("\n# build-only deps are not shipped\n"
                    "RUN set -eux; \\\n"
@@ -130,6 +135,27 @@ def _release_run(tool: library.Tool) -> str:
                   "    rm -rf /var/lib/apt/lists/*; \\\n"]
     lines.append(f"    rm -f {dl}\n")
     return "".join(lines)
+
+
+def _npm_run(tool: library.Tool) -> str:
+    """An npm tool: ``COPY`` its shipped files (the manifests + any launcher) from the tool dir into
+    ``/opt/<name>``, re-verify their sha256 (the hashes put the lockfile in the rendered text, so a
+    lockfile change is a new content-addressed tag), ``npm ci`` against the lockfile — npm checks
+    every tarball's sha512 integrity; ``--ignore-scripts`` so no package code runs at build — and
+    symlink the ``bins`` into ``/usr/local/bin`` by basename. The source paths are relative to the
+    build context, the data root that holds ``library/`` (``config.image_build_context``)."""
+    opt, src, cache = f"/opt/{tool.name}", f"library/tools/{tool.name}", f"{_TMP}-{tool.name}.npm"
+    sums = "".join(f" \\\n        '{sha}' '{rel}'" for rel, sha in tool.files)
+    cmds = [f"cd {opt}",
+            f"printf '%s  %s\\n'{sums} \\\n        | sha256sum -c -",
+            f"npm ci --omit=dev --ignore-scripts --no-audit --no-fund --cache {cache}",
+            f"rm -rf {cache}"]
+    for b in tool.bins:
+        cmds.append(f'chmod 0755 "{opt}/{b}"; test -x "{opt}/{b}"; '
+                    f'ln -sfn "{opt}/{b}" "/usr/local/bin/{b.rsplit("/", 1)[-1]}"')
+    return (f"\n# --- {tool.name} {tool.version} (npm {tool.package}, lockfile-pinned)\n"
+            + "".join(f"COPY {src}/{rel} {opt}/{rel}\n" for rel, _ in tool.files)
+            + "RUN set -eux; \\\n    " + "; \\\n    ".join(cmds) + "\n")
 
 
 def image_name(overlay: str, dockerfile: str) -> str:

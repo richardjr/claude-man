@@ -1,0 +1,30 @@
+# Chromium's headless shell (Debian trixie) — the browser puppeteer-driven tools render with
+# (mermaid-cli's `mmdc`). The headless-only build: ~170 MB smaller than the full `chromium` package
+# and exactly what puppeteer's `headless: "shell"` mode targets.
+#
+# Under the hardened floor (cap-drop ALL + no-new-privileges + Docker's seccomp) Chromium has NO
+# usable sandbox — no setuid helper, no unprivileged user namespaces — so it only starts with
+# `--no-sandbox`. That is safe here for the same reason codex's bubblewrap is off: the container
+# IS the sandbox. The flag can't ride an env var (Debian's launcher has no hook for it), so each
+# consumer passes it — mermaid-cli via its baked puppeteer config, a direct call by hand.
+# Unlike the full `chromium`, the shell starts no crashpad handler, so nothing needs the read-only
+# ~/.config (the full build dies "chrome_crashpad_handler: --database is required" there). Its only
+# writes are its temp profile (under TMPDIR, the /workspace bind) and the fontconfig cache (the
+# .cache tmpfs).
+description = "Chromium headless shell (for puppeteer) — runs only with --no-sandbox"
+kind = "apt"
+packages = ["chromium-headless-shell"]
+requires = ["fonts-dejavu"]   # the slim base has no fonts: rendered text would be blank
+note = "pass --no-sandbox (no usable sandbox under the floor; the container is the sandbox)"
+
+# Puppeteer anywhere in the container uses this browser, and an in-container `npm i puppeteer`
+# skips its ~300 MB Chrome download (it would land on the size-capped .cache tmpfs).
+[env]
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium-headless-shell"
+PUPPETEER_SKIP_DOWNLOAD = "true"
+
+[[smoke]]
+name = "headless shell renders a page under the floor (--no-sandbox)"
+argv = ["chromium-headless-shell", "--no-sandbox", "--dump-dom", "data:text/html,<p>ok</p>"]
+expect = "<p>ok</p>"
+timeout = 60
