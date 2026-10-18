@@ -330,6 +330,46 @@ uv run claudemanctl sync review demo --yes  # apply defaults without the prompt
 
 Per-row accept/reject is TUI-only (projects table `y` → the sync-review screen).
 
+## Cross-project requests (relay)
+
+One project's agent can ask ANOTHER project's agent to do work, such as an `infrastructure` agent
+asking a `dev-server` project to bring the dev stack up on a branch. The project being asked
+declares a **helpdesk**: which projects may ask it, and the tasks it offers. Each task has its own
+prompt template, permission level, approval rule and timeout. The relay runs on the host: it is
+part of the open TUI, or `relay run` runs it on its own. Full design + threat model:
+[`RELAY.md`](RELAY.md).
+
+```bash
+# Target side: let infrastructure ask dev-server for help, and offer two tasks.
+uv run claudemanctl project helpdesk allow dev-server infrastructure
+uv run claudemanctl project helpdesk task add dev-server dev-up \
+    --summary "Start the dev stack on a branch and report the URLs" \
+    --param "branch=git ref to check out" \
+    --prompt-file ~/dev-up-prompt.md \
+    --permission edits --approve auto --timeout 20m
+uv run claudemanctl project helpdesk task add dev-server ask \
+    --summary "Questions about the dev stack"           # free-form: the note IS the request,
+                                                        # read-only (permission default), operator-approved
+uv run claudemanctl project helpdesk set dev-server --approve operator --autostart on
+uv run claudemanctl project helpdesk show dev-server     # senders, tasks, and who it can ask itself
+uv run claudemanctl project helpdesk task rm dev-server ask
+uv run claudemanctl project helpdesk disallow dev-server infrastructure
+
+# Host side: the relay + the operator's review.
+uv run claudemanctl relay run                 # foreground relay (only needed while the TUI is closed)
+uv run claudemanctl relay list [--all] [--project SLUG]
+uv run claudemanctl relay show <id>           # params, note, reply, the audit events (a unique prefix works)
+uv run claudemanctl relay approve <id>
+uv run claudemanctl relay deny <id> [--reason "not today"]
+uv run claudemanctl relay cancel <id>          # a running one is stopped (and its agent)
+```
+
+Helpdesk changes apply **at once** with no recreate. The requester's agent is told what it can ask
+through a managed block in its CLAUDE.md (AGENTS.md for codex), and it uses the helper
+`/workspace/.relay/bin/relay ask|wait|status|list` from inside its container. A request between a
+**locked** and an **open** project, in either direction, always needs `relay approve`, whatever the
+task says. `relay cancel` also stops a running request, including its agent inside the target.
+
 ## Local models (hybrid mode)
 
 ```bash

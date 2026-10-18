@@ -117,6 +117,14 @@ CONTAINER_SCRATCH = CONTAINER_WORKSPACE + "/" + SCRATCH_DIRNAME
 TMP_DIRNAME = ".tmp"
 CONTAINER_TMP = CONTAINER_WORKSPACE + "/" + TMP_DIRNAME       # TMPDIR
 CONTAINER_TMUX_TMPDIR = "/tmp"                                 # TMUX_TMPDIR (socket stays on the tmpfs)
+# Cross-project relay mailbox (docs/RELAY.md): a SUBDIR of the /workspace bind, exactly like the
+# scratch/TMPDIR dirs — NOT a new mount, so the hardened floor is byte-identical (invariant 2) and the
+# relay works the same for locked and open projects (no network path). A requester's agent drops a
+# request into out/, the HOST relay moves it (sender identity = whose bind it came from, never a claim
+# in the file), and writes status/replies back into in/. bin/ holds the host-written helper CLI.
+RELAY_DIRNAME = ".relay"
+CONTAINER_RELAY = CONTAINER_WORKSPACE + "/" + RELAY_DIRNAME
+CONTAINER_RELAY_HELPER = CONTAINER_RELAY + "/bin/relay"
 # Optional persistent shell-history bind (opt-in via `config shell-history on`): a per-project
 # state-tier dir bound here read-write so $HISTFILE survives recreate. Dedicated path (NOT under the
 # read-only ~/.local/bin claude install, NOT the XDG_STATE tmpfs) — the ONLY writable surface beyond
@@ -444,6 +452,18 @@ def tmp_dir(slug: str) -> Path:
     floor (invariant 2) is unchanged. ``lifecycle`` wipes + recreates it on every container start/stop
     (issue #42: temp lands on the disk-backed bind, not the 512m /tmp tmpfs)."""
     return workspace_dir(slug) / TMP_DIRNAME
+
+
+def relay_dir(slug: str) -> Path:
+    """The project's relay mailbox inside the /workspace bind (== CONTAINER_RELAY). Container-WRITABLE,
+    so every host-side read/write under it goes through ``relay.fsio`` (no-follow, fd-anchored)."""
+    return workspace_dir(slug) / RELAY_DIRNAME
+
+
+def relay_state_dir() -> Path:
+    """Host-only relay state (the request records + the append-only event log). State tier, never
+    mounted into any container — the audit trail an agent can't touch."""
+    return state_home() / "relay"
 
 
 def claude_config_dir(slug: str) -> Path:

@@ -93,7 +93,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 | `b` | Browse the project's workspace in your file manager |
 | `s` | Start / stop the selected project |
 | `g` | Repos… → `a` Add repo · `x` Remove repo · `r` Refresh-git (fetch) · `p` Pull all (ff-only) |
-| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `u` Run prompt (headless)… · `r` Recreate · `d` Delete |
+| `p` | Project… → `e` Env mounts · `o` Ports · `p` Packs… · `t` Tools (image)… · `g` Egress… · `i` Overlay (image)… · `m` Model… · `f` Profile… · `a` Auth… · `u` Run prompt (headless)… · `h` Helpdesk (relay)… · `r` Recreate · `d` Delete |
 | `y` | Sync-back review — scans the container's `~/.claude` for changes vs the baseline and opens the review screen (section 8) |
 
 **`global` row** — acts app-wide:
@@ -102,6 +102,7 @@ acts on the project under the cursor; the **global** row acts app-wide. Three ke
 |---|---|
 | `n` | New project |
 | `S` | Stop **all** running projects + sync assets out (end-of-day) |
+| `r` | Requests — cross-project relay requests: review, approve, deny, cancel (section 8) |
 | `v` | View… → `u` Refresh usage · `l` Logs (live `docker logs -f`, escape/q to close) |
 | `,` | Settings (ssh keys · git identity · GH token · terminal · status bar `s` · memory `m` · setup wizard `w`) |
 | `m` | Models — install / update / remove / inspect local Ollama models (the Phase 9 management screen, section 8) |
@@ -397,6 +398,26 @@ Project… menu. Each persists the choice and applies it itself — no manual
   apply; the Projects table badges login projects `[login]` on the Profile cell. When a minted
   credential exists, **Logout** removes it (project must be stopped). The **Profile…** picker (`f`)
   offers only profiles of the project's agent.
+
+**Cross-project requests (`p` → `h` Helpdesk…, and `r`)** — one project's agent can ask another
+project's agent to do work, e.g. `infrastructure` asking `dev-server` to bring the dev stack up on a
+branch ([`docs/RELAY.md`](RELAY.md)). The open TUI **is** the relay: it picks requests up every couple
+of seconds, a toast tells you when one needs your approval, and only one process relays at a time.
+`claudemanctl relay run` covers the times the TUI is closed.
+
+- **Helpdesk… (`p` → `h`)** on the project being *asked*: `a` allow another project to ask it ·
+  `x` disallow · `t` add a task · `e` edit the selected task · `r` remove it · `o` flip the
+  default approval (operator / auto) · `s` autostart on/off (start the container to serve a
+  request). A task is a name, a one-line summary, required params (`name=description`, one per line),
+  a **prompt template** this project's agent runs (`{param}` placeholders; leave it empty for a
+  free-form task whose note *is* the request), a permission (`default` = read-only consult · `edits`
+  · `full`), an approval and a timeout. Changes apply at once, with no recreate. The asking project's
+  CLAUDE.md gets a managed block listing what it can request and how.
+- **Requests (`r`)** lists requests, with the ones awaiting approval at the top and live status while
+  they run. The detail pane shows the params, the requesting agent's note, the reply and the audit
+  events. `a` approve · `d` deny (with an optional reason, shown to the asking agent) · `c` cancel
+  (a running request is stopped, including its agent) · `f` show/hide finished. A request between a
+  **locked** and an **open** project, in either direction, always waits for `a`.
 
 **Models (`m`, global)** — manages the host-Ollama models the hybrid pin draws from: `a`
 installs one (pick a curated coding-model preset or type a raw ollama tag; the pull streams

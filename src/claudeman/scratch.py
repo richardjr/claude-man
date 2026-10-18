@@ -28,6 +28,7 @@ from pathlib import Path
 from . import claudemd, config
 from .checkout.repos import is_within
 from .registry.schema import Project
+from .relay import fsio as relay_fsio
 
 # Managed-block markers — a distinct prefix from the packs block (``claude-man:packs``) so both can
 # live in one CLAUDE.md without colliding (claudemd.patch_block matches by prefix).
@@ -99,15 +100,17 @@ def ensure_note(project: Project) -> str:
     about the scratch dir. Best-effort; returns a note ('' = quiet / unchanged). Creates a minimal
     CLAUDE.md when the project has none so the note has a host."""
     ctx_file = project.provider.context.file   # CLAUDE.md for claude, AGENTS.md for codex
-    path = config.workspace_dir(project.slug) / ctx_file
-    existed = path.exists()
+    # The file lives in the CONTAINER-WRITABLE bind: read + write it with the relay's no-follow,
+    # fd-anchored primitives so an in-container symlink (e.g. CLAUDE.md -> a host dotfile) is never
+    # read or written through — a rename replaces the planted link instead.
     try:
-        text = path.read_text(encoding="utf-8") if existed else _stub(project.slug, ctx_file)
+        config.workspace_dir(project.slug).mkdir(parents=True, exist_ok=True)
+        current = relay_fsio.read_workspace_text(project.slug, ctx_file)
+        text = current if current is not None else _stub(project.slug, ctx_file)
         patched = claudemd.patch_block(text, _NOTE_LINES, begin=_BEGIN, end=_END,
                                        begin_prefix=_BEGIN_PREFIX, end_prefix=_END_PREFIX)
-        if not existed or patched != text:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(patched, encoding="utf-8")
+        if current is None or patched != text:
+            relay_fsio.write_workspace_text(project.slug, ctx_file, patched)
     except OSError as exc:
         return f"scratch: {ctx_file} note patch failed ({exc})"
     return ""

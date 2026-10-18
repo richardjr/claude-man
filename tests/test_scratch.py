@@ -218,6 +218,17 @@ class EnsureNoteTest(_StateEnv):
         self.assertEqual(note, "")
         self.assertEqual(self._claude_md().read_text(), first)  # byte-identical, no churn
 
+    def test_never_writes_through_a_planted_symlink(self) -> None:
+        # The bind is container-writable: a CLAUDE.md symlinked at a host file must be neither read
+        # nor written through (the host resolves absolute link targets in the HOST namespace).
+        host_file = Path(self.state.name) / "host-dotfile"
+        host_file.write_text("precious\n")
+        self._claude_md().parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(host_file, self._claude_md())
+        note = scratch.ensure_note(Project(slug=self.slug))
+        self.assertIn("note patch failed", note)
+        self.assertEqual(host_file.read_text(), "precious\n")
+
 
 class AddRepoGuardTest(_StateEnv):
     def setUp(self) -> None:
@@ -240,6 +251,12 @@ class AddRepoGuardTest(_StateEnv):
     def test_rejects_repo_dir_under_tmp(self) -> None:
         with self.assertRaises(ValidationError):
             projects.add_repo(self.slug, "https://example.com/x.git", dir=".tmp/nested")
+
+    def test_rejects_repo_dir_under_relay_mailbox(self) -> None:
+        # /workspace/.relay is the relay mailbox (docs/RELAY.md) — rewritten + removed by claude-man.
+        for d in (".relay", ".relay/nested"):
+            with self.assertRaises(ValidationError):
+                projects.add_repo(self.slug, "https://example.com/x.git", dir=d)
 
     def test_allows_normal_repo(self) -> None:
         updated = projects.add_repo(self.slug, "https://github.com/foo/bar.git")

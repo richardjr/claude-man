@@ -402,6 +402,174 @@ class Repo:
         return tail[:-4] if tail.endswith(".git") else tail
 
 
+HELPDESK_APPROVALS = ("operator", "auto")
+# A helpdesk task param name — becomes a ``{name}`` placeholder in the task's prompt template.
+_PARAM_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")   # fullmatch
+# ``{name}`` placeholders in a prompt template (``{{``/``}}`` are literal braces).
+_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([a-z][a-z0-9_]*)\}(?!\})")
+HELP_TIMEOUT_DEFAULT = 1800          # 30 min — a headless run's wall-clock cap
+HELP_TIMEOUT_MIN = 30
+HELP_TIMEOUT_MAX = 6 * 3600
+_SUMMARY_MAX = 200
+_PROMPT_MAX = 8000
+_DURATION_RE = re.compile(r"^(\d+)\s*([smh]?)$")
+
+
+def parse_duration(value: str | int) -> int:
+    """``"90s"`` / ``"20m"`` / ``"2h"`` / ``"600"`` / ``600`` → seconds. Raises ``ValidationError``."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    m = _DURATION_RE.match(str(value).strip().lower())
+    if not m:
+        raise ValidationError(f"duration {value!r} must be like 90s, 20m, 2h or a number of seconds")
+    return int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
+
+
+def template_placeholders(template: str) -> list[str]:
+    """The ``{name}`` placeholders a prompt template uses (in order, deduplicated)."""
+    seen: list[str] = []
+    for name in _PLACEHOLDER_RE.findall(template):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+@dataclass(frozen=True)
+class HelpTask:
+    """One task a project offers on its helpdesk — what another project may ask it to do (docs/RELAY.md).
+
+    The TARGET owns everything that shapes the work: the prompt template (``{param}`` placeholders,
+    filled with the requester's validated identifier-shaped values), the headless permission level,
+    the wall-clock timeout and whether the operator must approve. A requester only picks a task, fills
+    its params and may add a fenced note — it can never raise the permission or skip an approval."""
+    name: str
+    summary: str = ""
+    params: tuple[tuple[str, str], ...] = ()   # (name, description), all required, in order
+    prompt: str = ""                           # template; "" = the requester's note IS the request
+    permission: str = "default"                # agents.PERMISSIONS (default = read-only consult)
+    approve: str = ""                          # "" = inherit Helpdesk.approve; else HELPDESK_APPROVALS
+    timeout: int = HELP_TIMEOUT_DEFAULT        # seconds
+
+    def __post_init__(self) -> None:
+        # Canonical form: surrounding whitespace is insignificant (a TOML multi-line string adds a
+        # trailing newline), so a load → save → load round-trip is exact.
+        object.__setattr__(self, "prompt", self.prompt.strip())
+        object.__setattr__(self, "summary", self.summary.strip())
+        if not _SLUG_RE.fullmatch(self.name):
+            raise ValidationError(f"invalid task name {self.name!r}: must match {_SLUG_RE.pattern}")
+        if "\n" in self.summary or len(self.summary) > _SUMMARY_MAX:
+            raise ValidationError(f"task {self.name!r}: summary must be one line, ≤{_SUMMARY_MAX} chars")
+        names = [n for n, _ in self.params]
+        for n, desc in self.params:
+            if not _PARAM_NAME_RE.fullmatch(n):
+                raise ValidationError(
+                    f"task {self.name!r}: param {n!r} must match {_PARAM_NAME_RE.pattern}")
+            if "\n" in desc or len(desc) > _SUMMARY_MAX:
+                raise ValidationError(f"task {self.name!r}: param {n!r} description must be one line")
+        if len(set(names)) != len(names):
+            raise ValidationError(f"task {self.name!r}: duplicate param names")
+        if len(self.prompt) > _PROMPT_MAX:
+            raise ValidationError(f"task {self.name!r}: prompt is longer than {_PROMPT_MAX} chars")
+        unknown = [p for p in template_placeholders(self.prompt) if p not in names]
+        if unknown:
+            raise ValidationError(
+                f"task {self.name!r}: prompt uses undeclared placeholder(s) "
+                f"{', '.join('{' + u + '}' for u in unknown)} — declare them as params "
+                f"(or write {{{{ }}}} for a literal brace)")
+        if self.permission not in agents.PERMISSIONS:
+            raise ValidationError(
+                f"task {self.name!r}: permission {self.permission!r} must be one of {agents.PERMISSIONS}")
+        if self.approve and self.approve not in HELPDESK_APPROVALS:
+            raise ValidationError(
+                f"task {self.name!r}: approve {self.approve!r} must be one of {HELPDESK_APPROVALS}")
+        if not isinstance(self.timeout, int) or isinstance(self.timeout, bool) \
+                or not HELP_TIMEOUT_MIN <= self.timeout <= HELP_TIMEOUT_MAX:
+            raise ValidationError(
+                f"task {self.name!r}: timeout must be {HELP_TIMEOUT_MIN}–{HELP_TIMEOUT_MAX} seconds")
+
+    @property
+    def param_names(self) -> tuple[str, ...]:
+        return tuple(n for n, _ in self.params)
+
+
+@dataclass(frozen=True)
+class Helpdesk:
+    """A project's helpdesk: which OTHER projects may send it requests, and the tasks it offers
+    (``[project.helpdesk]`` + ``[[project.helpdesk.task]]`` — docs/RELAY.md). Off unless BOTH a sender
+    and a task are configured. ``accepts_from`` is an explicit allowlist (no wildcard): a request from
+    anyone else is rejected by the relay before a prompt is ever rendered.
+
+    ``error``/``raw`` are set ONLY by ``lenient()`` for a table that failed validation at load: the
+    helpdesk is then treated as OFF (no requests accepted) but the operator's raw table round-trips
+    through ``projects.save`` untouched, mirroring ``EnvMount.lenient``."""
+    accepts_from: tuple[str, ...] = ()
+    approve: str = "operator"            # the default for tasks that don't set their own
+    autostart: bool = False              # start the container to serve a request when it's stopped
+    tasks: tuple[HelpTask, ...] = ()
+    error: str = ""
+    raw: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for s in self.accepts_from:
+            if not _SLUG_RE.fullmatch(s):
+                raise ValidationError(f"helpdesk: invalid sender slug {s!r}")
+        if len(set(self.accepts_from)) != len(self.accepts_from):
+            raise ValidationError("helpdesk: duplicate sender slugs")
+        if self.approve not in HELPDESK_APPROVALS:
+            raise ValidationError(f"helpdesk: approve {self.approve!r} must be one of {HELPDESK_APPROVALS}")
+        names = [t.name for t in self.tasks]
+        if len(set(names)) != len(names):
+            raise ValidationError("helpdesk: duplicate task names")
+
+    @classmethod
+    def lenient(cls, raw: dict) -> Helpdesk:
+        """Parse a stored ``[project.helpdesk]`` table WITHOUT raising — an invalid one comes back
+        flagged (``error`` set, ``raw`` kept for round-trip) and disabled."""
+        try:
+            return cls.from_table(raw)
+        except (ValidationError, TypeError, ValueError, AttributeError) as exc:
+            return cls(error=str(exc), raw=dict(raw))
+
+    @classmethod
+    def from_table(cls, raw: dict) -> Helpdesk:
+        tasks = []
+        for t in raw.get("task", []) or []:
+            params = t.get("params", {}) or {}
+            if not isinstance(params, dict):
+                raise ValidationError(f"helpdesk task {t.get('name')!r}: params must be a table")
+            tasks.append(HelpTask(
+                name=str(t.get("name", "")),
+                summary=str(t.get("summary", "") or ""),
+                params=tuple((str(k), str(v)) for k, v in params.items()),
+                prompt=str(t.get("prompt", "") or ""),
+                permission=str(t.get("permission", "default") or "default"),
+                approve=str(t.get("approve", "") or ""),
+                timeout=parse_duration(t.get("timeout", HELP_TIMEOUT_DEFAULT)),
+            ))
+        return cls(
+            accepts_from=tuple(str(s) for s in (raw.get("from", []) or [])),
+            approve=str(raw.get("approve", "operator") or "operator"),
+            autostart=bool(raw.get("autostart", False)),
+            tasks=tuple(tasks),
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return not self.error and bool(self.accepts_from) and bool(self.tasks)
+
+    @property
+    def configured(self) -> bool:
+        """Anything to persist (a flagged table counts — its raw form must round-trip)."""
+        return bool(self.error or self.accepts_from or self.tasks or self.autostart
+                    or self.approve != "operator")
+
+    def task(self, name: str) -> HelpTask | None:
+        return next((t for t in self.tasks if t.name == name), None)
+
+    def approval_for(self, task: HelpTask) -> str:
+        return task.approve or self.approve
+
+
 @dataclass(frozen=True)
 class Project:
     slug: str
@@ -440,12 +608,17 @@ class Project:
     #                                      refreshing in place; enables claude.ai account connectors.
     #                                      Fixed at create -> recreate to apply. Invariant 1 amendment:
     #                                      minted-in-place, never copied in.)
+    helpdesk: Helpdesk = field(default_factory=Helpdesk)  # cross-project requests this project
+    #                                      accepts (docs/RELAY.md) — off unless senders + tasks are set;
+    #                                      host-side only (the relay), so no recreate ever
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
             raise ValidationError(
                 f"invalid slug {self.slug!r}: must match {_SLUG_RE.pattern}"
             )
+        if self.slug in self.helpdesk.accepts_from:
+            raise ValidationError(f"helpdesk: {self.slug!r} can't accept requests from itself")
         if self.agent not in agents.ids():
             raise ValidationError(
                 f"invalid agent {self.agent!r}: one of {agents.ids()}"
