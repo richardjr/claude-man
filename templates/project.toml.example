@@ -102,3 +102,30 @@ container = 5173                 # service inside the container
 # host    = 5173                 # host port (optional; defaults to the container port)
 # bind    = "127.0.0.1"          # default: host-only (reachable at http://localhost:5173). "0.0.0.0" = LAN
 # proto   = "tcp"                # "tcp" (default) | "udp"
+
+# Helpdesk -> cross-project requests THIS project accepts (docs/RELAY.md). Off unless `from` names a
+# sender AND at least one task exists. The asking project's agent is told (in its CLAUDE.md) what it
+# can request; the host relay checks every request against this table, asks the operator when a task
+# (or a locked -> open egress crossing) requires it, and runs ONE headless session here with THIS
+# project's template / permission / timeout. Host-side only: changes apply at once, no recreate.
+# Manage with `project helpdesk allow|disallow|set|task add|task rm|show` or the TUI's Helpdesk… (p → h).
+# [project.helpdesk]
+# from = ["infrastructure"]      # explicit sender allowlist (no wildcard)
+# approve = "operator"           # default for tasks without their own: operator | auto
+# autostart = false              # start this container to serve a request when it's stopped
+#
+# [[project.helpdesk.task]]
+# name = "dev-up"
+# summary = "Start the dev stack on a branch and report the URLs"
+# params = { branch = "git ref to check out" }   # all required; filled into {branch} below
+# permission = "edits"           # default (read-only consult) | edits | full
+# approve = "auto"
+# timeout = 1200                 # seconds
+# prompt = """
+# Check out {branch} in landarna-backend, start the api under the tmux session `dev`
+# (tmux new-session -d -s dev '…'), wait for :8080, then report the branch, short SHA and URLs.
+# """
+#
+# [[project.helpdesk.task]]
+# name = "ask"                   # no prompt = free-form: the requester's note IS the request
+# summary = "Questions about the dev stack"

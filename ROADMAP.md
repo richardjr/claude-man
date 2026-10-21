@@ -462,6 +462,25 @@ unit-pinned); `image smoke --project` gates every selected tool under `--read-on
 - [x] **10d:** shipped registry: kubectl 1.37.0, helm 3.22.0, session-manager-plugin 1.2.835.0, postgresql-client, jq, python3, python3-yaml, uv 0.12.12; 2026-09-17: + aws-cli 2.36.47 (the v2 bundle via the new `install = "bundle"` kind — a zip's self-contained tree under `/opt/<name>` + symlinked bins; smoke-verified on base) + k9s 0.51.0 (requires kubectl; `K9S_CONFIG_DIR` → the .cache tmpfs); 2026-10-07: + mermaid 0.3.1 (`mmdr`, a native Rust renderer — chosen over the Chromium-driven `mmdc`; font cache on the .cache tmpfs, no redirect) + fonts-dejavu (required by mermaid: PNG text needs a font and the slim base has none); + mermaid-cli 11.17.0 (the official `mmdc`, via the new `kind = "npm"` — committed package.json + lockfile, `npm ci --ignore-scripts`; 11.x because 12 needs Node ≥ 22.13 and the base ships Debian's Node 20) + chromium-headless-shell (puppeteer's browser; `--no-sandbox` under the floor, passed by mmdc's launcher); 2026-10-20: + age 1.3.2 (file encryption for the infrastructure repo's secrets — `age`/`age-keygen`/`age-inspect` + the bundled plugins from the release tarball; stateless, no redirect; round-trip probe smoke-verified on the terraform tools layer)
 - [ ] **10e (follow-ups):** `image prune` for superseded `-t-` images; a "selection differs from the running container's `claude-man.tools` label → needs recreate" signal in the projects table; express the fixed overlays as registry presets (`python` = `{python3, uv}` …) so their smoke probes go data-driven
 
+## Relay — cross-project requests
+
+_Built 2026-10-16 — [`docs/RELAY.md`](docs/RELAY.md)._ One project's agent asks another project's
+agent for help: the motivating case is `infrastructure` asking a `dev-server` project to bring the
+dev system up on a branch. Unlike the v2 line's threads and manager tier below, which are
+agent-to-agent inside one control plane, this is peer-to-peer between existing claude-man projects.
+A target declares a **helpdesk** (`[project.helpdesk]`: a sender allowlist plus tasks, each with its
+own prompt template, permission, approval and timeout). A requester's agent drops a request file into
+its own `/workspace/.relay/out/` with a host-written helper. The host relay identifies the sender by
+whose bind the file came from, checks it, asks the operator when needed (always for a locked → open
+crossing in either direction), and runs ONE headless session in the target (the 7-run seam). The masked reply goes back
+into the requester's `/workspace/.relay/in/`. No new mount, socket, capability or network path: the
+floor is byte-identical.
+
+- [x] **R1 — config + context:** `schema.Helpdesk`/`HelpTask` (lenient load, raw round-trip), `projects.set_helpdesk`, `relay/policy.py` (offers, `check_request`, approval incl. the lock-crossing rule, loop/depth guard, fenced prompt), `relay/context.py` (the `claude-man:relay` managed block in the provider's context file, the requester's `directory.json` + node helper), re-stamped on `up` and immediately after every helpdesk change / delete; `project helpdesk show|allow|disallow|set|task add|task rm`
+- [x] **R2 — the relay:** `relay/protocol.py` (wire files), `relay/fsio.py` (fd-anchored no-follow bind IO — the attack surface), `relay/store.py` (records + append-only audit log, CAS transitions, single-instance lock, pruning), `relay/engine.py` (ingest → approve/queue → re-checked dispatch, autostart, busy-wait, recovery, cancel of a running request); `relay run|list|show|approve|deny|cancel`; a repo dir under `.relay/` refused at `repo add`. From the adversarial review: `lifecycle.run`'s timeout is now enforced by a watchdog (it previously only applied after stdout EOF) and also stops the in-container agent, with stderr drained on a thread; `scratch.ensure_note` no longer follows a planted CLAUDE.md symlink
+- [x] **R3 — TUI parity:** the relay runs in-process while the TUI is open (a thread worker, approval toasts); global `r` Requests screen (approve / deny-with-reason / cancel, detail + events); Project… → `h` Helpdesk… (senders, tasks, add/edit task modal, approval + autostart toggles); pure `tui/relayview.py`
+- [ ] **R4 — follow-ups:** threads (`--resume` the target session for follow-ups on one request); file attachments via `scratch/`; delivery into a live interactive session (prompt-submit hook) instead of waiting for it to exit; a status-bar cue (needs a baked probe → image rebuild); an MCP wrapper around the helper
+
 ## Phases 11–17 — the v2 line: rename, control plane, tasks, threads, web UI, manager tier, hosting
 
 _Planned 2026-09-26 — [`docs/V2-PLAN.md`](docs/V2-PLAN.md). Order: **Phase 7 first** (above), then

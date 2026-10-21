@@ -25,6 +25,7 @@ What crosses each way, and what must never cross:
 |---|---|---|
 | host → container | the **one** profile's OAuth token (env — **token mode**; login mode injects nothing), an opt-in `GH_TOKEN` when the operator configures one (`config gh-token`, injected pass-through), the non-secret git author identity (name/email), project env vars, the checked-out repos | any **host** `.credentials.json` (in both auth modes — login mode's credential is *minted inside* the container, never copied in), the host `gh` PAT / `~/.config/gh`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, other profiles' tokens |
 | container → host | review-gated config artifacts (agents, skills, commands, `settings.json` keys, MCP, memory, `CLAUDE.md`) | identity (`oauthAccount`/`userID`/`accountUuid`), **any credential/token** (token mode: no credential file exists in the bind at all; **login mode**: the in-container-minted `.credentials.json` refreshes in place *inside the per-project bind* — denylisted from sync-back, it must still never reach host config), history/sessions/transcripts, statsig/caches, host-absolute paths, wholesale `.claude.json` |
+| container → container (only via the host relay) | a request (task + identifier-shaped params + a fenced, masked note) to a project whose helpdesk allows it; the target's masked reply back — [`RELAY.md`](RELAY.md) | any direct network path or shared mount between containers; a request the target's helpdesk doesn't allow; a request between a locked and an open project that the operator hasn't approved |
 
 ## Controls
 
@@ -237,6 +238,27 @@ What crosses each way, and what must never cross:
   never clobbered. MCP changes go through `claude mcp add/remove --scope`, not wholesale file copy.
 - Every host target is **backed up before** merge. **Deletions and three-way conflicts default to
   reject**, in a separate confirmed class. Nothing is written without explicit `enter`.
+
+### Cross-project relay (defence against one project's agent abusing another)
+Full design + threat table: [`RELAY.md`](RELAY.md). In short:
+- **Opt-in per target**: a project accepts requests only from the senders its `[project.helpdesk]`
+  names, and only for the tasks it declares. The target's own template, permission level, timeout
+  and approval rule shape the run; nothing the requester sends can widen them.
+- **Unforgeable sender**: the requester drops a file in its own `/workspace/.relay/out/`; the host
+  relay attributes it to whichever project's bind it appeared in.
+- **No-follow host IO**: every host read/write under the container-writable mailbox is fd-anchored
+  with `O_NOFOLLOW` (planted symlinks, FIFOs, hard links and swapped directories are refused or
+  replaced, never followed). The context-file patch uses the same primitives.
+- **Lock crossing needs the operator**: a request between a locked (strict-egress) project and an
+  open one, in either direction, always waits for approval: locked → open would carry the request's
+  data out, and open → locked would carry the locked project's data out in the reply. So the relay
+  can't be used to route data out of the lock.
+- **Fenced, masked text**: the requester's note and the reply are fenced with a per-request nonce
+  and labelled as another agent's words; both are secret-masked (`mask_line`) before they are
+  stored or delivered. Loops (depth > 2, or a project already in the chain) and floods (> 5 open
+  requests per sender) are refused.
+- **Attributable**: every request, approval and result is appended to the host-only
+  `relay/events.jsonl` audit log. There is no new mount, socket, capability or network path.
 
 ## Residual risks (accepted, with mitigations)
 

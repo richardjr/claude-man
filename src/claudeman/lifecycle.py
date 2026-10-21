@@ -16,6 +16,8 @@ import datetime
 import fcntl
 import os
 import shutil
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -39,10 +41,20 @@ from .network import gateway
 from .packs import library as packs_library
 from .packs import materialize as packs_materialize
 from .profiles import seed as seed_mod
+from .relay import context as relay_context
 from .registry import profiles as profiles_registry
 from .registry import projects as projects_registry
 from .registry import settings as settings_registry
-from .registry.schema import EnvMount, PortMapping, Profile, Project, Repo, ValidationError
+from .registry.schema import (
+    EnvMount,
+    Helpdesk,
+    HelpTask,
+    PortMapping,
+    Profile,
+    Project,
+    Repo,
+    ValidationError,
+)
 from .syncback import baseline as syncback_baseline
 from .syncback import detect as syncback_detect
 from .syncback import diff as syncback_diff
@@ -599,6 +611,10 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
     # points the agent at it. After sync-in so the note layers on top of the operator's CLAUDE.md;
     # before start so the agent sees an empty dir + the note from its first launch. Best-effort.
     scratch_note = _scratch_prepare(project, on_progress=on_progress)
+    # Cross-project relay surface (docs/RELAY.md): the mailbox + helper + directory when another
+    # project's helpdesk accepts this one, and the managed context block either way. After sync-in so
+    # the block layers on the operator's CLAUDE.md; best-effort like the scratch note.
+    relay_note = _relay_prepare(project, on_progress=on_progress)
     cp = runner.start(project.slug)
     if cp.returncode != 0:
         return Result(False, f"docker start failed: {cp.stderr.strip() or cp.stdout.strip()}")
@@ -614,7 +630,7 @@ def up(project: Project, *, on_progress: ProgressFn | None = None, rebuild_to: s
         login_note += _verify_login_identity(project)
     prefix = created.detail + "; " if "created" in created.detail else ""
     return Result(True, f"{prefix}started {project.container}"
-                        f"{packs_note}{sync_note}{scratch_note}{login_note}")
+                        f"{packs_note}{sync_note}{scratch_note}{relay_note}{login_note}")
 
 
 def stop(slug: str, *, on_progress: ProgressFn | None = None) -> Result:
@@ -717,6 +733,24 @@ def _scratch_prepare(project: Project, *, on_progress: ProgressFn | None) -> str
             on_progress(f"scratch prepare failed: {exc!r}")
         return f"; scratch error: {exc}"
     return ("; " + "; ".join(notes)) if notes else ""
+
+
+def _relay_prepare(project: Project, *, on_progress: ProgressFn | None) -> str:
+    """(Re)stamp the project's relay surface for the start path → a ``'; <note>'`` suffix (or '').
+    Never raises — the relay must not block a container start."""
+    note = relay_context.apply(project, projects_registry.list_projects())
+    if note and on_progress:
+        on_progress(note)
+    return f"; {note}" if note else ""
+
+
+def _relay_refresh(slugs: set[str]) -> str:
+    """Re-apply the relay surface for every registered project in ``slugs`` (after a helpdesk change
+    or a delete) → '' or '; '-joined notes. The block/directory are plain bind files, so a running
+    container's NEXT agent session sees the change — no recreate."""
+    everyone = projects_registry.list_projects()
+    notes = [relay_context.apply(p, everyone) for p in everyone if p.slug in slugs]
+    return "; ".join(n for n in notes if n)
 
 
 def _scratch_clear(slug: str) -> str:
@@ -905,7 +939,7 @@ def run_exec_argv(project: Project, request: agents.RunRequest) -> list[str]:
 
 def run(project: Project, request: agents.RunRequest, *,
         on_event: Callable[[agents.AgentEvent], None] | None = None,
-        timeout: float | None = None) -> RunOutcome:
+        timeout: float | None = None, cancel: threading.Event | None = None) -> RunOutcome:
     """Run ONE headless session in ``project``'s container and stream its normalised events.
 
     Requires a RUNNING container (callers ``up`` first — the CLI/TUI do, like shell/claude).
@@ -914,7 +948,11 @@ def run(project: Project, request: agents.RunRequest, *,
     prompt goes to the agent's stdin; every stdout line is decoded as JSON and handed to the
     provider's ``parse``; non-JSON lines are ignored. The outcome carries the last message text,
     the session id and the usage from the turn_done/failed event. ``timeout`` bounds the whole run
-    (None = unbounded — the caller's choice); on expiry the exec is killed and the outcome fails."""
+    (None = unbounded — the caller's choice), enforced by a watchdog even while the agent is silent;
+    setting ``cancel`` stops it the same way. On either, the exec is killed AND the in-container agent
+    is TERMinated (``terminals.build_agent_stop_argv`` — the exec client dying alone would leave it
+    running and holding the one-agent slot), and the outcome fails. stderr is drained on a thread so
+    a chatty agent can't deadlock the pipe."""
     import json
     import subprocess
 
@@ -936,6 +974,40 @@ def run(project: Project, request: agents.RunRequest, *,
         return RunOutcome(False, f"could not exec into {project.container}: {exc}")
     outcome = RunOutcome(True, "")
     last_text = ""
+    stderr_buf: list[str] = []
+    stopped: dict[str, str] = {}
+    finished = threading.Event()
+
+    def _drain_stderr() -> None:
+        try:
+            for chunk in proc.stderr:
+                stderr_buf.append(chunk)
+                del stderr_buf[:-50]          # keep a bounded tail
+        except Exception:  # noqa: BLE001 - a closed/odd pipe just ends the drain
+            pass
+
+    def _watchdog() -> None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not finished.wait(0.5):
+            if cancel is not None and cancel.is_set():
+                stopped["why"] = "cancelled"
+            elif deadline is not None and time.monotonic() >= deadline:
+                stopped["why"] = f"timed out after {timeout:g}s"
+            else:
+                continue
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                subprocess.run(terminals.build_agent_stop_argv(project.slug, provider=project.provider),
+                               capture_output=True, timeout=15)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return
+
+    drain = threading.Thread(target=_drain_stderr, daemon=True)
+    drain.start()
+    if timeout is not None or cancel is not None:
+        threading.Thread(target=_watchdog, daemon=True).start()
     try:
         try:
             proc.stdin.write(request.prompt)
@@ -970,20 +1042,18 @@ def run(project: Project, request: agents.RunRequest, *,
                         last_text = ev.text
                 if on_event is not None:
                     on_event(ev)
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        proc.wait()
+    finally:
+        finished.set()
+        if proc.poll() is None:
             proc.kill()
             proc.wait()
-            return RunOutcome(False, f"run timed out after {timeout}s", session_id=outcome.session_id,
-                              text=last_text, usage=outcome.usage, events=outcome.events)
-    finally:
-        stderr_tail = ""
-        try:
-            if proc.stderr is not None:
-                stderr_tail = proc.stderr.read()[-2000:].strip()
-        except (OSError, ValueError):
-            pass
+        drain.join(timeout=2)
+    if stopped:
+        return RunOutcome(False, f"run {stopped['why']}", session_id=outcome.session_id,
+                          text=last_text, usage=outcome.usage, events=outcome.events,
+                          returncode=proc.returncode)
+    stderr_tail = "".join(stderr_buf)[-2000:].strip()
     outcome.returncode = proc.returncode
     outcome.text = last_text
     if proc.returncode != 0 and outcome.ok:
@@ -1591,6 +1661,10 @@ def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
     if not projects_registry.exists(slug):
         return Result(False, f"no project {slug!r}")
     try:
+        senders = set(projects_registry.load(slug).helpdesk.accepts_from)
+    except (ValidationError, OSError, ValueError):
+        senders = set()
+    try:
         with _slug_lock(slug):
             runner.remove(slug)  # docker rm -f; idempotent — a non-zero "No such container" is fine
             egress.teardown(slug)  # remove any strict-egress sidecar + per-project network (best-effort)
@@ -1599,7 +1673,121 @@ def delete_project(slug: str, *, keep_workspace: bool = False) -> Result:
             projects_registry.delete_definition(slug)  # LAST: the source-of-truth removal
     except OSError as exc:
         return _lock_error(slug, exc)
-    return Result(True, f"deleted {slug}: removed container + registry entry; {state_note}")
+    relay_note = _relay_forget(slug, senders)
+    return Result(True, f"deleted {slug}: removed container + registry entry; {state_note}"
+                        + (f"; {relay_note}" if relay_note else ""))
+
+
+def _relay_forget(slug: str, senders: set[str]) -> str:
+    """Relay cleanup after ``slug`` is deleted: drop it from every other project's helpdesk sender
+    allowlist (so a NEW project reusing the slug inherits no permissions), reject its pending
+    requests, and re-stamp the affected projects' relay surface (its senders lose it from their
+    directory). Best-effort → a note ('' = nothing to say)."""
+    from .relay import engine as relay_engine   # lazy: the engine imports lifecycle
+
+    touched = set(senders)
+    dropped = []
+    for p in projects_registry.list_projects():
+        if slug not in p.helpdesk.accepts_from or p.helpdesk.error:
+            continue
+        try:
+            with _slug_lock(p.slug):
+                projects_registry.set_helpdesk(p.slug, dataclasses.replace(
+                    p.helpdesk, accepts_from=tuple(s for s in p.helpdesk.accepts_from if s != slug)))
+            touched.add(p.slug)
+            dropped.append(p.slug)
+        except (OSError, ValidationError, ValueError):
+            continue
+    notes = []
+    if dropped:
+        notes.append(f"removed from the helpdesk allowlist of {', '.join(sorted(dropped))}")
+    closed = relay_engine.abandon_project(slug)
+    if closed:
+        notes.append(f"rejected {closed} pending relay request(s)")
+    refresh = _relay_refresh(touched)
+    if refresh:
+        notes.append(refresh)
+    return "; ".join(notes)
+
+
+# ---------------------------------------------------------------------------
+# Helpdesk (cross-project relay — docs/RELAY.md): registry-only + flocked, then the relay surface of
+# every affected project (this one + its senders, before and after) is re-stamped at once. The relay
+# itself is host-side, so a helpdesk change never needs a recreate.
+# ---------------------------------------------------------------------------
+def _helpdesk_update(slug: str, change: Callable[[Helpdesk], Helpdesk], verb: str) -> Result:
+    if not projects_registry.exists(slug):
+        return Result(False, f"no project {slug!r}")
+    try:
+        with _slug_lock(slug):
+            before = projects_registry.load(slug)
+            if before.helpdesk.error:
+                return Result(False, f"{slug}'s [project.helpdesk] is invalid ({before.helpdesk.error}) "
+                                     f"— fix it in {config.project_toml_path(slug)}")
+            try:
+                after = projects_registry.set_helpdesk(slug, change(before.helpdesk))
+            except (ValidationError, ValueError) as exc:
+                return Result(False, str(exc))
+    except OSError as exc:
+        return _lock_error(slug, exc)
+    everyone = projects_registry.list_projects()
+    note = _relay_refresh(relay_context.affected(slug, before, after, everyone))
+    state = "on" if after.helpdesk.enabled else "off (needs at least one sender and one task)"
+    return Result(True, f"{slug}: {verb}; helpdesk {state}" + (f"; {note}" if note else ""))
+
+
+def helpdesk_allow(slug: str, sender: str) -> Result:
+    """Let ``sender`` (a registered project) send requests to ``slug``. Idempotent."""
+    if not projects_registry.exists(sender):
+        return Result(False, f"no project {sender!r} — only registered projects can be allowed")
+    return _helpdesk_update(
+        slug, lambda h: h if sender in h.accepts_from
+        else dataclasses.replace(h, accepts_from=h.accepts_from + (sender,)),
+        f"accepts requests from {sender}")
+
+
+def helpdesk_disallow(slug: str, sender: str) -> Result:
+    """Stop accepting requests from ``sender``. Idempotent. Requests it already queued are re-checked
+    by the relay before they run, so they're rejected rather than served."""
+    return _helpdesk_update(
+        slug, lambda h: dataclasses.replace(
+            h, accepts_from=tuple(s for s in h.accepts_from if s != sender)),
+        f"no longer accepts requests from {sender}")
+
+
+def helpdesk_set(slug: str, *, approve: str | None = None, autostart: bool | None = None) -> Result:
+    """Set the helpdesk-wide defaults: ``approve`` (operator|auto — for tasks without their own) and
+    ``autostart`` (start the stopped container to serve a request)."""
+    changes: dict = {}
+    if approve is not None:
+        changes["approve"] = approve
+    if autostart is not None:
+        changes["autostart"] = autostart
+    if not changes:
+        return Result(False, "nothing to set (pass approve and/or autostart)")
+    desc = ", ".join(f"{k} = {('on' if v else 'off') if isinstance(v, bool) else v}"
+                     for k, v in changes.items())
+    return _helpdesk_update(slug, lambda h: dataclasses.replace(h, **changes), desc)
+
+
+def helpdesk_task_add(slug: str, task: HelpTask, *, replace: bool = False) -> Result:
+    """Add (or with ``replace``, overwrite) a helpdesk task."""
+    def change(h: Helpdesk) -> Helpdesk:
+        existing = h.task(task.name)
+        if existing is not None and not replace:
+            raise ValueError(f"{slug} already offers a task {task.name!r} (remove it first, or replace)")
+        kept = tuple(t for t in h.tasks if t.name != task.name)
+        return dataclasses.replace(h, tasks=kept + (task,))
+    return _helpdesk_update(slug, change, f"task {task.name!r} {'saved' if replace else 'added'}")
+
+
+def helpdesk_task_rm(slug: str, name: str) -> Result:
+    """Remove a helpdesk task (queued requests for it are rejected before they run)."""
+    def change(h: Helpdesk) -> Helpdesk:
+        if h.task(name) is None:
+            raise ValueError(f"{slug} has no helpdesk task {name!r}")
+        return dataclasses.replace(h, tasks=tuple(t for t in h.tasks if t.name != name))
+    return _helpdesk_update(slug, change, f"task {name!r} removed")
 
 
 # ---------------------------------------------------------------------------

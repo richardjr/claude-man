@@ -38,6 +38,8 @@ from .schema import (
     DEFAULT_SYNC_CLAUDE,
     DEFAULT_SYNC_WORKSPACE,
     EnvMount,
+    HELP_TIMEOUT_DEFAULT,
+    Helpdesk,
     PortMapping,
     Project,
     Repo,
@@ -96,6 +98,10 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
                             bind=p.get("bind", "127.0.0.1"), proto=p.get("proto", "tcp"))
         for p in proj.get("ports", [])
     )
+    helpdesk_tbl = proj.get("helpdesk", {}) or {}
+    helpdesk = Helpdesk.lenient(helpdesk_tbl) if helpdesk_tbl else Helpdesk()
+    if slug in helpdesk.accepts_from:  # a hand-edited self-reference: flag, don't crash the load
+        helpdesk = Helpdesk(error=f"{slug!r} can't accept requests from itself", raw=dict(helpdesk_tbl))
     sync_tbl = proj.get("sync", {}) or {}
     sync = Sync(
         enabled=bool(sync_tbl.get("enabled", True)),
@@ -124,6 +130,7 @@ def _parse(data: dict, slug_hint: str | None = None) -> Project:
         model=str(proj.get("model", "") or ""),
         claude_model=str(proj.get("claude_model", "") or ""),
         auth=str(proj.get("auth", config.DEFAULT_AUTH) or config.DEFAULT_AUTH),
+        helpdesk=helpdesk,
     )
 
 
@@ -255,12 +262,78 @@ def save(project: Project) -> Path:
             synct["claude"] = list(project.sync.claude)
         proj["sync"] = synct
 
+    if project.helpdesk.configured:
+        proj["helpdesk"] = _helpdesk_table(project.helpdesk)
+
     doc["project"] = proj
 
     path = config.project_toml_path(project.slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, tomlkit.dumps(doc))
     return path
+
+
+def _helpdesk_table(h: Helpdesk):
+    """The canonical ``[project.helpdesk]`` tomlkit table (defaults omitted; a task's params as an
+    inline table; a multi-line prompt as a multi-line string). A load-time-FLAGGED helpdesk writes its
+    raw table back verbatim so a since-tightened rule never erases the operator's config."""
+    import tomlkit
+
+    if h.error:
+        return h.raw
+    t = tomlkit.table()
+    t["from"] = list(h.accepts_from)
+    if h.approve != "operator":
+        t["approve"] = h.approve
+    if h.autostart:
+        t["autostart"] = True
+    if h.tasks:
+        arr = tomlkit.aot()
+        for task in h.tasks:
+            row = tomlkit.table()
+            row["name"] = task.name
+            if task.summary:
+                row["summary"] = task.summary
+            if task.params:
+                params = tomlkit.inline_table()
+                for name, desc in task.params:
+                    params[name] = desc
+                row["params"] = params
+            if task.permission != "default":
+                row["permission"] = task.permission
+            if task.approve:
+                row["approve"] = task.approve
+            if task.timeout != HELP_TIMEOUT_DEFAULT:
+                row["timeout"] = task.timeout
+            if task.prompt:
+                row["prompt"] = (tomlkit.string(task.prompt + "\n", multiline=True)
+                                 if "\n" in task.prompt else task.prompt)
+            arr.append(row)
+        t["task"] = arr
+    return t
+
+
+def set_helpdesk(slug: str, helpdesk: Helpdesk) -> Project:
+    """Replace the project's ``[project.helpdesk]`` table (comment-preserving elsewhere in the file,
+    atomic write). Pure registry edit — re-stamping the relay context blocks into the affected
+    projects' binds is the caller's job (``lifecycle`` helpdesk verbs). Validated via the dataclasses
+    (incl. the no-self-sender rule); an unconfigured helpdesk drops the table (terse template)."""
+    try:
+        import tomlkit
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("writing project TOML requires the 'tomlkit' dependency") from exc
+
+    project = load(slug)
+    updated = dataclasses.replace(project, helpdesk=helpdesk)  # ValidationError (e.g. self-sender)
+    path = config.project_toml_path(slug)
+    doc = tomlkit.parse(path.read_text())
+    proj = doc["project"]
+    if helpdesk.configured:
+        proj["helpdesk"] = _helpdesk_table(helpdesk)
+    elif "helpdesk" in proj:
+        del proj["helpdesk"]
+    _atomic_write(path, tomlkit.dumps(doc))
+    return updated
 
 
 def _rewrite_array(slug: str, key: str, rows: list[dict]) -> None:
@@ -356,16 +429,17 @@ def add_repo(slug: str, url: str, *, branch: str = "main", dir: str = "") -> Pro
     project = load(slug)  # FileNotFoundError if undefined — let it propagate
     new = Repo(url=url.strip(), branch=(branch or "main"), dir=(dir or "").strip())
     resolved = new.resolved_dir()
-    # A repo dir at (or under) the scratch dir or the per-session TMPDIR would be WIPED on every
-    # container start/stop — refuse at the add boundary (not in schema.Repo, which re-fires on load
-    # and would lock an operator out of a project for a since-cloned repo literally named "scratch").
-    # Clear, recoverable via dir=.
-    for dirname, what in ((config.SCRATCH_DIRNAME, "ephemeral scratch dir"),
-                          (config.TMP_DIRNAME, "per-session temp dir (TMPDIR)")):
+    # A repo dir at (or under) the scratch dir, the per-session TMPDIR or the relay mailbox would be
+    # WIPED (on every container start/stop, or when the project stops being a relay requester) —
+    # refuse at the add boundary (not in schema.Repo, which re-fires on load and would lock an
+    # operator out of a project for a since-cloned repo literally named "scratch"). Recoverable via dir=.
+    for dirname, what in ((config.SCRATCH_DIRNAME, "ephemeral scratch dir wiped on every start/stop"),
+                          (config.TMP_DIRNAME, "per-session temp dir (TMPDIR) wiped on every start/stop"),
+                          (config.RELAY_DIRNAME, "relay mailbox claude-man rewrites and removes")):
         if resolved == dirname or resolved.startswith(dirname + "/"):
             raise ValidationError(
-                f"repo dir {resolved!r} would live under /workspace/{dirname}/, the {what} wiped "
-                f"on every start/stop — pass an explicit dir="
+                f"repo dir {resolved!r} would live under /workspace/{dirname}/, the {what} "
+                f"— pass an explicit dir="
             )
     for existing in project.repos:
         if existing.url == new.url:

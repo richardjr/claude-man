@@ -718,8 +718,10 @@ class AuthSpecValidationTest(unittest.TestCase):
 # (pinned against REAL captured streams in tests/fixtures/{claude,codex}/); lifecycle.run
 # ---------------------------------------------------------------------------
 import dataclasses  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
 import subprocess  # noqa: E402
+import threading  # noqa: E402
 
 from claudeman.agents import run as run_mod  # noqa: E402
 
@@ -847,7 +849,7 @@ class LifecycleRunTest(unittest.TestCase):
         proc = mock.Mock()
         proc.stdin = mock.Mock()
         proc.stdout = iter(lines + ["not json\n"])
-        proc.stderr = mock.Mock(read=lambda: stderr)
+        proc.stderr = io.StringIO(stderr)
         proc.returncode = rc
         proc.wait = mock.Mock()
         return proc
@@ -891,6 +893,51 @@ class LifecycleRunTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lifecycle.run_exec_argv(Project(slug="d", agent="fake"), agents.RunRequest("x"))
             self.assertFalse(lifecycle.run(Project(slug="d", agent="fake"), agents.RunRequest("x")).ok)
+
+    def _silent_proc(self):
+        """A run whose agent never writes and never exits on its own — only kill() ends it."""
+        killed = threading.Event()
+
+        def stdout():
+            killed.wait(10)
+            return
+            yield  # unreachable — makes this a generator
+
+        proc = mock.Mock()
+        proc.stdin = mock.Mock()
+        proc.stdout = stdout()
+        proc.stderr = io.StringIO("")
+        proc.poll = lambda: -9 if killed.is_set() else None
+        proc.kill = killed.set
+        proc.returncode = -9
+        proc.wait = mock.Mock()
+        return proc
+
+    def test_timeout_is_enforced_while_the_agent_is_silent(self) -> None:
+        proc = self._silent_proc()
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: True), \
+                mock.patch.object(subprocess, "Popen", return_value=proc), \
+                mock.patch.object(subprocess, "run") as stop, \
+                mock.patch("claudeman.tui.terminals.claude_already_running", lambda slug, **kw: False):
+            out = lifecycle.run(self.project, agents.RunRequest("x"), timeout=0.6)
+        self.assertFalse(out.ok)
+        self.assertIn("timed out", out.detail)
+        # …and the in-container agent is stopped, not just the exec client.
+        argv = stop.call_args[0][0]
+        self.assertEqual(argv[:3], ["docker", "exec", "claude-man-demo"])
+        self.assertIn("kill -TERM", argv[-1])
+
+    def test_cancel_stops_a_run(self) -> None:
+        proc = self._silent_proc()
+        cancel = threading.Event()
+        threading.Timer(0.3, cancel.set).start()
+        with mock.patch.object(lifecycle.runner, "is_running", lambda slug: True), \
+                mock.patch.object(subprocess, "Popen", return_value=proc), \
+                mock.patch.object(subprocess, "run"), \
+                mock.patch("claudeman.tui.terminals.claude_already_running", lambda slug, **kw: False):
+            out = lifecycle.run(self.project, agents.RunRequest("x"), cancel=cancel)
+        self.assertFalse(out.ok)
+        self.assertEqual(out.detail, "run cancelled")
 
     def test_refuses_when_not_running_or_agent_live(self) -> None:
         with mock.patch.object(lifecycle.runner, "is_running", lambda slug: False):

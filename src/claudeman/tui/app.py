@@ -27,6 +27,7 @@ from ..docker import runner, stats, status
 from ..registry import profiles as profiles_registry
 from ..registry import projects
 from ..registry import schema
+from ..relay import engine as relay_engine
 from . import rowfx
 from . import setupview
 from . import terminals
@@ -37,6 +38,7 @@ from .screens.create import NewProject, NewProjectScreen
 from .screens.delete_project import DeleteProjectScreen
 from .screens.egress import EgressScreen
 from .screens.env_mounts import EnvMountsScreen
+from .screens.helpdesk import HelpdeskScreen
 from .screens.logs import LogsScreen
 from .screens.menu import MenuScreen
 from .screens.overlay_select import OverlaySelectScreen
@@ -51,6 +53,7 @@ from .screens.shutdown import ShutdownScreen
 from .screens.stop_all_confirm import StopAllConfirmScreen
 from .screens.models import ModelsScreen
 from .screens.remove_repo import RemoveRepoScreen
+from .screens.requests import RequestsScreen
 from .screens.settings import SettingsScreen
 from .screens.setup import SetupWizardScreen
 from .screens.splash import SplashScreen
@@ -86,9 +89,20 @@ _HIDE_LOG_BELOW = 26
 _KEYBAR = (
     "[dim]project[/] [b]↵[/b] shell  [b]c[/b] claude  [b]e[/b] editor  [b]b[/b] browse  "
     "[b]s[/b] start/stop  [b]g[/b] repos…  [b]p[/b] project…  [b]y[/b] sync-back\n"
-    "[dim]global[/]  [b]n[/b] new  [b]S[/b] stop-all  [b]v[/b] view…  [b]m[/b] models  "
-    "[b],[/b] settings  [b]q[/b] quit"
+    "[dim]global[/]  [b]n[/b] new  [b]S[/b] stop-all  [b]r[/b] requests  [b]v[/b] view…  "
+    "[b]m[/b] models  [b],[/b] settings  [b]q[/b] quit"
 )
+
+
+class _TuiRelayBackend(relay_engine.Backend):
+    """The relay's docker side inside the TUI: never autostart/run into a project with an in-flight
+    lifecycle worker (``_busy`` — e.g. a recreate), so the relay can't race the operator."""
+
+    def __init__(self, app: ClaudeManApp) -> None:
+        self._app = app
+
+    def reserved(self, project) -> bool:
+        return project.slug in self._app._busy
 
 
 class ClaudeManApp(App):
@@ -123,8 +137,8 @@ class ClaudeManApp(App):
     # The key bar stays compact: the highest-frequency verbs are top-level single keys; the
     # lower-frequency repo / lifecycle / view verbs live behind the g/p/v submenus (MenuScreen) so the
     # bar doesn't grow a key per action. Add/Remove-repo, Refresh-git, Pull-all -> g; Env-mounts,
-    # Ports, Packs, Tools, Egress, Overlay, Model, Profile, Recreate, Delete -> p; Usage/Logs -> v. The action_* handlers reused
-    # unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
+    # Ports, Packs, Tools, Egress, Overlay, Model, Profile, Auth, Run, Helpdesk, Recreate, Delete -> p;
+    # Usage/Logs -> v. The action_* handlers reused unchanged, dispatched via _on_menu_pick. Order mirrors _KEYBAR: project-scoped first, then
     # global (the custom #keybar Static renders the grouping; descriptions still feed the palette).
     BINDINGS = [
         # project-scoped — act on the cursor's row
@@ -145,6 +159,7 @@ class ClaudeManApp(App):
         # frozen. The alias is show=False so it's not a duplicate row in the command palette.
         Binding("S", "stop_all", "Stop all", key_display="S"),
         Binding("shift+s", "stop_all", "Stop all", show=False),
+        Binding("r", "requests", "Requests"),
         Binding("v", "view_menu", "View…"),
         Binding("comma", "settings", "Settings", key_display=","),
         Binding("m", "models", "Models"),
@@ -169,6 +184,7 @@ class ClaudeManApp(App):
         ("f", "Profile…", "profile"),
         ("a", "Auth…", "auth"),
         ("u", "Run prompt (headless)…", "run"),
+        ("h", "Helpdesk (relay)…", "helpdesk"),
         ("r", "Recreate", "recreate"),
         ("d", "Delete", "delete"),
     ]
@@ -249,6 +265,13 @@ class ClaudeManApp(App):
         # by screen_change_signal (fires on every push/pop) — see _sync_keybar.
         self.screen_change_signal.subscribe(self, self._sync_keybar)
         self._reflow_panels()  # set the initial panel set for the starting terminal size
+        # The cross-project relay (docs/RELAY.md) runs in-process while the TUI is open: a thread
+        # worker ticks it every couple of seconds. Only one process relays at a time (a state-tier
+        # flock) — if `claudemanctl relay run` already holds it, ticks just retry until it's free.
+        self._relay = relay_engine.Relay(on_log=self._relay_log_threadsafe,
+                                         backend=_TuiRelayBackend(self))
+        self._relay_here = False
+        self.set_interval(relay_engine.TICK_S, self._relay_tick)
         self.refresh_projects()
         self.refresh_usage()
         self._dispatch_gitstate(fetch=False)
@@ -1085,6 +1108,7 @@ class ClaudeManApp(App):
             "profile": self.action_profile,
             "auth": self.action_auth,
             "run": self.action_run,
+            "helpdesk": self.action_helpdesk,
             "recreate": self.action_recreate,
             "delete": self.action_delete_project,
             "refresh_usage": self.action_refresh_usage,
@@ -1469,6 +1493,44 @@ class ClaudeManApp(App):
         except Exception as exc:  # noqa: BLE001 - a background worker must never tear down the app
             res = lifecycle.Result(False, f"run failed for {slug!r}: {exc!r}")
         self.call_from_thread(self._after_action, slug, res)
+
+    # -- cross-project relay (docs/RELAY.md) ------------------------------
+    @work(thread=True, exclusive=True, group="relay")
+    def _relay_tick(self) -> None:
+        """One relay pass off the UI thread (ingest every project's outbox, schedule dispatches).
+        The engine serialises overlapping ticks itself; dispatches run on their own threads."""
+        try:
+            self._relay_here = self._relay.tick()
+        except Exception as exc:  # noqa: BLE001 - a relay fault must never tear down the app
+            self._relay_log_threadsafe(f"relay: tick failed: {exc!r}")
+
+    def _relay_log_threadsafe(self, msg: str, *, attention: bool = False) -> None:
+        try:
+            self.call_from_thread(self._relay_log, msg, attention)
+        except Exception:  # noqa: BLE001 - app shutting down
+            pass
+
+    def _relay_log(self, msg: str, attention: bool) -> None:
+        self._log(f"[{'yellow' if attention else 'cyan'}]{escape(msg)}[/]")
+        if attention:
+            self.notify(f"{msg}\n(r to review)", title="relay", severity="warning", timeout=12,
+                        markup=False)
+
+    def on_unmount(self) -> None:
+        relay = getattr(self, "_relay", None)
+        if relay is not None:
+            relay.close()
+
+    def action_requests(self) -> None:
+        self.push_screen(RequestsScreen(lambda: self._relay_here))
+
+    def action_helpdesk(self) -> None:
+        slug = self._current_slug()
+        if not slug or not projects.exists(slug):  # TUI-6: act on real registry entries only
+            self._log("[red]helpdesk: select a defined project (orphan rows aren't managed)[/]")
+            return
+        self._log(f"managing the relay helpdesk for {slug} (changes apply at once — no recreate)")
+        self.push_screen(HelpdeskScreen(slug))
 
     # -- auth mode (token | login) ----------------------------------------
     def action_auth(self) -> None:

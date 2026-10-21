@@ -556,6 +556,21 @@ def build_claude_probe_argv(slug: str, *, provider: AgentProvider = agents.DEFAU
     return ["docker", "exec", config.container_name(slug), "sh", "-c", _probe_sh(provider.proc_comm)]
 
 
+def build_agent_stop_argv(slug: str, *, provider: AgentProvider = agents.DEFAULT) -> list[str]:
+    """Pure: argv TERMinating every agent process (``provider.proc_comm``) inside the container — the
+    same /proc comm walk as the probe. Used when a headless run times out or is cancelled: killing the
+    ``docker exec`` client alone leaves the in-container agent running (and holding the one-agent
+    slot, invariant 6)."""
+    validate_slug(slug)
+    script = (
+        'for c in /proc/[0-9]*/comm; do '
+        f'read -r n < "$c" 2>/dev/null && [ "$n" = {provider.proc_comm} ] && '
+        '{ p=${c%/comm}; kill -TERM "${p#/proc/}" 2>/dev/null; }; '
+        'done; exit 0'
+    )
+    return ["docker", "exec", config.container_name(slug), "sh", "-c", script]
+
+
 def claude_already_running(slug: str, *, provider: AgentProvider | None = None) -> bool:
     """True if the project's agent process (``provider.proc_comm``; the registry's provider when
     ``provider`` is None) is already live in the container. Fails OPEN (False) on any probe error —

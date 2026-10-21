@@ -1680,6 +1680,226 @@ def cmd_doctor(args) -> int:
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpdesk + relay (cross-project requests — docs/RELAY.md)
+# ---------------------------------------------------------------------------
+def _print_res(res) -> int:
+    print(res.detail, file=sys.stderr if not res.ok else sys.stdout)
+    return 0 if res.ok else 1
+
+
+def cmd_project_helpdesk_show(args) -> int:
+    from .relay import policy
+
+    if not projects.exists(args.slug):
+        print(f"no project {args.slug!r}", file=sys.stderr)
+        return 1
+    project = projects.load(args.slug)
+    everyone = projects.list_projects()
+    h = project.helpdesk
+    if h.error:
+        print(f"helpdesk: INVALID — {h.error} (edit {config.project_toml_path(args.slug)})")
+    else:
+        print(f"helpdesk: {'on' if h.enabled else 'off'}"
+              + ("" if h.enabled else " (needs at least one sender and one task)"))
+        print(f"  accepts from: {', '.join(h.accepts_from) or '(nobody)'}")
+        print(f"  approve: {h.approve} (default for tasks)   autostart: {'on' if h.autostart else 'off'}")
+        for t in h.tasks:
+            params = " ".join(f"{n}=<{d or n}>" for n, d in t.params)
+            print(f"  task {t.name}{(' ' + params) if params else ''}")
+            if t.summary:
+                print(f"      {t.summary}")
+            print(f"      permission {t.permission} · approve {h.approval_for(t)}"
+                  f"{'' if t.approve else ' (inherited)'} · timeout {t.timeout}s"
+                  f"{' · free-form (the note is the request)' if not t.prompt else ''}")
+            for line in t.prompt.splitlines()[:6]:
+                print(f"      | {line}")
+            if len(t.prompt.splitlines()) > 6:
+                print("      | …")
+    offers = policy.offers_for(project, everyone)
+    print(f"can ask: {', '.join(o.target for o in offers) or '(no project accepts requests from it)'}")
+    return 0
+
+
+def cmd_project_helpdesk_allow(args) -> int:
+    from . import lifecycle
+    return _print_res(lifecycle.helpdesk_allow(args.slug, args.sender))
+
+
+def cmd_project_helpdesk_disallow(args) -> int:
+    from . import lifecycle
+    return _print_res(lifecycle.helpdesk_disallow(args.slug, args.sender))
+
+
+def cmd_project_helpdesk_set(args) -> int:
+    from . import lifecycle
+    autostart = None if args.autostart is None else args.autostart == "on"
+    return _print_res(lifecycle.helpdesk_set(args.slug, approve=args.approve, autostart=autostart))
+
+
+def cmd_project_helpdesk_task_add(args) -> int:
+    from . import lifecycle
+    from .registry.schema import HelpTask, ValidationError, parse_duration
+
+    params = []
+    for spec in args.param or []:
+        name, sep, desc = spec.partition("=")
+        if not sep:
+            desc = ""
+        params.append((name.strip(), desc.strip()))
+    prompt = args.prompt or ""
+    if args.prompt_file:
+        try:
+            prompt = sys.stdin.read() if args.prompt_file == "-" else open(args.prompt_file).read()
+        except OSError as exc:
+            print(f"could not read {args.prompt_file}: {exc}", file=sys.stderr)
+            return 1
+    try:
+        task = HelpTask(name=args.name, summary=args.summary or "", params=tuple(params),
+                        prompt=prompt, permission=args.permission,
+                        approve="" if args.approve == "inherit" else args.approve,
+                        timeout=parse_duration(args.timeout))
+    except ValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return _print_res(lifecycle.helpdesk_task_add(args.slug, task, replace=args.replace))
+
+
+def cmd_project_helpdesk_task_rm(args) -> int:
+    from . import lifecycle
+    return _print_res(lifecycle.helpdesk_task_rm(args.slug, args.name))
+
+
+def _age(iso: str) -> str:
+    import time
+
+    from .relay import store
+
+    secs = max(0, int(time.time() - store.parse_iso(iso)))
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= n:
+            return f"{secs // n}{unit}"
+    return f"{secs}s"
+
+
+def cmd_relay_run(args) -> int:
+    import time
+
+    from .relay import engine, store
+
+    def log(msg: str, *, attention: bool = False) -> None:
+        print(("! " if attention else "") + msg, flush=True)
+
+    relay = engine.Relay(on_log=log)
+    try:
+        here = relay.tick()
+    except Exception as exc:  # noqa: BLE001 - report, then keep relaying if we hold the lock
+        print(f"relay: pass failed: {exc!r}", file=sys.stderr, flush=True)
+        here = relay.lock.held
+    if not here:
+        pid = store.relay_holder_pid()
+        print(f"a relay is already running{f' (pid {pid})' if pid else ''} — e.g. the TUI; "
+              f"only one process relays at a time", file=sys.stderr)
+        return 1
+    if args.once:
+        relay.wait_idle(timeout=float(args.wait))
+        relay.close()
+        return 0
+    print(f"relay running (every {args.interval}s; Ctrl-C to stop) — "
+          f"`claudemanctl relay list` in another shell to see requests", flush=True)
+    try:
+        while True:
+            time.sleep(args.interval)
+            try:
+                relay.tick()
+            except Exception as exc:  # noqa: BLE001 - keep relaying; one bad pass isn't fatal
+                print(f"relay: pass failed: {exc!r}", file=sys.stderr, flush=True)
+    except KeyboardInterrupt:
+        active = relay.active()
+        if active:
+            print(f"stopping — in-flight request(s) for {', '.join(active)} are abandoned (the next "
+                  f"relay marks them failed)", file=sys.stderr)
+        return 0
+    finally:
+        relay.close()
+
+
+def cmd_relay_list(args) -> int:
+    from .relay import protocol, store
+
+    recs = store.list_records()
+    if args.project:
+        recs = [r for r in recs if args.project in (r.sender, r.target)]
+    shown = recs if args.all else [r for r in recs if r.status in protocol.OPEN]
+    hidden = len(recs) - len(shown)
+    holder = store.relay_holder_pid()
+    print(f"relay: {'running (pid ' + str(holder) + ')' if holder else 'NOT running — open the TUI or `claudemanctl relay run`'}")
+    if not shown:
+        print("no open requests" + (f" ({hidden} finished — --all to show)" if hidden else ""))
+        return 0
+    print(f"{'ID':<24} {'FROM → TO':<34} {'TASK':<16} {'STATUS':<18} {'AGE':>4}  DETAIL")
+    for r in shown:
+        route = f"{r.sender} → {r.target}"
+        print(f"{r.id:<24} {route:<34} {r.task:<16} {r.status:<18} {_age(r.created):>4}  {r.detail[:70]}")
+    if hidden:
+        print(f"({hidden} finished request(s) hidden — --all to show)")
+    return 0
+
+
+def cmd_relay_show(args) -> int:
+    from .relay import store
+
+    rid, err = store.resolve_id(args.id)
+    if rid is None:
+        print(err, file=sys.stderr)
+        return 1
+    r = store.load(rid)
+    print(f"request {r.id}: {r.sender} → {r.target}  task {r.task}  [{r.status}]")
+    print(f"  created {r.created}  updated {r.updated}"
+          + (f"  started {r.started}" if r.started else "") + (f"  finished {r.finished}" if r.finished else ""))
+    if r.approval:
+        print(f"  approval: {r.approval}" + (f" — {r.approval_reason}" if r.approval_reason else "")
+              + (f" (approved by {r.approved_by})" if r.approved_by else ""))
+    if r.parent:
+        print(f"  raised while serving {r.parent} (chain: {' ← '.join(r.chain)})")
+    if r.params:
+        print("  params: " + ", ".join(f"{k}={v}" for k, v in r.params.items()))
+    if r.detail:
+        print(f"  detail: {r.detail}")
+    if r.note:
+        print("  note:")
+        for line in r.note.splitlines():
+            print(f"    {line}")
+    if r.reply:
+        print("  reply:")
+        for line in r.reply.splitlines():
+            print(f"    {line}")
+    if r.session_id:
+        print(f"  session: {r.session_id} (resume in {r.target}: claude --resume {r.session_id})")
+    events = store.events_for(r.id)
+    if events:
+        print("  events:")
+        for ev in events:
+            print(f"    {ev.get('ts', '')}  {ev.get('event', ''):<18} by {ev.get('by', '')}"
+                  + (f"  {ev['detail']}" if ev.get("detail") else ""))
+    return 0
+
+
+def cmd_relay_approve(args) -> int:
+    from .relay import engine
+    return _print_res(engine.approve(args.id))
+
+
+def cmd_relay_deny(args) -> int:
+    from .relay import engine
+    return _print_res(engine.deny(args.id, args.reason or ""))
+
+
+def cmd_relay_cancel(args) -> int:
+    from .relay import engine
+    return _print_res(engine.cancel(args.id))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="claudemanctl", description="Manage claude-man projects.")
     p.add_argument("--version", action="version", version=f"claude-man {__version__}")
@@ -1945,6 +2165,78 @@ def build_parser() -> argparse.ArgumentParser:
     psy.add_argument("--in", dest="in_", action="store_true",
                      help="force sync-IN (asset source -> binds; source wins)")
     psy.set_defaults(func=cmd_project_sync)
+
+    # helpdesk (the TARGET side of the cross-project relay — docs/RELAY.md)
+    phd = proj.add_parser(
+        "helpdesk", help="cross-project requests this project accepts (docs/RELAY.md)"
+    ).add_subparsers(dest="hdcmd", required=True)
+    phs = phd.add_parser("show", help="the project's helpdesk (senders, tasks) + who it can ask")
+    phs.add_argument("slug", type=_slug_arg)
+    phs.set_defaults(func=cmd_project_helpdesk_show)
+    pha = phd.add_parser("allow", help="let another project send requests to this one")
+    pha.add_argument("slug", type=_slug_arg)
+    pha.add_argument("sender", type=_slug_arg, help="the project allowed to ask")
+    pha.set_defaults(func=cmd_project_helpdesk_allow)
+    phx = phd.add_parser("disallow", help="stop accepting requests from a project")
+    phx.add_argument("slug", type=_slug_arg)
+    phx.add_argument("sender", type=_slug_arg)
+    phx.set_defaults(func=cmd_project_helpdesk_disallow)
+    phset = phd.add_parser("set", help="helpdesk defaults: approval for tasks + autostart")
+    phset.add_argument("slug", type=_slug_arg)
+    phset.add_argument("--approve", choices=("operator", "auto"),
+                       help="default approval for tasks that don't set their own")
+    phset.add_argument("--autostart", choices=("on", "off"),
+                       help="start this project's container to serve a request when it's stopped")
+    phset.set_defaults(func=cmd_project_helpdesk_set)
+    pht = phd.add_parser("task", help="the tasks the helpdesk offers").add_subparsers(
+        dest="taskcmd", required=True)
+    phta = pht.add_parser("add", help="offer a task (its prompt template, permission, approval, timeout)")
+    phta.add_argument("slug", type=_slug_arg)
+    phta.add_argument("name", help="task name (lowercase, e.g. dev-up)")
+    phta.add_argument("--summary", help="one line shown to requesters")
+    phta.add_argument("--param", action="append", metavar="NAME=DESCRIPTION",
+                      help="a required param, filled into {NAME} in the prompt (repeatable)")
+    phta.add_argument("--prompt", help="the prompt template ({param} placeholders; omit for a free-form "
+                                        "task whose note is the request)")
+    phta.add_argument("--prompt-file", metavar="PATH", help="read the prompt template from a file (- = stdin)")
+    phta.add_argument("--permission", choices=agents.PERMISSIONS, default="default",
+                      help="headless permission: default = read-only consult (default), edits, full")
+    phta.add_argument("--approve", choices=("inherit", "operator", "auto"), default="inherit",
+                      help="approval for this task (default: inherit the helpdesk default)")
+    phta.add_argument("--timeout", default="30m", help="wall-clock cap, e.g. 90s / 20m / 2h (default 30m)")
+    phta.add_argument("--replace", action="store_true", help="overwrite an existing task of that name")
+    phta.set_defaults(func=cmd_project_helpdesk_task_add)
+    phtr = pht.add_parser("rm", help="stop offering a task")
+    phtr.add_argument("slug", type=_slug_arg)
+    phtr.add_argument("name")
+    phtr.set_defaults(func=cmd_project_helpdesk_task_rm)
+
+    # relay (the host side of cross-project requests — docs/RELAY.md)
+    rl = sub.add_parser("relay", help="cross-project requests: run the relay, review/approve requests"
+                        ).add_subparsers(dest="cmd", required=True)
+    rlr = rl.add_parser("run", help="run the relay in the foreground (the TUI also runs it while open)")
+    rlr.add_argument("--interval", type=float, default=2.0, help="seconds between passes (default 2)")
+    rlr.add_argument("--once", action="store_true", help="one pass, wait for its dispatches, exit")
+    rlr.add_argument("--wait", type=float, default=1800.0,
+                     help="with --once: max seconds to wait for dispatched runs (default 1800)")
+    rlr.set_defaults(func=cmd_relay_run)
+    rll = rl.add_parser("list", help="open requests (--all for finished too)")
+    rll.add_argument("--all", action="store_true")
+    rll.add_argument("--project", type=_slug_arg, help="only requests from/to this project")
+    rll.set_defaults(func=cmd_relay_list)
+    rls = rl.add_parser("show", help="one request: params, note, reply, events")
+    rls.add_argument("id", help="request id (an unambiguous prefix is fine)")
+    rls.set_defaults(func=cmd_relay_show)
+    rla = rl.add_parser("approve", help="approve a request awaiting the operator")
+    rla.add_argument("id")
+    rla.set_defaults(func=cmd_relay_approve)
+    rld = rl.add_parser("deny", help="deny a request that hasn't started")
+    rld.add_argument("id")
+    rld.add_argument("--reason", help="told to the requesting agent")
+    rld.set_defaults(func=cmd_relay_deny)
+    rlc = rl.add_parser("cancel", help="cancel a request (a running one is stopped, incl. its agent)")
+    rlc.add_argument("id")
+    rlc.set_defaults(func=cmd_relay_cancel)
 
     # packs (browse the curated library — per-project selection lives under `project packs`)
     pk = sub.add_parser("packs", help="the curated pack library (docs/PACKS.md)").add_subparsers(
