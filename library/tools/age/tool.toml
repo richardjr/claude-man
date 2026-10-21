@@ -1,0 +1,40 @@
+# age — simple, modern file encryption (encrypt/decrypt secrets with X25519 recipients, ssh keys or
+# a passphrase; the infrastructure repo's sealed secrets). Pinned release tarball from GitHub. The
+# release ships NO checksums file — it publishes Sigsum transparency `.proof`s instead — so the
+# sha256s below were computed from the downloaded artefacts at pin time (the session-manager-plugin
+# precedent; re-verify on bump). The tarball carries `age`, `age-keygen`, `age-inspect` and the
+# bundled plugins (`age-plugin-tag`/`-batchpass`/`-pq`/`-tagpq`, looked up on PATH as
+# `age-plugin-<name>` when a matching recipient/identity is used) — all installed, by basename.
+# To bump: the latest tag on github.com/FiloSottile/age/releases, download
+# `age-v<v>-linux-amd64.tar.gz` / `age-v<v>-linux-arm64.tar.gz`, `sha256sum` each, re-list members.
+description = "age — file encryption (X25519 / ssh / passphrase recipients)"
+kind = "release"
+version = "1.3.2"
+install = "tar"
+# No runtime egress: age is fully offline (no key servers, no update check).
+
+[release.amd64]
+url = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz"
+sha256 = "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10"
+members = ["age/age", "age/age-keygen", "age/age-inspect", "age/age-plugin-tag", "age/age-plugin-batchpass", "age/age-plugin-pq", "age/age-plugin-tagpq"]
+
+[release.arm64]
+url = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-arm64.tar.gz"
+sha256 = "6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4"
+members = ["age/age", "age/age-keygen", "age/age-inspect", "age/age-plugin-tag", "age/age-plugin-batchpass", "age/age-plugin-pq", "age/age-plugin-tagpq"]
+
+# No read-only-floor redirects needed (invariant 2): age keeps NO state — keys and ciphertext go
+# exactly where `-o`/`-i` point (a key file belongs on the ephemeral /tmp or .cache tmpfs, or in an
+# env-mount — never committed under /workspace), and nothing is written to HOME.
+
+[[smoke]]
+name = "age --version"
+argv = ["age", "--version"]
+expect = "v1.3.2"
+
+# CORE op under the floor: keygen -> encrypt to the public key -> decrypt with the identity, round-
+# tripping a plaintext in a fresh dir on the /tmp tmpfs (network-free, no HOME writes).
+[[smoke]]
+name = "age keygen + encrypt + decrypt round-trip (read-only floor)"
+argv = ["sh", "-lc", "d=\"$(mktemp -d -p /tmp)\" && cd \"$d\" && age-keygen -o key.txt 2>/dev/null && pub=\"$(age-keygen -y key.txt)\" && printf age-ok | age -r \"$pub\" -o msg.age && age -d -i key.txt msg.age"]
+expect = "age-ok"
