@@ -61,6 +61,12 @@ may land in minor versions until 1.0).
   present, canonicalised, floor byte-identical beside it) and `test_settings`.
 
 ### Fixed
+- **TUI crash on Repos… → Pull all** (issue #53): `MountError: Tried to insert 2 widgets with the
+  same ID 'pull-warn'`. The confirm modal gave the fetch-issues warning and the container-running
+  warning the same widget id, so a pull on a running project where any host-side `git fetch` had
+  failed (an ssh remote with no key in the agent, an unknown host key, or an HTTPS remote that needs
+  a prompt) could not open. Each warning now has its own id, and both share a `pull-warn` class for
+  styling.
 - **`yarn install` `ENOSPC` on heavy Node projects** (issue #42): the container's `TMPDIR` was unset,
   so Node's `os.tmpdir()` fell back to `/tmp` — the floor's 512m tmpfs — and Yarn Berry's parallel
   per-package zip conversion overflowed it with a misleading "no space left on device" while
