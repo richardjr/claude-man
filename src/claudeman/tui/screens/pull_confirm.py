@@ -37,7 +37,7 @@ class PullConfirmScreen(ModalScreen["list[str] | None"]):
     #dialog .title { text-style: bold; padding-bottom: 1; }
     #plan { height: auto; max-height: 14; }
     #pull-note { color: $text-muted; padding-top: 1; }
-    #pull-warn { color: $warning; height: auto; }
+    .pull-warn { color: $warning; height: auto; }
     #buttons { height: auto; padding-top: 1; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
@@ -52,13 +52,18 @@ class PullConfirmScreen(ModalScreen["list[str] | None"]):
         with Vertical(id="dialog"):
             yield Label(f"Pull all (ff-only) · {plan.slug}", classes="title")
             yield DataTable(id="plan", cursor_type="row")
+            # Both warnings can show at once (a fetch failed AND the container is up), so each needs
+            # its own id; they share the class for styling (issue #53).
             if plan.fetch_errors:
-                yield Label("fetch issues: " + "; ".join(plan.fetch_errors), id="pull-warn")
+                yield Label(
+                    "fetch issues: " + "; ".join(plan.fetch_errors),
+                    id="pull-fetch-warn", classes="pull-warn",
+                )
             if plan.running:
                 yield Label(
                     "container is RUNNING — a claude session may be editing these files; "
                     "ff-only skips any repo with local changes",
-                    id="pull-warn",
+                    id="pull-running-warn", classes="pull-warn",
                 )
             yield Label(
                 "host-side fast-forward only — no merge commits, no recreate (the /workspace bind "
